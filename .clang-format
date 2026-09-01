@@ -1,0 +1,80 @@
+# clang-format configuration.
+#
+# Based on Google style, which is what the existing code already follows: two-space
+# indent, `public:` at one space, two spaces before a trailing comment, attached
+# braces. Four deliberate departures from the defaults, each for a reason:
+#
+#   ColumnLimit 90, not 80. The kernel launcher signatures carry three pointers, three
+#   int64 dimensions and a stream, and the explanatory comment blocks are the most
+#   valuable text in the repository. At 80 both wrap into something harder to read
+#   than the thing they describe.
+#
+#   ReflowComments: false. This is the important one. Every non-obvious decision in
+#   this project is explained in a comment that was written to be read in a specific
+#   shape -- derivations, worked error bounds, ASCII diagrams of thread-to-data
+#   mappings, numbered failure modes. A formatter that rewraps them will eventually
+#   destroy one of those layouts, and the loss is silent. Lines are kept inside the
+#   limit by hand instead.
+#
+#   SortIncludes: false. Include order here is not arbitrary. engine/config.hpp
+#   defines ENGINE_HAS_CUDA and must precede any header whose contents depend on it;
+#   an alphabetical sort does not know that and would produce a build that fails
+#   confusingly, in the CUDA configuration only. Keeping the order manual costs
+#   nothing on a project this size.
+#
+#   DerivePointerAlignment: false. Google's default infers alignment per file from
+#   whatever that file already does, so a file with one stray `float *p` flips and
+#   then rewrites every other declaration in it. The codebase is consistently
+#   `const float* a`, and that is now enforced rather than guessed.
+#
+# CUDA files are formatted with the same settings -- clang-format treats .cu as C++.
+# AttributeMacros below is what stops it mis-parsing the CUDA keywords.
+#
+#     clang-format -i $(git ls-files '*.cpp' '*.hpp' '*.cu')
+
+---
+Language: Cpp
+BasedOnStyle: Google
+Standard: c++17
+
+ColumnLimit: 90
+IndentWidth: 2
+TabWidth: 2
+UseTab: Never
+AccessModifierOffset: -1
+
+ReflowComments: false
+SortIncludes: false
+IncludeBlocks: Preserve
+
+PointerAlignment: Left
+DerivePointerAlignment: false
+ReferenceAlignment: Left
+
+# Without these, clang-format does not know that __global__, __shared__ and friends
+# are attributes rather than type names, and mis-indents kernel definitions and
+# shared-memory declarations -- which is most of the CUDA in this project.
+AttributeMacros:
+  - __global__
+  - __device__
+  - __host__
+  - __shared__
+  - __constant__
+  - __restrict__
+  - __forceinline__
+  - __launch_bounds__
+
+AllowShortFunctionsOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true
+BreakBeforeBraces: Attach
+NamespaceIndentation: None
+FixNamespaceComments: true
+SpacesBeforeTrailingComments: 2
+MaxEmptyLinesToKeep: 1
+KeepEmptyLinesAtTheStartOfBlocks: false
+AlignAfterOpenBracket: Align
+AlignTrailingComments: true
+Cpp11BracedListStyle: true
+IndentPPDirectives: None
+InsertNewlineAtEOF: true

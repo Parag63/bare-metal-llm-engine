@@ -1,0 +1,89 @@
+# Build directories
+#
+# Everything CMake generates lives in one of these. Nothing in a build directory is
+# ever worth committing: it is all reproducible from the sources plus the configure
+# flags, and the flags themselves are recorded in scripts/ and docs/.
+build/
+build-*/
+cmake-build-*/
+out/
+
+# Generated reference data
+#
+# ~28 MiB of float64 golden files, reproducible in about a second:
+#     python3 tools/gen_reference.py
+# Committing them would mean every regeneration shows up as an unreviewable binary
+# diff, and a stale golden file is worse than a missing one -- a missing one makes the
+# tests skip with an instruction, a stale one makes them fail for the wrong reason.
+tests/golden/
+
+# Benchmark run logs
+#
+# scripts/gpu-run.sh writes a timestamped log here on every run. Numbers that matter
+# get pasted into docs/lab-notebook.md by hand -- deliberately, so that a number
+# entering the permanent record is a decision rather than a side effect of running a
+# script.
+runs/
+
+# Model weights
+#
+# Model files are hundreds of MiB to several GiB. GitHub rejects anything over 100 MiB
+# and a repository that once contained a 4 GiB file stays 4 GiB forever, because git
+# history is immutable. Keep weights outside the repo or under models/.
+models/
+*.gguf
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+
+# Profiler output
+#
+# Nsight Systems and Nsight Compute reports. Frequently larger than the whole source
+# tree. The conclusions belong in the lab notebook; the raw capture does not.
+*.nsys-rep
+*.ncu-rep
+*.qdrep
+*.qdstrm
+*.nvvp
+*.sqlite
+
+# Editor and IDE state
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.vcxproj*
+.cache/
+compile_commands.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+
+# Compiled artifacts that escaped a build directory
+#
+# They should never appear at the top level, but an in-source `cmake .` or a stray
+# manual `g++` invocation puts them there, and an accidentally committed .obj is
+# tedious to notice.
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.dylib
+*.exe
+*.pdb
+*.ilk
+*.exp
+
+# OS clutter
+.DS_Store
+Thumbs.db
+desktop.ini

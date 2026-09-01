@@ -1,0 +1,75 @@
+#pragma once
+//===----------------------------------------------------------------------===//
+// engine/kernels.hpp -- host-side launch API for the CUDA kernels.
+//
+// DESIGN DECISION: these take RAW POINTERS and explicit dimensions, not Tensor.
+//
+// Two reasons, and they both matter:
+//
+//   1. Scheduling. Kernels are your August/December work; Tensor is October's. If
+//      kernels took Tensor, you could not test a single kernel until Tensor was
+//      finished. Raw pointers break that dependency, so the two modules progress
+//      independently.
+//   2. It is the right layering anyway. cuBLAS, cuDNN and llama.cpp's ggml all
+//      expose pointer+dims at the kernel boundary and keep the tensor abstraction
+//      strictly above it. A kernel should not know what a Tensor is.
+//
+// Tensor-aware overloads will be added later as thin wrappers that unpack .data()
+// and .shape() and forward to these. See docs/adr/0003.
+//
+// Every function here mirrors a CPU reference in engine/cpu_ref.hpp with the same
+// name and argument order. That is what makes the test harness a simple A/B compare.
+//===----------------------------------------------------------------------===//
+
+#include <engine/config.hpp>
+
+#if ENGINE_HAS_CUDA
+
+#include <cuda_runtime.h>
+
+#include <cstdint>
+
+namespace engine::cuda {
+
+//===----------------------------------------------------------------------===//
+// All pointers below are DEVICE pointers. Passing a host pointer will not fail
+// at compile time -- it will fault at runtime, or worse, silently read garbage.
+// Use engine::DeviceBuffer<T> (engine/device_buffer.hpp) so the type system helps.
+//
+// `stream = 0` is the default (legacy) stream. Streams become relevant when you
+// overlap H2D copies with compute; until then 0 is correct and simplest.
+//===----------------------------------------------------------------------===//
+
+/// Exercise 1 (WORKED EXAMPLE -- read kernels/vector_add.cu first).
+/// out[i] = a[i] + b[i]
+void vector_add(const float* a, const float* b, float* out, std::int64_t n,
+                cudaStream_t stream = 0);
+
+/// Exercise 2. Sum-reduce `n` elements into a single float.
+/// `out` must point to at least 1 float of DEVICE memory.
+void reduce_sum(const float* x, float* out, std::int64_t n, cudaStream_t stream = 0);
+
+/// Exercise 3. Row-wise softmax of a rows x cols row-major matrix.
+/// Must be numerically stable (subtract the row max) -- see cpu_ref for why.
+void softmax_rows(const float* in, float* out, std::int64_t rows, std::int64_t cols,
+                  cudaStream_t stream = 0);
+
+/// Exercise 4. Row-wise RMSNorm. `weight` may be nullptr.
+void rmsnorm(const float* in, const float* weight, float* out, std::int64_t rows,
+             std::int64_t cols, float eps, cudaStream_t stream = 0);
+
+/// Exercise 5. C[MxN] = A[MxK] * B[KxN], row-major. One thread per output element.
+/// This is the SLOW baseline you will beat -- keep it forever as a benchmark point.
+void matmul_naive(const float* A, const float* B, float* C, std::int64_t M,
+                  std::int64_t N, std::int64_t K, cudaStream_t stream = 0);
+
+/// Exercise 6. Same maths as matmul_naive, but tiled through shared memory.
+/// Target: a large speedup over naive at M=N=K=1024. Explaining *why* it is faster
+/// (arithmetic intensity / global-memory traffic reduced by a factor of TILE) is
+/// the actual deliverable here.
+void matmul_tiled(const float* A, const float* B, float* C, std::int64_t M,
+                  std::int64_t N, std::int64_t K, cudaStream_t stream = 0);
+
+}  // namespace engine::cuda
+
+#endif  // ENGINE_HAS_CUDA

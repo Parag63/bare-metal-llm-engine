@@ -1,0 +1,182 @@
+# Continuous integration.
+#
+# WHAT CI CAN AND CANNOT PROVE FOR THIS PROJECT
+#
+# GitHub runners have no GPU, so nothing here executes a kernel. That limit is
+# structural and worth being precise about, because a green badge that seems to mean
+# more than it does is worse than no badge.
+#
+#   The `cpu` job proves the reference path works on three compilers. This is the
+#   Machine A configuration exactly (docs/01-dev-environment.md): CUDA requested,
+#   absent, and correctly degraded to a CPU-only build per ADR 0001. Windows is in the
+#   matrix because Machine B is a Windows box and MSVC diagnoses a different set of
+#   things than GCC -- catching those here leaves only genuinely CUDA-specific
+#   surprises for the GPU machine.
+#
+#   The `cuda-compile` job proves the kernels COMPILE for sm_89. nvcc does not need a
+#   device to compile, so this catches every syntax error, type error and bad launch
+#   configuration in a .cu file without a GPU anywhere. That directly removes the main
+#   cost of the two-machine split: a kernel written on the laptop no longer has to
+#   reach the 4090 to find out whether it builds. It then runs the suite, where the
+#   kernels tests SKIP on "no CUDA device visible" -- which also exercises the skip
+#   machinery itself.
+#
+#   Neither job proves a kernel computes the right answer. That happens on Machine B,
+#   via scripts/gpu-run.sh, and nowhere else.
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cpu:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-gcc, os: ubuntu-24.04, cc: gcc, cxx: g++ }
+          - { name: linux-clang, os: ubuntu-24.04, cc: clang, cxx: clang++ }
+          - { name: windows-msvc, os: windows-2022, cc: "", cxx: "" }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # numpy, not torch. gen_reference.py supports both and computes in float64
+      # either way, and the tolerances in the tests are derived against float64 truth
+      # rather than against a particular library's output -- so the cheaper backend
+      # gives CI the same guarantee for a 20 MB download instead of an 800 MB one.
+      - name: Install numpy
+        run: python -m pip install --upgrade pip numpy
+
+      - name: Configure
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        # ENGINE_WITH_CUDA is left at its default ON deliberately. No runner has nvcc,
+        # so this asserts the graceful-degradation path from ADR 0001: requesting CUDA
+        # on a machine without it must configure cleanly as CPU-only, never fail.
+        #
+        # ENGINE_WERROR is ON here and off by default locally. A warning should stop
+        # a push, but should not stop you mid-thought while writing a kernel.
+        run: >
+          cmake -B build -S .
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DENGINE_WERROR=ON
+
+      - name: Build
+        run: cmake --build build -j 4
+
+      - name: Generate reference data
+        run: python tools/gen_reference.py --backend numpy
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  cuda-compile:
+    name: linux-cuda-compile
+    # The runner is pinned rather than `ubuntu-latest` because the NVIDIA apt
+    # repository path below is per-distro-version. `latest` moving would break the
+    # install step with an unrelated-looking 404.
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install numpy
+        run: python -m pip install --upgrade pip numpy
+
+      # Installed from NVIDIA's own repository rather than through a third-party
+      # action, and only the three components this project needs: the compiler, the
+      # runtime headers, and cuBLAS for the benchmark baseline. A full toolkit install
+      # is ~5 GB and includes profilers that are useless without a device.
+      #
+      # The version is pinned. When you bump it, bump it here and check that
+      # `nvcc --list-gpu-arch` still lists compute_89 -- anything >= 11.8 does.
+      - name: Install CUDA toolkit
+        run: |
+          set -euo pipefail
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            cuda-nvcc-12-6 cuda-cudart-dev-12-6 libcublas-dev-12-6
+          echo "/usr/local/cuda-12.6/bin" >> "$GITHUB_PATH"
+
+      - name: Show toolkit
+        run: |
+          nvcc --version
+          nvcc --list-gpu-arch | tail -5
+
+      - name: Configure
+        run: >
+          cmake -B build -S .
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DENGINE_CUDA_ARCH=89
+          -DENGINE_WERROR=ON
+
+      # Without this the job is a trap. If CUDA detection silently failed, everything
+      # below would still be green while compiling none of the kernels -- the exact
+      # "green run that proves nothing" failure the test harness is designed to avoid.
+      #
+      # The generated config header is the authority, not CMakeCache.txt:
+      # check_language(CUDA) writes CMAKE_CUDA_COMPILER into the cache either way, as
+      # a path or as NOTFOUND, so grepping for the key would pass in both cases.
+      - name: Assert CUDA was actually enabled
+        run: |
+          if ! grep -q '^#define ENGINE_CUDA_ENABLED 1' build/generated/engine/config.hpp; then
+            echo "CUDA was not enabled -- this job would prove nothing. See the configure log above."
+            exit 1
+          fi
+
+      - name: Build
+        run: cmake --build build -j 4
+
+      - name: Assert the kernel targets were built
+        run: test -x build/bin/bench_kernels && test -x build/bin/engine_tests
+
+      - name: Generate reference data
+        run: python tools/gen_reference.py --backend numpy
+
+      # Expected result: every kernels test skips with "no CUDA device visible", and
+      # the launcher-contract tests (negative dimensions, null pointers, zero-size
+      # no-ops) pass, because those reject their arguments before touching the device.
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  format:
+    name: clang-format
+    runs-on: ubuntu-24.04
+    # Advisory until the tree has been formatted once:
+    #
+    #     clang-format -i $(git ls-files '*.cpp' '*.hpp' '*.cu')
+    #     git commit -am "apply clang-format"
+    #
+    # then delete this line so the job blocks. Left non-blocking for now on purpose --
+    # a check that is red from its first run teaches you to ignore red checks, which is
+    # a worse habit than an unformatted file.
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check formatting
+        run: |
+          clang-format --version
+          clang-format --dry-run --Werror $(git ls-files '*.cpp' '*.hpp' '*.cu')
