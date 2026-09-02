@@ -98,11 +98,124 @@
 namespace engine::cuda {
 namespace {
 
-// TODO(parag): your kernel(s) here.
+// 256 threads per block, matching vector_add. A multiple of the 32-wide warp, small
+// enough for good occupancy, large enough to amortise per-block costs.
+constexpr int kBlockSize = 256;
+
+//===----------------------------------------------------------------------===//
+// WITHIN-BLOCK REDUCTION: shared-memory tree + warp shuffle.
 //
-// __global__ void reduce_sum_partial(const float* __restrict__ x,
-//                                    float* __restrict__ partial,
-//                                    std::int64_t n) { ... }
+// This is a __device__ helper rather than inline code because the same reduction
+// pattern is used by both the partial-sum kernel (stage 1) and the final kernel
+// (stage 2). Factoring it out here means exercises 3 and 4 can reuse it too.
+//
+// Precondition: sdata[0..blockDim.x) is populated. tid = threadIdx.x.
+// Postcondition: the sum is in sdata[0] / the return value of thread 0.
+//===----------------------------------------------------------------------===//
+__device__ float block_reduce_sum(float* sdata, int tid) {
+  // Tree reduction in shared memory, halving active threads each round.
+  // __syncthreads() is OUTSIDE the conditional -- putting it inside deadlocks,
+  // because every thread in the block must reach it. This is the #1 pitfall
+  // from the stub header.
+  for (int s = blockDim.x / 2; s > 32; s >>= 1) {
+    if (tid < s) {
+      sdata[tid] += sdata[tid + s];
+    }
+    __syncthreads();
+  }
+
+  // Once we are down to a single warp (32 threads), shared memory and
+  // __syncthreads() are both unnecessary: warps are implicitly synchronous.
+  // __shfl_down_sync reads directly from another lane's register -- no memory
+  // round trip at all. The mask 0xffffffff means all 32 lanes participate.
+  float val = sdata[tid];
+  if (tid < 32) {
+    // Pull in the upper-half contribution from shared memory one last time.
+    // At this point s == 32, so the tree step that would have been
+    // `if (tid < 32) sdata[tid] += sdata[tid + 32]` is done here explicitly.
+    val += sdata[tid + 32];
+    // Now reduce within the warp using shuffle intrinsics.
+    for (int offset = 16; offset > 0; offset >>= 1) {
+      val += __shfl_down_sync(0xffffffff, val, offset);
+    }
+  }
+  return val;
+}
+
+//===----------------------------------------------------------------------===//
+// STAGE 1: each block reduces its chunk of x[] to one partial sum.
+//
+// 1. Grid-stride loop: each thread accumulates many elements into a local
+//    register. This is the biggest single win for large n -- the expensive
+//    cross-thread reduction runs once per block instead of once per chunk.
+// 2. Store the per-thread sum into shared memory.
+// 3. block_reduce_sum brings it down to one value in thread 0.
+// 4. Thread 0 writes that value to partial[blockIdx.x].
+//===----------------------------------------------------------------------===//
+__global__ void reduce_sum_partial(const float* __restrict__ x,
+                                   float* __restrict__ partial,
+                                   std::int64_t n) {
+  __shared__ float sdata[kBlockSize];
+
+  const int tid = threadIdx.x;
+  const std::int64_t start =
+      static_cast<std::int64_t>(blockIdx.x) * blockDim.x + tid;
+  const std::int64_t stride =
+      static_cast<std::int64_t>(blockDim.x) * gridDim.x;
+
+  // Grid-stride accumulation into a register. Every load is guarded: n is not
+  // necessarily a multiple of the block size, and reading past the end is an
+  // out-of-bounds access, not a rounding error.
+  float thread_sum = 0.0f;
+  for (std::int64_t i = start; i < n; i += stride) {
+    thread_sum += x[i];
+  }
+
+  // Deposit into shared memory. Threads that had no work contribute 0.0f via
+  // the initialised thread_sum, which is the padding the pitfalls section
+  // requires -- no special-casing needed.
+  sdata[tid] = thread_sum;
+  __syncthreads();
+
+  // Reduce within the block.
+  const float val = block_reduce_sum(sdata, tid);
+
+  // Thread 0 writes this block's partial sum.
+  if (tid == 0) {
+    partial[blockIdx.x] = val;
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// STAGE 2: reduce the (now tiny) partial[] array to a single scalar.
+//
+// Launched as a SINGLE block. The partial array has at most `grid` elements
+// (typically a few thousand), which fits easily in one 256-thread block with a
+// small loop. The result goes directly into out[0].
+//===----------------------------------------------------------------------===//
+__global__ void reduce_sum_final(const float* __restrict__ partial,
+                                 float* __restrict__ out,
+                                 int num_partials) {
+  __shared__ float sdata[kBlockSize];
+
+  const int tid = threadIdx.x;
+
+  // Each thread accumulates its slice of the partial array. Guard every load --
+  // num_partials is generally not a multiple of blockDim.x.
+  float thread_sum = 0.0f;
+  for (int i = tid; i < num_partials; i += static_cast<int>(blockDim.x)) {
+    thread_sum += partial[i];
+  }
+
+  sdata[tid] = thread_sum;
+  __syncthreads();
+
+  const float val = block_reduce_sum(sdata, tid);
+
+  if (tid == 0) {
+    out[0] = val;
+  }
+}
 
 }  // namespace
 
@@ -110,12 +223,42 @@ void reduce_sum(const float* x, float* out, std::int64_t n, cudaStream_t stream)
   ENGINE_CHECK(n >= 0, "reduce_sum: n must be non-negative");
   ENGINE_CHECK(x != nullptr && out != nullptr, "reduce_sum: null device pointer");
 
-  // TODO(parag): remove this line and implement.
-  //
-  // Note the n == 0 case: the sum of nothing is 0, so write 0.0f to out and return.
-  // Do not leave it undefined -- the test checks it.
-  (void)stream;
-  ENGINE_CHECK(false, "reduce_sum: not implemented yet (exercise 2)");
+  // The sum of nothing is 0. Write it explicitly -- leaving the buffer untouched
+  // is wrong, because the caller cannot distinguish "your kernel declined to write"
+  // from "the answer is whatever was in that memory". The test poisons the buffer
+  // with -12345.0f to catch exactly this.
+  if (n == 0) {
+    CUDA_CHECK(cudaMemsetAsync(out, 0, sizeof(float), stream));
+    return;
+  }
+
+  // Size the grid to fill the machine, exactly as vector_add does: enough blocks
+  // to keep the SMs busy, capped so we never launch more than there is work for.
+  int device = 0;
+  CUDA_CHECK(cudaGetDevice(&device));
+  int num_sms = 0;
+  CUDA_CHECK(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, device));
+
+  const std::int64_t blocks_needed = (n + kBlockSize - 1) / kBlockSize;
+  const std::int64_t blocks_wanted = static_cast<std::int64_t>(num_sms) * 32;
+  const int grid = static_cast<int>(blocks_needed < blocks_wanted ? blocks_needed
+                                                                  : blocks_wanted);
+
+  // Allocate a small temporary buffer for the per-block partial sums. At most
+  // `grid` floats -- a few KB on any current GPU. This is the only allocation
+  // reduce_sum makes, and it is freed before the function returns.
+  float* partial = nullptr;
+  CUDA_CHECK(cudaMalloc(&partial, static_cast<std::size_t>(grid) * sizeof(float)));
+
+  // Stage 1: each block reduces its chunk of x[] to partial[blockIdx.x].
+  reduce_sum_partial<<<grid, kBlockSize, 0, stream>>>(x, partial, n);
+  CUDA_CHECK_KERNEL();
+
+  // Stage 2: one block reduces partial[0..grid-1] to out[0].
+  reduce_sum_final<<<1, kBlockSize, 0, stream>>>(partial, out, grid);
+  CUDA_CHECK_KERNEL();
+
+  CUDA_CHECK(cudaFree(partial));
 }
 
 }  // namespace engine::cuda

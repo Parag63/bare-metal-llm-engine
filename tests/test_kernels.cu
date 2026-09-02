@@ -338,7 +338,7 @@ TEST(kernels, vector_add_of_nothing_does_nothing) {
 // PART 2 -- exercises 2-6. Implement, re-run, promote.
 //===----------------------------------------------------------------------===//
 
-TEST_PENDING(kernels, reduce_sum_matches_reference) {
+TEST(kernels, reduce_sum_matches_reference) {
   REQUIRE_CUDA_DEVICE();
 
   for (std::int64_t n : kSizes1D) {
@@ -363,7 +363,7 @@ TEST_PENDING(kernels, reduce_sum_matches_reference) {
   }
 }
 
-TEST_PENDING(kernels, reduce_sum_of_empty_writes_zero) {
+TEST(kernels, reduce_sum_of_empty_writes_zero) {
   REQUIRE_CUDA_DEVICE();
 
   // The sum of no elements is 0, and `out` must be WRITTEN with it. Leaving the

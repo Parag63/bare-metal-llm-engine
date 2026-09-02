@@ -67,6 +67,104 @@ Build type: RelWithDebInfo / Release
 
 ---
 
+## Week 01 — 2026-09-02 · reduce_sum
+
+**Objective / module:** Objective 2, exercise 2 — reduce_sum (threads cooperating)
+
+### What I did
+
+Implemented the `reduce_sum` kernel (`kernels/reduce_sum.cu`) — the first kernel that
+requires inter-thread cooperation. Used the deterministic two-stage approach recommended
+by the stub:
+
+**Stage 1** (`reduce_sum_partial`): each block does a grid-stride accumulation into
+per-thread registers, deposits into `__shared__` memory, then tree-reduces within the
+block using shared memory for the upper levels and `__shfl_down_sync` for the final
+warp. Thread 0 writes the block's partial sum to a temporary device buffer.
+
+**Stage 2** (`reduce_sum_final`): a single block reduces the partial sums (one per
+stage-1 block) to a single scalar using the same shared-mem + warp-shuffle pattern.
+The result goes directly into `out[0]`.
+
+Key implementation decisions:
+- `kBlockSize = 256`, matching vector_add. Grid sizing follows the same
+  `min(blocks_needed, num_sms * 32)` pattern.
+- `block_reduce_sum()` is factored into a `__device__` helper, reusable by exercises
+  3 and 4.
+- `n == 0` writes `0.0f` via `cudaMemsetAsync` — the test poisons the buffer with
+  `-12345.0f` to catch a launcher that skips the write.
+- Temporary partial buffer allocated with `cudaMalloc` / `cudaFree` inside the launcher.
+  Small (≤ `grid` floats, a few KB) and transient.
+- `__syncthreads()` is outside all conditionals — the #1 pitfall from the stub.
+- All loads are guarded against out-of-bounds; threads with no work contribute `0.0f`.
+
+Promoted `TEST_PENDING` → `TEST` for both reduce_sum tests.
+
+### Does it work
+
+  ctest --test-dir build --output-on-failure -R kernels
+  (pending: run on Machine B — Machine A has no CUDA device)
+
+Expected newly promoted from TEST_PENDING to TEST:
+  - `kernels.reduce_sum_matches_reference`
+  - `kernels.reduce_sum_of_empty_writes_zero`
+
+### Prediction, written before measuring
+
+**Correctness.** The kernel performs a tree reduction of depth `log2(n) + 1` (the
+`+1` for the two-stage shape), each level introducing one rounding at unit roundoff
+`u = 2^-24`. The error bound is therefore `2 · u · (log2(n) + 1) · Σ|x|`, which is
+exactly what the test harness computes in `tree_reduction_atol()`. At `n = 2^20` this
+is `2 · 5.96e-8 · 21 · Σ|x|` — roughly 50,000× tighter than a sequential bound
+`(n-1) · u · Σ|x|`.
+
+**Performance.** reduce_sum reads `4n` bytes and writes 4 bytes. Ideal traffic is `4n`.
+Arithmetic intensity is `n / 4n = 0.25` FLOP/byte, hopelessly memory-bound (balance
+point is ~82 on the 4090). The ceiling is therefore peak bandwidth:
+
+    1008 GB/s / 4 bytes per element ≈ 252 billion elements/s
+
+At `n = 2^24` that is about 15 million elements in ~0.067 ms. I expect the kernel to
+reach 80–90% of peak bandwidth at large n, possibly less if the two-stage synchronisation
+serialises. If achieved bandwidth is well below vector_add's, the culprit is
+synchronisation overhead in the reduction phase.
+
+### Measurement
+
+GPU clock: pending — run on Machine B
+Build type: pending
+
+(bench_kernels table pending: run on Machine B with locked GPU clocks)
+
+### Prediction vs measurement — what the gap was
+
+(pending)
+
+### Arithmetic intensity check
+
+The exercise doc lists reduce_sum AI as 0.25 FLOP/byte. The bench code computes
+`flops = n`, `bytes = 4n`, giving AI = 0.25. The README's roofline table does not list
+reduce_sum explicitly but the exercise table confirms 0.25. Note: the task brief
+mentioned "~0.5" but that is rmsnorm's AI, not reduce_sum's. 0.25 is correct and
+consistent across the codebase.
+
+### What did not work
+
+(nothing yet — implementation was straightforward following the stub's algorithm sketch)
+
+### Open questions for the mentor
+
+- The `atomicAdd` variant (option b from the stub) trades determinism for simplicity and
+  potentially speed. Worth implementing as a comparison for the report, or move on to
+  exercise 3?
+
+### Next week
+
+Run the test suite and `bench_kernels` on Machine B. Record the numbers with locked GPU
+clocks. Then exercise 3, `softmax_rows`.
+
+---
+
 ## Week 00 — 2026-08-26 · Scaffolding
 
 **Objective / module:** project setup, before Objective 1 begins.
