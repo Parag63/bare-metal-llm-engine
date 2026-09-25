@@ -380,7 +380,7 @@ TEST(kernels, reduce_sum_of_empty_writes_zero) {
   EXPECT_EQ(d_out.download()[0], 0.0f);
 }
 
-TEST_PENDING(kernels, softmax_rows_matches_reference) {
+TEST(kernels, softmax_rows_matches_reference) {
   REQUIRE_CUDA_DEVICE();
 
   for (const Shape2& s : kSoftmaxShapes) {
@@ -418,7 +418,7 @@ TEST_PENDING(kernels, softmax_rows_matches_reference) {
   }
 }
 
-TEST_PENDING(kernels, softmax_rows_survives_the_edge_cases) {
+TEST(kernels, softmax_rows_survives_the_edge_cases) {
   REQUIRE_CUDA_DEVICE();
 
   // softmax_rows__edge is the file that fails if you skip the max subtraction:

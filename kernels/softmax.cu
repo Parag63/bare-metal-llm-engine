@@ -75,14 +75,157 @@
 #include <engine/check.hpp>
 #include <engine/kernels.hpp>
 
+#include <cmath>
+
 namespace engine::cuda {
 namespace {
 
-// TODO(parag): your kernel here.
+// 256 threads per block, matching vector_add and reduce_sum.
+// A multiple of the 32-wide warp, small enough for good occupancy,
+// large enough to amortise per-block costs.
+constexpr int kBlockSize = 256;
+
+//===----------------------------------------------------------------------===//
+// WITHIN-BLOCK REDUCTIONS: shared-memory tree + warp shuffle + broadcast.
 //
-// __global__ void softmax_rows_kernel(const float* __restrict__ in,
-//                                     float* __restrict__ out,
-//                                     std::int64_t rows, std::int64_t cols) { ... }
+// Both helpers follow the reduction pattern from kernels/reduce_sum.cu:
+//   1. Tree reduction across warps in shared memory (halving active threads).
+//   2. Single-warp reduction using register shuffle down (__shfl_down_sync).
+//   3. Thread 0 writes the scalar result to sdata[0] and broadcasts to all
+//      threads in the block via a shared-memory barrier.
+//
+// Precondition: sdata[0..kBlockSize) is populated by the block's threads.
+// Postcondition: all threads in the block return the reduced scalar;
+//                sdata is clean and safe to reuse.
+//===----------------------------------------------------------------------===//
+
+__device__ float block_reduce_max(float* sdata, int tid) {
+  // Tree reduction in shared memory for upper warps.
+  for (int s = blockDim.x / 2; s > 32; s >>= 1) {
+    if (tid < s) {
+      sdata[tid] = fmaxf(sdata[tid], sdata[tid + s]);
+    }
+    __syncthreads();
+  }
+
+  // Single-warp reduction using shuffle down.
+  float val = sdata[tid];
+  if (tid < 32) {
+    val = fmaxf(val, sdata[tid + 32]);
+    for (int offset = 16; offset > 0; offset >>= 1) {
+      val = fmaxf(val, __shfl_down_sync(0xffffffff, val, offset));
+    }
+  }
+
+  // Broadcast lane 0's result to all threads in the block via sdata[0].
+  if (tid == 0) {
+    sdata[0] = val;
+  }
+  __syncthreads();
+  val = sdata[0];
+  __syncthreads();
+
+  return val;
+}
+
+__device__ float block_reduce_sum(float* sdata, int tid) {
+  // Tree reduction in shared memory for upper warps.
+  for (int s = blockDim.x / 2; s > 32; s >>= 1) {
+    if (tid < s) {
+      sdata[tid] += sdata[tid + s];
+    }
+    __syncthreads();
+  }
+
+  // Single-warp reduction using shuffle down.
+  float val = sdata[tid];
+  if (tid < 32) {
+    val += sdata[tid + 32];
+    for (int offset = 16; offset > 0; offset >>= 1) {
+      val += __shfl_down_sync(0xffffffff, val, offset);
+    }
+  }
+
+  // Broadcast lane 0's result to all threads in the block via sdata[0].
+  if (tid == 0) {
+    sdata[0] = val;
+  }
+  __syncthreads();
+  val = sdata[0];
+  __syncthreads();
+
+  return val;
+}
+
+//===----------------------------------------------------------------------===//
+// KERNEL: Numerically stable row-wise softmax (Three-pass block implementation).
+//
+// Decomposition: Each block independently handles rows in a grid-stride loop.
+// Within each row:
+//   Pass 1: Find row maximum across columns (thread-local stride + block_reduce_max).
+//   Pass 2: Compute exp(x - max) and accumulate sum (thread-local stride + block_reduce_sum).
+//   Pass 3: Multiply each exp(x - max) by (1.0 / sum) and write to out.
+//
+// Numerical stability:
+//   Subtracting the row maximum ensures that the argument to expf() is <= 0.0f.
+//   In FP32, exp(x) overflows to +inf for x > ~88.7f, which would cause inf/inf = NaN.
+//   With the max subtraction, intermediate values are in (0.0, 1.0], and because the
+//   maximum element has x - max == 0.0f, its contribution is exp(0) == 1.0f, ensuring
+//   the sum is >= 1.0f and preventing division by zero.
+//===----------------------------------------------------------------------===//
+__global__ void softmax_rows_kernel(const float* __restrict__ in,
+                                    float* __restrict__ out,
+                                    std::int64_t rows, std::int64_t cols) {
+  __shared__ float sdata[kBlockSize];
+  const int tid = threadIdx.x;
+
+  for (std::int64_t r = blockIdx.x; r < rows; r += gridDim.x) {
+    const float* row_in = in + r * cols;
+    float* row_out = out + r * cols;
+
+    // Pass 1: Row maximum across columns.
+    // Initialize to -INFINITY so all-negative rows work correctly.
+    float thread_max = -INFINITY;
+    for (std::int64_t c = tid; c < cols; c += blockDim.x) {
+      thread_max = fmaxf(thread_max, row_in[c]);
+    }
+    sdata[tid] = thread_max;
+    __syncthreads();
+
+    const float row_max = block_reduce_max(sdata, tid);
+
+    // Guard against rows of entirely -INFINITY (e.g., completely masked attention rows).
+    // If all elements are -inf, exp(-inf - (-inf)) is NaN. We output zeros everywhere.
+    if (row_max == -INFINITY) {
+      for (std::int64_t c = tid; c < cols; c += blockDim.x) {
+        row_out[c] = 0.0f;
+      }
+      __syncthreads();
+      continue;
+    }
+
+    // Pass 2: Exponentiate shifted elements and accumulate their sum.
+    // Use expf() (sub-ulp accuracy) to satisfy kSoftmaxRtol = 1e-5.
+    float thread_sum = 0.0f;
+    for (std::int64_t c = tid; c < cols; c += blockDim.x) {
+      thread_sum += expf(row_in[c] - row_max);
+    }
+    sdata[tid] = thread_sum;
+    __syncthreads();
+
+    const float row_sum = block_reduce_sum(sdata, tid);
+
+    // Pass 3: Normalize by dividing by the row total.
+    const float inv_sum = 1.0f / row_sum;
+    for (std::int64_t c = tid; c < cols; c += blockDim.x) {
+      row_out[c] = expf(row_in[c] - row_max) * inv_sum;
+    }
+
+    // Ensure all threads finish writing row_out before any thread modifies sdata
+    // in the next row iteration.
+    __syncthreads();
+  }
+}
 
 }  // namespace
 
@@ -92,9 +235,20 @@ void softmax_rows(const float* in, float* out, std::int64_t rows, std::int64_t c
   ENGINE_CHECK(in != nullptr && out != nullptr, "softmax_rows: null device pointer");
   if (rows == 0 || cols == 0) return;
 
-  // TODO(parag): remove this line and implement.
-  (void)stream;
-  ENGINE_CHECK(false, "softmax_rows: not implemented yet (exercise 3)");
+  int device = 0;
+  CUDA_CHECK(cudaGetDevice(&device));
+  int num_sms = 0;
+  CUDA_CHECK(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, device));
+
+  // Size grid to keep SMs busy without launching excessive blocks.
+  // One block per row when rows <= num_sms * 32; grid-stride handles larger rows.
+  const std::int64_t blocks_needed = rows;
+  const std::int64_t blocks_wanted = static_cast<std::int64_t>(num_sms) * 32;
+  const int grid = static_cast<int>(blocks_needed < blocks_wanted ? blocks_needed
+                                                                  : blocks_wanted);
+
+  softmax_rows_kernel<<<grid, kBlockSize, 0, stream>>>(in, out, rows, cols);
+  CUDA_CHECK_KERNEL();
 }
 
 }  // namespace engine::cuda
