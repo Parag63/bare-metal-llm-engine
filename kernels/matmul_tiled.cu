@@ -121,19 +121,80 @@
 namespace engine::cuda {
 namespace {
 
-// 32 is the natural first choice: it matches the warp width, and two 32x32 float
-// tiles need 8 KiB of the 99 KiB available per block on sm_89 -- leaving ample room
-// for several blocks to be resident per SM, which is what keeps occupancy high.
-// Treat it as a tunable. Try 16 and 64 and record what happens.
-// constexpr int kTile = 32;
+// 32 is the natural choice: matches the 32-wide warp, and two 32x32 float tiles
+// (As and Bs) take 8 KiB of shared memory per block.
+constexpr int kTile = 32;
 
-// TODO(parag): your kernel here.
+//===----------------------------------------------------------------------===//
+// KERNEL: Shared-memory tiled matrix multiplication.
 //
-// __global__ void matmul_tiled_kernel(const float* __restrict__ A,
-//                                     const float* __restrict__ B,
-//                                     float* __restrict__ C,
-//                                     std::int64_t M, std::int64_t N,
-//                                     std::int64_t K) { ... }
+// C[MxN] = A[MxK] * B[KxN], all row-major.
+//
+// Each block computes a TILE x TILE patch of C by cooperatively loading tiles of
+// A and B into shared memory, synchronizing, and accumulating partial dot products.
+//
+// Shared memory bank conflicts:
+//   * Bs[k][threadIdx.x]: consecutive lanes in a warp have consecutive threadIdx.x,
+//     accessing 32 distinct shared memory banks -> conflict-free.
+//   * As[threadIdx.y][k]: all 32 lanes in a warp have identical threadIdx.y and
+//     read the identical address -> hardware broadcast in 1 cycle.
+//
+// Edge padding and bounds:
+//   When M, N, or K are not multiples of TILE, out-of-range tile slots are loaded
+//   with 0.0f so the inner accumulation loop runs unconditionally without branching.
+//   Only threads with row < M && col < N write their result to global memory.
+//===----------------------------------------------------------------------===//
+__global__ void matmul_tiled_kernel(const float* __restrict__ A,
+                                    const float* __restrict__ B,
+                                    float* __restrict__ C,
+                                    std::int64_t M, std::int64_t N,
+                                    std::int64_t K) {
+  __shared__ float As[kTile][kTile];
+  __shared__ float Bs[kTile][kTile];
+
+  const std::int64_t row =
+      static_cast<std::int64_t>(blockIdx.y) * kTile + threadIdx.y;
+  const std::int64_t col =
+      static_cast<std::int64_t>(blockIdx.x) * kTile + threadIdx.x;
+
+  float acc = 0.0f;
+  const std::int64_t num_tiles = (K + kTile - 1) / kTile;
+
+  for (std::int64_t t = 0; t < num_tiles; ++t) {
+    const std::int64_t tiled_k_for_A = t * kTile + threadIdx.x;
+    const std::int64_t tiled_k_for_B = t * kTile + threadIdx.y;
+
+    // Load tile of A into shared memory (with 0.0f edge padding)
+    if (row < M && tiled_k_for_A < K) {
+      As[threadIdx.y][threadIdx.x] = A[row * K + tiled_k_for_A];
+    } else {
+      As[threadIdx.y][threadIdx.x] = 0.0f;
+    }
+
+    // Load tile of B into shared memory (with 0.0f edge padding)
+    if (tiled_k_for_B < K && col < N) {
+      Bs[threadIdx.y][threadIdx.x] = B[tiled_k_for_B * N + col];
+    } else {
+      Bs[threadIdx.y][threadIdx.x] = 0.0f;
+    }
+
+    // Barrier 1: ensure tiles are fully written before anyone reads
+    __syncthreads();
+
+    // Accumulate dot product for the current tile
+    for (int k = 0; k < kTile; ++k) {
+      acc += As[threadIdx.y][k] * Bs[k][threadIdx.x];
+    }
+
+    // Barrier 2: ensure everyone has finished reading before next iteration overwrites
+    __syncthreads();
+  }
+
+  // Write final accumulated result to C
+  if (row < M && col < N) {
+    C[row * N + col] = acc;
+  }
+}
 
 }  // namespace
 
@@ -144,9 +205,18 @@ void matmul_tiled(const float* A, const float* B, float* C, std::int64_t M,
                "matmul_tiled: null device pointer");
   if (M == 0 || N == 0) return;
 
-  // TODO(parag): remove this line and implement.
-  (void)stream;
-  ENGINE_CHECK(false, "matmul_tiled: not implemented yet (exercise 6)");
+  // An Mx0 times 0xN product is the MxN zero matrix.
+  if (K == 0) {
+    CUDA_CHECK(cudaMemsetAsync(C, 0, static_cast<std::size_t>(M * N) * sizeof(float), stream));
+    return;
+  }
+
+  dim3 block(kTile, kTile);
+  dim3 grid(static_cast<unsigned int>((N + kTile - 1) / kTile),
+            static_cast<unsigned int>((M + kTile - 1) / kTile));
+
+  matmul_tiled_kernel<<<grid, block, 0, stream>>>(A, B, C, M, N, K);
+  CUDA_CHECK_KERNEL();
 }
 
 }  // namespace engine::cuda

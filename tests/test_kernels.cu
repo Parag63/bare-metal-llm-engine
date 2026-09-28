@@ -459,7 +459,7 @@ TEST(kernels, softmax_rows_survives_the_edge_cases) {
   }
 }
 
-TEST_PENDING(kernels, rmsnorm_matches_reference) {
+TEST(kernels, rmsnorm_matches_reference) {
   REQUIRE_CUDA_DEVICE();
 
   for (const RmsShape& s : kRmsShapes) {
@@ -492,7 +492,7 @@ TEST_PENDING(kernels, rmsnorm_matches_reference) {
   }
 }
 
-TEST_PENDING(kernels, rmsnorm_of_zeros_is_zeros_not_nan) {
+TEST(kernels, rmsnorm_of_zeros_is_zeros_not_nan) {
   REQUIRE_CUDA_DEVICE();
 
   // mean(x^2) is 0, so this is rsqrt(0 + eps) -- finite only because eps is INSIDE
@@ -529,7 +529,7 @@ TEST_PENDING(kernels, rmsnorm_of_zeros_is_zeros_not_nan) {
   }
 }
 
-TEST_PENDING(kernels, matmul_naive_matches_reference) {
+TEST(kernels, matmul_naive_matches_reference) {
   REQUIRE_CUDA_DEVICE();
 
   for (const Shape3& s : kMatmulShapes) {
@@ -564,7 +564,7 @@ TEST_PENDING(kernels, matmul_naive_matches_reference) {
   }
 }
 
-TEST_PENDING(kernels, matmul_tiled_matches_reference) {
+TEST(kernels, matmul_tiled_matches_reference) {
   REQUIRE_CUDA_DEVICE();
 
   for (const Shape3& s : kMatmulShapes) {
@@ -586,7 +586,7 @@ TEST_PENDING(kernels, matmul_tiled_matches_reference) {
   }
 }
 
-TEST_PENDING(kernels, matmul_tiled_agrees_with_matmul_naive) {
+TEST(kernels, matmul_tiled_agrees_with_matmul_naive) {
   REQUIRE_CUDA_DEVICE();
 
   // A DIFFERENT question from the two tests above, and the one that actually pins
@@ -625,7 +625,7 @@ TEST_PENDING(kernels, matmul_tiled_agrees_with_matmul_naive) {
   }
 }
 
-TEST_PENDING(kernels, matmul_with_k_zero_is_the_zero_matrix) {
+TEST(kernels, matmul_with_k_zero_is_the_zero_matrix) {
   REQUIRE_CUDA_DEVICE();
 
   // An Mx0 times a 0xN product is the MxN ZERO matrix -- the empty sum is 0, not

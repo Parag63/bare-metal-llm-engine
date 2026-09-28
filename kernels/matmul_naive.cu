@@ -88,13 +88,46 @@
 namespace engine::cuda {
 namespace {
 
-// TODO(parag): your kernel here.
+// 16x16 threads per block = 256 threads, matching kBlockSize across all kernels.
+// A 2D thread block maps naturally to the 2D output matrix C.
+constexpr int kTileDim = 16;
+
+//===----------------------------------------------------------------------===//
+// KERNEL: Naive matrix multiplication, C[MxN] = A[MxK] * B[KxN], all row-major.
 //
-// __global__ void matmul_naive_kernel(const float* __restrict__ A,
-//                                     const float* __restrict__ B,
-//                                     float* __restrict__ C,
-//                                     std::int64_t M, std::int64_t N,
-//                                     std::int64_t K) { ... }
+// Thread-to-output mapping (variant a):
+//   row = blockIdx.y * blockDim.y + threadIdx.y;
+//   col = blockIdx.x * blockDim.x + threadIdx.x;
+//
+// Memory access pattern:
+//   threadIdx.x varies fastest within a warp.
+//   Consecutive lanes have identical `row` and consecutive `col`:
+//     * B[k * N + col]: reads are contiguous 32 floats -> 1 coalesced 128-byte transaction.
+//     * C[row * N + col]: writes are contiguous 32 floats -> 1 coalesced 128-byte transaction.
+//     * A[row * K + k]: all 32 lanes read the same address -> free broadcast.
+//
+// Bounds check:
+//   Both `row < M` and `col < N` are guarded so non-multiple tile dimensions
+//   (e.g., the 17x23x31 test case) do not cause out-of-bounds access.
+//===----------------------------------------------------------------------===//
+__global__ void matmul_naive_kernel(const float* __restrict__ A,
+                                    const float* __restrict__ B,
+                                    float* __restrict__ C,
+                                    std::int64_t M, std::int64_t N,
+                                    std::int64_t K) {
+  const std::int64_t row =
+      static_cast<std::int64_t>(blockIdx.y) * blockDim.y + threadIdx.y;
+  const std::int64_t col =
+      static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+
+  if (row < M && col < N) {
+    float acc = 0.0f;
+    for (std::int64_t k = 0; k < K; ++k) {
+      acc += A[row * K + k] * B[k * N + col];
+    }
+    C[row * N + col] = acc;
+  }
+}
 
 }  // namespace
 
@@ -105,12 +138,19 @@ void matmul_naive(const float* A, const float* B, float* C, std::int64_t M,
                "matmul_naive: null device pointer");
   if (M == 0 || N == 0) return;
 
-  // TODO(parag): remove this line and implement.
-  //
-  // Consider the K == 0 case: the product of an Mx0 and a 0xN matrix is the MxN zero
-  // matrix, not undefined. cudaMemsetAsync is the tidy way to handle it.
-  (void)stream;
-  ENGINE_CHECK(false, "matmul_naive: not implemented yet (exercise 5)");
+  // An Mx0 times 0xN product is the MxN zero matrix.
+  if (K == 0) {
+    CUDA_CHECK(cudaMemsetAsync(C, 0, static_cast<std::size_t>(M * N) * sizeof(float), stream));
+    return;
+  }
+
+  dim3 block(kTileDim, kTileDim);
+  dim3 grid(static_cast<unsigned int>((N + kTileDim - 1) / kTileDim),
+            static_cast<unsigned int>((M + kTileDim - 1) / kTileDim));
+
+  matmul_naive_kernel<<<grid, block, 0, stream>>>(A, B, C, M, N, K);
+  CUDA_CHECK_KERNEL();
 }
 
 }  // namespace engine::cuda
+
