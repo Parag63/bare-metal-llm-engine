@@ -692,7 +692,7 @@ TEST(kernels, residual_rmsnorm_matches_reference) {
     const float* d_weight_ptr = nullptr;
     DeviceBuffer<float> d_weight;
     if (s.with_weight) {
-      d_weight.upload(g.at("weight").data);
+      d_weight = DeviceBuffer<float>(g.at("weight").data);
       d_weight_ptr = d_weight.get();
     }
 
@@ -808,7 +808,7 @@ TEST(kernels, rmsnorm_linear_matches_reference) {
     const float* d_weight_ptr = nullptr;
     DeviceBuffer<float> d_weight;
     if (s.with_weight) {
-      d_weight.upload(g.at("weight").data);
+      d_weight = DeviceBuffer<float>(g.at("weight").data);
       d_weight_ptr = d_weight.get();
     }
 
@@ -877,7 +877,7 @@ TEST(kernels, rmsnorm_linear_agrees_with_separate_rmsnorm_and_matmul) {
     const float* d_weight_ptr = nullptr;
     DeviceBuffer<float> d_weight;
     if (s.with_weight) {
-      d_weight.upload(g.at("weight").data);
+      d_weight = DeviceBuffer<float>(g.at("weight").data);
       d_weight_ptr = d_weight.get();
     }
 

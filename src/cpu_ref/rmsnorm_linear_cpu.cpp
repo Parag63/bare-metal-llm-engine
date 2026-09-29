@@ -35,14 +35,14 @@ void rmsnorm_linear(const float* in, const float* rms_weight,
 
     for (std::int64_t k = 0; k < K; ++k) {
       const float w = (rms_weight != nullptr) ? rms_weight[k] : 1.0f;
-      temp[k] = src[k] * scale * w;
+      temp[static_cast<std::size_t>(k)] = src[k] * scale * w;
     }
 
     // 2. Matrix multiplication: dst[n] = sum_k temp[k] * W[k * N + n]
     for (std::int64_t n = 0; n < N; ++n) {
       double acc = 0.0;
       for (std::int64_t k = 0; k < K; ++k) {
-        acc += static_cast<double>(temp[k]) * static_cast<double>(W[k * N + n]);
+        acc += static_cast<double>(temp[static_cast<std::size_t>(k)]) * static_cast<double>(W[k * N + n]);
       }
       dst[n] = static_cast<float>(acc);
     }

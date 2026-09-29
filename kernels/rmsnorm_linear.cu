@@ -150,13 +150,7 @@ void rmsnorm_linear(const float* in, const float* rms_weight,
   ENGINE_CHECK(in != nullptr && W != nullptr && out != nullptr,
                "rmsnorm_linear: null device pointer");
   ENGINE_CHECK(eps >= 0.0f, "rmsnorm_linear: eps must be non-negative");
-  if (M == 0 || N == 0) return;
-
-  // An Mx0 times 0xN product is the MxN zero matrix.
-  if (K == 0) {
-    CUDA_CHECK(cudaMemsetAsync(out, 0, static_cast<std::size_t>(M * N) * sizeof(float), stream));
-    return;
-  }
+  if (M == 0 || N == 0 || K == 0) return;
 
   const std::size_t smem_bytes =
       static_cast<std::size_t>(K + kBlockSize) * sizeof(float);

@@ -8,9 +8,9 @@
 ## Test score (verified on Machine B, RTX 4070 SUPER, sm_89)
 
 ```
-passed 80   failed 0   pending 0   skipped 0
+passed 92   failed 0   pending 0   skipped 0
 ```
-*(CUDA-enabled build with nvcc 12.6, RTX 4070 SUPER — 2026-09-25)*
+*(CUDA-enabled build with nvcc 12.6, RTX 4070 SUPER — 2026-09-29)*
 
 ### Test suite breakdown
 
@@ -18,10 +18,10 @@ passed 80   failed 0   pending 0   skipped 0
 |---|---|---|
 | `dtype` | 10 | ✅ All passing |
 | `golden` | 6 | ✅ All passing |
-| `cpu_ref` | 10 | ✅ All passing |
+| `cpu_ref` | 16 | ✅ All 16 passing (includes Module 3 fused ops) |
 | `storage` | 4 | ✅ All passing |
 | `tensor` | 24 | ✅ All passing (GPU + CPU verified) |
-| `kernels` | 26 | ✅ All 26 passing (all 6 kernels + contracts verified) |
+| `kernels` | 32 | ✅ All 32 passing (all 8 kernels + contracts verified) |
 
 ## Module completion
 
