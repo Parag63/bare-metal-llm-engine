@@ -112,6 +112,20 @@ struct Shape3 {
 const Shape3 kMatmulShapes[] = {
     {1, 1, 1}, {32, 32, 32}, {128, 64, 256}, {17, 23, 31}, {512, 512, 512}};
 
+const RmsShape kResidualRmsShapes[] = {
+    {1, 4096, true}, {128, 4096, true}, {32, 127, true}, {32, 4096, false}};
+
+struct RmsnormLinearShape {
+  std::int64_t m, n, k;
+  bool with_weight;
+};
+const RmsnormLinearShape kRmsnormLinearShapes[] = {
+    {1, 4096, 4096, true},
+    {32, 4096, 4096, true},
+    {1, 12288, 4096, true},
+    {17, 127, 31, true},
+    {32, 4096, 4096, false}};
+
 /// The eps the generator used. Must match, or rmsnorm disagrees at eps scale on
 /// near-zero rows (which is exactly what the rmsnorm__zeros case tests).
 constexpr float kEps = 1e-5f;
@@ -460,4 +474,162 @@ TEST(cpu_ref, matmul_identity_is_a_copy) {
   engine::cpu::matmul(A.data(), I.data(), C.data(), M, /*N=*/K, K);
 
   EXPECT_ALLCLOSE(C.data(), A.data(), C.size(), kExactRtol, kExactAtol);
+}
+
+//===----------------------------------------------------------------------===//
+// Module 3 -- Fused operations tests
+//===----------------------------------------------------------------------===//
+
+TEST(cpu_ref, residual_rmsnorm_matches_reference) {
+  for (const auto& s : kResidualRmsShapes) {
+    const std::string stem =
+        "residual_rmsnorm__" + dims2(s.rows, s.cols) + (s.with_weight ? "_w" : "_now");
+    LOAD_GOLDEN(g, stem);
+    const auto& x = g.at("x");
+    const auto& res = g.at("residual");
+    const auto& exp_norm = g.at("expected");
+    const auto& exp_sum = g.at("sum_out");
+    ASSERT_EQ(x.numel(), s.rows * s.cols);
+    ASSERT_EQ(res.numel(), s.rows * s.cols);
+    ASSERT_EQ(exp_norm.numel(), s.rows * s.cols);
+    ASSERT_EQ(exp_sum.numel(), s.rows * s.cols);
+
+    const float* weight = nullptr;
+    if (s.with_weight) {
+      ASSERT_TRUE(g.has("weight"));
+      ASSERT_EQ(g.at("weight").numel(), s.cols);
+      weight = g.at("weight").data.data();
+    } else {
+      EXPECT_FALSE(g.has("weight"));
+    }
+
+    std::vector<float> norm_out(static_cast<std::size_t>(s.rows * s.cols), 0.0f);
+    std::vector<float> sum_out(static_cast<std::size_t>(s.rows * s.cols), 0.0f);
+    engine::cpu::residual_rmsnorm(x.data.data(), res.data.data(), weight,
+                                  norm_out.data(), sum_out.data(), s.rows, s.cols, kEps);
+
+    CHECK_CASE(stem + " (norm)", norm_out.data(), exp_norm.data.data(), norm_out.size(),
+               kFloatRtol, kFloatAtol);
+    CHECK_CASE(stem + " (sum)", sum_out.data(), exp_sum.data.data(), sum_out.size(),
+               kFloatRtol, kFloatAtol);
+  }
+}
+
+TEST(cpu_ref, residual_rmsnorm_of_zeros_is_zeros) {
+  LOAD_GOLDEN(g, "residual_rmsnorm__zeros");
+  const auto& x = g.at("x");
+  const auto& res = g.at("residual");
+  const auto& exp_norm = g.at("expected");
+  const auto& exp_sum = g.at("sum_out");
+
+  std::vector<float> norm_out(static_cast<std::size_t>(2 * 256), 1.0f);
+  std::vector<float> sum_out(static_cast<std::size_t>(2 * 256), 1.0f);
+  engine::cpu::residual_rmsnorm(x.data.data(), res.data.data(), nullptr,
+                                norm_out.data(), sum_out.data(), 2, 256, kEps);
+
+  CHECK_CASE("residual_rmsnorm__zeros (norm)", norm_out.data(), exp_norm.data.data(),
+             norm_out.size(), kFloatRtol, kFloatAtol);
+  CHECK_CASE("residual_rmsnorm__zeros (sum)", sum_out.data(), exp_sum.data.data(),
+             sum_out.size(), kFloatRtol, kFloatAtol);
+  for (float v : norm_out) {
+    EXPECT_FALSE(std::isnan(v));
+  }
+}
+
+TEST(cpu_ref, residual_rmsnorm_null_weight_equals_unit_weight) {
+  LOAD_GOLDEN(g, "residual_rmsnorm__32x4096_now");
+  const auto& x = g.at("x");
+  const auto& res = g.at("residual");
+  const std::int64_t rows = 32, cols = 4096;
+
+  std::vector<float> ones(static_cast<std::size_t>(cols), 1.0f);
+  std::vector<float> norm_a(static_cast<std::size_t>(rows * cols), 0.0f);
+  std::vector<float> sum_a(static_cast<std::size_t>(rows * cols), 0.0f);
+  std::vector<float> norm_b(static_cast<std::size_t>(rows * cols), 0.0f);
+  std::vector<float> sum_b(static_cast<std::size_t>(rows * cols), 0.0f);
+
+  engine::cpu::residual_rmsnorm(x.data.data(), res.data.data(), nullptr,
+                                norm_a.data(), sum_a.data(), rows, cols, kEps);
+  engine::cpu::residual_rmsnorm(x.data.data(), res.data.data(), ones.data(),
+                                norm_b.data(), sum_b.data(), rows, cols, kEps);
+
+  CHECK_CASE("residual_rmsnorm null vs ones (norm)", norm_a.data(), norm_b.data(),
+             norm_a.size(), kExactRtol, kExactAtol);
+  CHECK_CASE("residual_rmsnorm null vs ones (sum)", sum_a.data(), sum_b.data(),
+             sum_a.size(), kExactRtol, kExactAtol);
+}
+
+TEST(cpu_ref, rmsnorm_linear_matches_reference) {
+  for (const auto& s : kRmsnormLinearShapes) {
+    const std::string stem = "rmsnorm_linear__" + std::to_string(s.m) + "x" +
+                             std::to_string(s.n) + "x" + std::to_string(s.k) +
+                             (s.with_weight ? "_w" : "_now");
+    LOAD_GOLDEN(g, stem);
+    const auto& in = g.at("input");
+    const auto& W = g.at("W");
+    const auto& exp = g.at("expected");
+
+    ASSERT_EQ(in.numel(), s.m * s.k);
+    ASSERT_EQ(W.numel(), s.k * s.n);
+    ASSERT_EQ(exp.numel(), s.m * s.n);
+
+    const float* weight = nullptr;
+    if (s.with_weight) {
+      ASSERT_TRUE(g.has("weight"));
+      ASSERT_EQ(g.at("weight").numel(), s.k);
+      weight = g.at("weight").data.data();
+    } else {
+      EXPECT_FALSE(g.has("weight"));
+    }
+
+    std::vector<float> out(static_cast<std::size_t>(s.m * s.n), 0.0f);
+    engine::cpu::rmsnorm_linear(in.data.data(), weight, W.data.data(), out.data(),
+                                s.m, s.n, s.k, kEps);
+
+    CHECK_CASE(stem, out.data(), exp.data.data(), out.size(), kMatmulRtol, kMatmulAtol);
+  }
+}
+
+TEST(cpu_ref, rmsnorm_linear_null_weight_equals_unit_weight) {
+  LOAD_GOLDEN(g, "rmsnorm_linear__32x4096x4096_now");
+  const auto& in = g.at("input");
+  const auto& W = g.at("W");
+  const std::int64_t M = 32, N = 4096, K = 4096;
+
+  std::vector<float> ones(static_cast<std::size_t>(K), 1.0f);
+  std::vector<float> out_a(static_cast<std::size_t>(M * N), 0.0f);
+  std::vector<float> out_b(static_cast<std::size_t>(M * N), 0.0f);
+
+  engine::cpu::rmsnorm_linear(in.data.data(), nullptr, W.data.data(), out_a.data(),
+                              M, N, K, kEps);
+  engine::cpu::rmsnorm_linear(in.data.data(), ones.data(), W.data.data(), out_b.data(),
+                              M, N, K, kEps);
+
+  CHECK_CASE("rmsnorm_linear null vs ones", out_a.data(), out_b.data(), out_a.size(),
+             kExactRtol, kExactAtol);
+}
+
+TEST(cpu_ref, rmsnorm_linear_agrees_with_separate_rmsnorm_and_matmul) {
+  for (const auto& s : kRmsnormLinearShapes) {
+    const std::string stem = "rmsnorm_linear__" + std::to_string(s.m) + "x" +
+                             std::to_string(s.n) + "x" + std::to_string(s.k) +
+                             (s.with_weight ? "_w" : "_now");
+    LOAD_GOLDEN(g, stem);
+    const auto& in = g.at("input");
+    const auto& W = g.at("W");
+
+    const float* weight = s.with_weight ? g.at("weight").data.data() : nullptr;
+
+    std::vector<float> fused_out(static_cast<std::size_t>(s.m * s.n), 0.0f);
+    engine::cpu::rmsnorm_linear(in.data.data(), weight, W.data.data(), fused_out.data(),
+                                s.m, s.n, s.k, kEps);
+
+    std::vector<float> temp(static_cast<std::size_t>(s.m * s.k), 0.0f);
+    std::vector<float> separate_out(static_cast<std::size_t>(s.m * s.n), 0.0f);
+    engine::cpu::rmsnorm(in.data.data(), weight, temp.data(), s.m, s.k, kEps);
+    engine::cpu::matmul(temp.data(), W.data.data(), separate_out.data(), s.m, s.n, s.k);
+
+    CHECK_CASE(stem + " (fused vs separate)", fused_out.data(), separate_out.data(),
+               fused_out.size(), kExactRtol, kExactAtol);
+  }
 }

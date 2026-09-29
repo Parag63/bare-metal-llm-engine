@@ -204,6 +204,20 @@ struct Shape3 {
 const Shape3 kMatmulShapes[] = {
     {1, 1, 1}, {32, 32, 32}, {128, 64, 256}, {17, 23, 31}, {512, 512, 512}};
 
+const RmsShape kResidualRmsShapes[] = {
+    {1, 4096, true}, {128, 4096, true}, {32, 127, true}, {32, 4096, false}};
+
+struct RmsnormLinearShape {
+  std::int64_t m, n, k;
+  bool with_weight;
+};
+const RmsnormLinearShape kRmsnormLinearShapes[] = {
+    {1, 4096, 4096, true},
+    {32, 4096, 4096, true},
+    {1, 12288, 4096, true},
+    {17, 127, 31, true},
+    {32, 4096, 4096, false}};
+
 std::string dims2(std::int64_t a, std::int64_t b) {
   return std::to_string(a) + "x" + std::to_string(b);
 }
@@ -652,6 +666,239 @@ TEST(kernels, matmul_with_k_zero_is_the_zero_matrix) {
 }
 
 //===----------------------------------------------------------------------===//
+// Module 3 -- Fused operations tests
+//===----------------------------------------------------------------------===//
+
+TEST(kernels, residual_rmsnorm_matches_reference) {
+  REQUIRE_CUDA_DEVICE();
+
+  for (const auto& s : kResidualRmsShapes) {
+    const std::string stem =
+        "residual_rmsnorm__" + dims2(s.rows, s.cols) + (s.with_weight ? "_w" : "_now");
+    LOAD_GOLDEN(g, stem);
+
+    const auto& x = g.at("x");
+    const auto& res = g.at("residual");
+    const auto& exp_norm = g.at("expected");
+    const auto& exp_sum = g.at("sum_out");
+
+    DeviceBuffer<float> d_x(x.data);
+    DeviceBuffer<float> d_res(res.data);
+    DeviceBuffer<float> d_norm_out(usize(s.rows * s.cols));
+    DeviceBuffer<float> d_sum_out(usize(s.rows * s.cols));
+    d_norm_out.zero();
+    d_sum_out.zero();
+
+    const float* d_weight_ptr = nullptr;
+    DeviceBuffer<float> d_weight;
+    if (s.with_weight) {
+      d_weight.upload(g.at("weight").data);
+      d_weight_ptr = d_weight.get();
+    }
+
+    engine::cuda::residual_rmsnorm(d_x.get(), d_res.get(), d_weight_ptr,
+                                   d_norm_out.get(), d_sum_out.get(),
+                                   s.rows, s.cols, kEps);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    const std::vector<float> host_norm = d_norm_out.download();
+    const std::vector<float> host_sum = d_sum_out.download();
+    CHECK_CASE(stem + " (norm)", host_norm.data(), exp_norm.data.data(),
+               host_norm.size(), kRmsRtol, kRmsAtol);
+    CHECK_CASE(stem + " (sum)", host_sum.data(), exp_sum.data.data(),
+               host_sum.size(), kRmsRtol, kRmsAtol);
+  }
+}
+
+TEST(kernels, residual_rmsnorm_of_zeros_is_zeros_not_nan) {
+  REQUIRE_CUDA_DEVICE();
+
+  LOAD_GOLDEN(g, "residual_rmsnorm__zeros");
+  const auto& x = g.at("x");
+  const auto& res = g.at("residual");
+  const std::int64_t rows = 2, cols = 256;
+
+  DeviceBuffer<float> d_x(x.data);
+  DeviceBuffer<float> d_res(res.data);
+  DeviceBuffer<float> d_norm_out(usize(rows * cols));
+  DeviceBuffer<float> d_sum_out(usize(rows * cols));
+
+  const std::vector<float> nans(usize(rows * cols), std::numeric_limits<float>::quiet_NaN());
+  d_norm_out.upload(nans);
+  d_sum_out.upload(nans);
+
+  engine::cuda::residual_rmsnorm(d_x.get(), d_res.get(), nullptr,
+                                 d_norm_out.get(), d_sum_out.get(),
+                                 rows, cols, kEps);
+  CUDA_CHECK(cudaDeviceSynchronize());
+
+  const std::vector<float> host_norm = d_norm_out.download();
+  const std::vector<float> host_sum = d_sum_out.download();
+  for (std::size_t i = 0; i < host_norm.size(); ++i) {
+    if (host_norm[i] != 0.0f) {
+      ctx.add_failure(__FILE__, __LINE__,
+                      "expected norm exactly 0 at index " + std::to_string(i) + ", got " +
+                          std::to_string(host_norm[i]));
+      break;
+    }
+    if (host_sum[i] != 0.0f) {
+      ctx.add_failure(__FILE__, __LINE__,
+                      "expected sum exactly 0 at index " + std::to_string(i) + ", got " +
+                          std::to_string(host_sum[i]));
+      break;
+    }
+  }
+}
+
+TEST(kernels, residual_rmsnorm_null_weight_equals_unit_weight) {
+  REQUIRE_CUDA_DEVICE();
+
+  LOAD_GOLDEN(g, "residual_rmsnorm__32x4096_now");
+  const auto& x = g.at("x");
+  const auto& res = g.at("residual");
+  const std::int64_t rows = 32, cols = 4096;
+
+  DeviceBuffer<float> d_x(x.data);
+  DeviceBuffer<float> d_res(res.data);
+  const std::vector<float> ones(usize(cols), 1.0f);
+  DeviceBuffer<float> d_ones(ones);
+
+  DeviceBuffer<float> d_norm_null(usize(rows * cols));
+  DeviceBuffer<float> d_sum_null(usize(rows * cols));
+  DeviceBuffer<float> d_norm_ones(usize(rows * cols));
+  DeviceBuffer<float> d_sum_ones(usize(rows * cols));
+
+  engine::cuda::residual_rmsnorm(d_x.get(), d_res.get(), nullptr,
+                                 d_norm_null.get(), d_sum_null.get(),
+                                 rows, cols, kEps);
+  engine::cuda::residual_rmsnorm(d_x.get(), d_res.get(), d_ones.get(),
+                                 d_norm_ones.get(), d_sum_ones.get(),
+                                 rows, cols, kEps);
+  CUDA_CHECK(cudaDeviceSynchronize());
+
+  const std::vector<float> norm_null = d_norm_null.download();
+  const std::vector<float> norm_ones = d_norm_ones.download();
+  const std::vector<float> sum_null = d_sum_null.download();
+  const std::vector<float> sum_ones = d_sum_ones.download();
+
+  CHECK_CASE("residual_rmsnorm null vs ones (norm)", norm_null.data(), norm_ones.data(),
+             norm_null.size(), kAddRtol, kAddAtol);
+  CHECK_CASE("residual_rmsnorm null vs ones (sum)", sum_null.data(), sum_ones.data(),
+             sum_null.size(), kAddRtol, kAddAtol);
+}
+
+TEST(kernels, rmsnorm_linear_matches_reference) {
+  REQUIRE_CUDA_DEVICE();
+
+  for (const auto& s : kRmsnormLinearShapes) {
+    const std::string stem = "rmsnorm_linear__" + std::to_string(s.m) + "x" +
+                             std::to_string(s.n) + "x" + std::to_string(s.k) +
+                             (s.with_weight ? "_w" : "_now");
+    LOAD_GOLDEN(g, stem);
+
+    const auto& in = g.at("input");
+    const auto& W = g.at("W");
+    const auto& exp = g.at("expected");
+
+    DeviceBuffer<float> d_in(in.data);
+    DeviceBuffer<float> d_w(W.data);
+    DeviceBuffer<float> d_out(usize(s.m * s.n));
+    d_out.zero();
+
+    const float* d_weight_ptr = nullptr;
+    DeviceBuffer<float> d_weight;
+    if (s.with_weight) {
+      d_weight.upload(g.at("weight").data);
+      d_weight_ptr = d_weight.get();
+    }
+
+    engine::cuda::rmsnorm_linear(d_in.get(), d_weight_ptr, d_w.get(), d_out.get(),
+                                 s.m, s.n, s.k, kEps);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    const std::vector<float> host = d_out.download();
+    CHECK_CASE(stem, host.data(), exp.data.data(), host.size(),
+               kMatmulRtol, kMatmulAtol);
+  }
+}
+
+TEST(kernels, rmsnorm_linear_null_weight_equals_unit_weight) {
+  REQUIRE_CUDA_DEVICE();
+
+  LOAD_GOLDEN(g, "rmsnorm_linear__32x4096x4096_now");
+  const auto& in = g.at("input");
+  const auto& W = g.at("W");
+  const std::int64_t M = 32, N = 4096, K = 4096;
+
+  DeviceBuffer<float> d_in(in.data);
+  DeviceBuffer<float> d_w(W.data);
+  const std::vector<float> ones(usize(K), 1.0f);
+  DeviceBuffer<float> d_ones(ones);
+
+  DeviceBuffer<float> d_out_null(usize(M * N));
+  DeviceBuffer<float> d_out_ones(usize(M * N));
+  d_out_null.zero();
+  d_out_ones.zero();
+
+  engine::cuda::rmsnorm_linear(d_in.get(), nullptr, d_w.get(), d_out_null.get(),
+                               M, N, K, kEps);
+  engine::cuda::rmsnorm_linear(d_in.get(), d_ones.get(), d_w.get(), d_out_ones.get(),
+                               M, N, K, kEps);
+  CUDA_CHECK(cudaDeviceSynchronize());
+
+  const std::vector<float> host_null = d_out_null.download();
+  const std::vector<float> host_ones = d_out_ones.download();
+
+  CHECK_CASE("rmsnorm_linear null vs ones", host_null.data(), host_ones.data(),
+             host_null.size(), /*rtol=*/1e-6, /*atol=*/1e-6);
+}
+
+TEST(kernels, rmsnorm_linear_agrees_with_separate_rmsnorm_and_matmul) {
+  REQUIRE_CUDA_DEVICE();
+
+  for (const auto& s : kRmsnormLinearShapes) {
+    const std::string stem = "rmsnorm_linear__" + std::to_string(s.m) + "x" +
+                             std::to_string(s.n) + "x" + std::to_string(s.k) +
+                             (s.with_weight ? "_w" : "_now");
+    LOAD_GOLDEN(g, stem);
+
+    const auto& in = g.at("input");
+    const auto& W = g.at("W");
+
+    DeviceBuffer<float> d_in(in.data);
+    DeviceBuffer<float> d_w(W.data);
+    DeviceBuffer<float> d_fused_out(usize(s.m * s.n));
+    DeviceBuffer<float> d_temp(usize(s.m * s.k));
+    DeviceBuffer<float> d_sep_out(usize(s.m * s.n));
+    d_fused_out.zero();
+    d_temp.zero();
+    d_sep_out.zero();
+
+    const float* d_weight_ptr = nullptr;
+    DeviceBuffer<float> d_weight;
+    if (s.with_weight) {
+      d_weight.upload(g.at("weight").data);
+      d_weight_ptr = d_weight.get();
+    }
+
+    // Fused kernel
+    engine::cuda::rmsnorm_linear(d_in.get(), d_weight_ptr, d_w.get(), d_fused_out.get(),
+                                 s.m, s.n, s.k, kEps);
+
+    // Separate kernels: rmsnorm followed by matmul_tiled
+    engine::cuda::rmsnorm(d_in.get(), d_weight_ptr, d_temp.get(), s.m, s.k, kEps);
+    engine::cuda::matmul_tiled(d_temp.get(), d_w.get(), d_sep_out.get(), s.m, s.n, s.k);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    const std::vector<float> fused = d_fused_out.download();
+    const std::vector<float> separate = d_sep_out.download();
+
+    CHECK_CASE(stem + " (fused vs separate)", fused.data(), separate.data(),
+               fused.size(), /*rtol=*/1e-4, /*atol=*/5e-5);
+  }
+}
+
+//===----------------------------------------------------------------------===//
 // PART 3 -- the launch CONTRACT.
 //
 // These verify that argument validation in each launcher throws proper C++
@@ -678,9 +925,16 @@ TEST(kernels, launchers_reject_negative_dimensions) {
   EXPECT_THROWS_MSG(engine::cuda::rmsnorm(p, p, p, -1, 4, 1e-5f), "negative");
   EXPECT_THROWS_MSG(engine::cuda::matmul_naive(p, p, p, -1, 4, 4), "negative");
   EXPECT_THROWS_MSG(engine::cuda::matmul_tiled(p, p, p, 4, 4, -1), "negative");
+  EXPECT_THROWS_MSG(engine::cuda::residual_rmsnorm(p, p, p, p, p, -1, 4, 1e-5f), "negative");
+  EXPECT_THROWS_MSG(engine::cuda::residual_rmsnorm(p, p, p, p, p, 4, -1, 1e-5f), "negative");
+  EXPECT_THROWS_MSG(engine::cuda::rmsnorm_linear(p, p, p, p, -1, 4, 4, 1e-5f), "negative");
+  EXPECT_THROWS_MSG(engine::cuda::rmsnorm_linear(p, p, p, p, 4, -1, 4, 1e-5f), "negative");
+  EXPECT_THROWS_MSG(engine::cuda::rmsnorm_linear(p, p, p, p, 4, 4, -1, 1e-5f), "negative");
 
   // eps < 0 would put a negative number under the square root.
   EXPECT_THROWS_MSG(engine::cuda::rmsnorm(p, p, p, 4, 4, -1.0f), "eps");
+  EXPECT_THROWS_MSG(engine::cuda::residual_rmsnorm(p, p, p, p, p, 4, 4, -1.0f), "eps");
+  EXPECT_THROWS_MSG(engine::cuda::rmsnorm_linear(p, p, p, p, 4, 4, 4, -1.0f), "eps");
 }
 
 TEST(kernels, launchers_reject_null_pointers) {
@@ -700,11 +954,19 @@ TEST(kernels, launchers_reject_null_pointers) {
   EXPECT_THROWS_MSG(engine::cuda::rmsnorm(p, p, nullptr, 2, 2, 1e-5f), "null");
   EXPECT_THROWS_MSG(engine::cuda::matmul_naive(nullptr, p, p, 2, 2, 2), "null");
   EXPECT_THROWS_MSG(engine::cuda::matmul_tiled(p, p, nullptr, 2, 2, 2), "null");
+  EXPECT_THROWS_MSG(engine::cuda::residual_rmsnorm(nullptr, p, p, p, p, 2, 2, 1e-5f), "null");
+  EXPECT_THROWS_MSG(engine::cuda::residual_rmsnorm(p, nullptr, p, p, p, 2, 2, 1e-5f), "null");
+  EXPECT_THROWS_MSG(engine::cuda::residual_rmsnorm(p, p, p, nullptr, p, 2, 2, 1e-5f), "null");
+  EXPECT_THROWS_MSG(engine::cuda::residual_rmsnorm(p, p, p, p, nullptr, 2, 2, 1e-5f), "null");
+  EXPECT_THROWS_MSG(engine::cuda::rmsnorm_linear(nullptr, p, p, p, 2, 2, 2, 1e-5f), "null");
+  EXPECT_THROWS_MSG(engine::cuda::rmsnorm_linear(p, p, nullptr, p, 2, 2, 2, 1e-5f), "null");
+  EXPECT_THROWS_MSG(engine::cuda::rmsnorm_linear(p, p, p, nullptr, 2, 2, 2, 1e-5f), "null");
 
-  // rmsnorm's `weight` is the one pointer that is ALLOWED to be null: "no learned
-  // gain" is a valid configuration, not a mistake. This is asserted as a positive
-  // test rather than left implicit, so nobody adds a null check for it later.
+  // rmsnorm's, residual_rmsnorm's, and rmsnorm_linear's `weight` is ALLOWED to be null:
+  // "no learned gain" is a valid configuration, not a mistake.
   EXPECT_NO_THROW(engine::cuda::rmsnorm(p, nullptr, p, 0, 0, 1e-5f));
+  EXPECT_NO_THROW(engine::cuda::residual_rmsnorm(p, p, nullptr, p, p, 0, 0, 1e-5f));
+  EXPECT_NO_THROW(engine::cuda::rmsnorm_linear(p, nullptr, p, p, 0, 0, 0, 1e-5f));
 }
 
 TEST(kernels, empty_work_is_a_no_op_not_an_error) {
@@ -725,6 +987,11 @@ TEST(kernels, empty_work_is_a_no_op_not_an_error) {
   EXPECT_NO_THROW(engine::cuda::matmul_naive(p, p, p, 8, 0, 8));
   EXPECT_NO_THROW(engine::cuda::matmul_tiled(p, p, p, 0, 8, 8));
   EXPECT_NO_THROW(engine::cuda::matmul_tiled(p, p, p, 8, 0, 8));
+  EXPECT_NO_THROW(engine::cuda::residual_rmsnorm(p, p, p, p, p, 0, 8, 1e-5f));
+  EXPECT_NO_THROW(engine::cuda::residual_rmsnorm(p, p, p, p, p, 8, 0, 1e-5f));
+  EXPECT_NO_THROW(engine::cuda::rmsnorm_linear(p, p, p, p, 0, 8, 8, 1e-5f));
+  EXPECT_NO_THROW(engine::cuda::rmsnorm_linear(p, p, p, p, 8, 0, 8, 1e-5f));
+  EXPECT_NO_THROW(engine::cuda::rmsnorm_linear(p, p, p, p, 8, 8, 0, 1e-5f));
 
   // And nothing may have been launched, let alone written.
   CUDA_CHECK(cudaDeviceSynchronize());

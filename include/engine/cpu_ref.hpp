@@ -53,4 +53,36 @@ void rmsnorm(const float* in, const float* weight, float* out, std::int64_t rows
 void matmul(const float* A, const float* B, float* C, std::int64_t M, std::int64_t N,
             std::int64_t K);
 
+//===----------------------------------------------------------------------===//
+// Module 3 — Fused operations.
+//
+// Each of these computes the same result as calling two separate functions in
+// sequence.  The oracle deliberately does them in two passes (no fusion) so
+// that it stays "obviously correct" — the fusion is the kernel's job.
+//===----------------------------------------------------------------------===//
+
+/// Fused residual-add + RMSNorm (Exercise 8).
+///
+/// Computes:
+///   sum_out[r][c]  = x[r][c] + residual[r][c]
+///   norm_out[r][c] = sum_out[r][c] / sqrt(mean(sum_out[r][:]^2) + eps) * weight[c]
+///
+/// Both outputs are written.  sum_out is needed by the next residual connection;
+/// norm_out feeds into the next sub-layer.  `weight` may be nullptr (no scaling).
+void residual_rmsnorm(const float* x, const float* residual,
+                      const float* weight, float* norm_out, float* sum_out,
+                      std::int64_t rows, std::int64_t cols, float eps);
+
+/// Fused RMSNorm + linear projection (Exercise 7).
+///
+/// Computes:
+///   temp[r][k] = in[r][k] / sqrt(mean(in[r][:]^2) + eps) * rms_weight[k]
+///   out[r][n]  = sum_k temp[r][k] * W[k][n]
+///
+/// The intermediate `temp` is never materialised in global memory.
+/// `rms_weight` may be nullptr (no per-channel gain).
+void rmsnorm_linear(const float* in, const float* rms_weight,
+                    const float* W, float* out,
+                    std::int64_t M, std::int64_t N, std::int64_t K, float eps);
+
 }  // namespace engine::cpu

@@ -70,6 +70,28 @@ void matmul_naive(const float* A, const float* B, float* C, std::int64_t M,
 void matmul_tiled(const float* A, const float* B, float* C, std::int64_t M,
                   std::int64_t N, std::int64_t K, cudaStream_t stream = 0);
 
+//===----------------------------------------------------------------------===//
+// Module 3 — Fused operations.
+//===----------------------------------------------------------------------===//
+
+/// Exercise 7. Fused RMSNorm + Linear projection.
+/// out[M x N] = RMSNorm(in[M x K], rms_weight[K], eps) * W[K x N]
+/// Eliminates the intermediate M×K write/read between RMSNorm and matmul.
+/// `rms_weight` may be nullptr (no per-channel gain).
+void rmsnorm_linear(const float* in, const float* rms_weight,
+                    const float* W, float* out,
+                    std::int64_t M, std::int64_t N, std::int64_t K,
+                    float eps, cudaStream_t stream = 0);
+
+/// Exercise 8. Fused Residual-Add + RMSNorm.
+/// norm_out[r][c] = RMSNorm(x[r][c] + residual[r][c], weight, eps)
+/// sum_out[r][c]  = x[r][c] + residual[r][c]   (for the next residual connection)
+/// `weight` may be nullptr (no scaling).
+void residual_rmsnorm(const float* x, const float* residual,
+                      const float* weight, float* norm_out, float* sum_out,
+                      std::int64_t rows, std::int64_t cols,
+                      float eps, cudaStream_t stream = 0);
+
 }  // namespace engine::cuda
 
 #endif  // ENGINE_HAS_CUDA

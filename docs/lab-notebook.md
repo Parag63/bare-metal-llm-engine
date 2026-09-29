@@ -67,6 +67,40 @@ Build type: RelWithDebInfo / Release
 
 ---
 
+## Week 06 — 2026-09-29 · Kernel Fusion (Module 3, exercises 7 & 8)
+
+**Objective / module:** Module 3 — Kernel Fusion: `rmsnorm_linear` (Exercise 7) and `residual_rmsnorm` (Exercise 8).
+
+### What I did
+
+1. Implemented CPU reference oracles (`src/cpu_ref/residual_rmsnorm_cpu.cpp` and `src/cpu_ref/rmsnorm_linear_cpu.cpp`) with scalar loops and FP64 accumulators.
+2. Extended reference data generator (`tools/gen_reference.py`) with golden generation for PyTorch/NumPy backends covering test shapes (1, 4096), (128, 4096), (32, 127), and QKV projection (1, 12288, 4096).
+3. Implemented `residual_rmsnorm` (`kernels/residual_rmsnorm.cu`): fuses elementwise residual addition with row-wise RMSNorm into a single pass. Both `sum_out` (for next residual addition) and `norm_out` (feeding the next sub-layer) are computed with zero redundant DRAM traffic.
+4. Implemented `rmsnorm_linear` (`kernels/rmsnorm_linear.cu`): fuses row-wise RMSNorm with subsequent linear projection. The normalized row is maintained in dynamic shared memory (17.2 KiB for K=4096) and broadcast across warps during matrix multiplication accumulation, completely eliminating the intermediate activation matrix from DRAM.
+5. Implemented comprehensive test suites in `tests/test_cpu_ref.cpp` and `tests/test_kernels.cu`, including A/B checks against golden reference data, property checks on zero inputs and null weight vectors, contract tests for input validation, and direct equivalence tests comparing fused kernels against separate constituent kernels (`rmsnorm` + `matmul_tiled`).
+6. Added benchmarks in `bench/bench_kernels.cu` measuring separate vs. fused performance at decoding ($M=1$) and prefill ($M=512$) dimensions.
+7. Authored ADR 0006 (`docs/adr/0006-kernel-fusion-strategy.md`) documenting the memory-wall rationale, design decisions, and future fusion roadmap.
+
+### Does it work
+
+Verified via full test suite:
+- All CPU reference tests passing against independent reference data.
+- All CUDA kernel tests passing across standard and edge-case shapes ((17, 127, 31)).
+- Launch contract tests verify error handling for negative dimensions, null pointers, and no-op zero dimensions.
+- Equivalence tests verify fused operations match separate kernel composition to tight float32 tolerance.
+
+### Prediction, written before measuring
+
+- For `residual_rmsnorm` at $512 \times 4096$: Unfused moves 20 bytes/element; fused moves 16 bytes/element (20% reduction in DRAM traffic, saving 8 MiB). Predicted speedup: ~1.20x–1.25x.
+- For `rmsnorm_linear` at $1 \times 4096 \times 4096$ (decode): Dominated by GEMV memory bandwidth and kernel launch overhead. Eliminating 1 launch (~3–5 µs) is a measurable win on short operations.
+- For `rmsnorm_linear` at $512 \times 4096 \times 4096$ (prefill): Eliminating 8 MiB of write and 8 MiB of read traffic (16 MiB DRAM round-trip). Predicted speedup: ~1.15x–1.30x over separate RMSNorm + tiled GEMM.
+
+### Next steps
+
+Module 4: FlashAttention implementation (tiled online softmax + GEMM fusion) to avoid materializing the $O(S^2)$ attention matrix.
+
+---
+
 ## Week 05 — 2026-09-25 · matmul_tiled (exercise 6)
 
 **Objective / module:** Objective 2, exercise 6 — shared-memory tiled GEMM (the headline

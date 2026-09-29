@@ -350,6 +350,88 @@ void bench_launch_overhead(Table& t, int reps) {
                 /*warmup=*/20, std::max(reps, 200));
 }
 
+//===----------------------------------------------------------------------===//
+// 7. Module 3 -- Fused kernels: measuring the value of eliminating DRAM traffic.
+//===----------------------------------------------------------------------===//
+void bench_residual_rmsnorm(Table& t, int reps) {
+  const struct { std::int64_t rows, cols; } shapes[] = {
+      {1, 4096},
+      {512, 4096},
+  };
+
+  for (const auto& s : shapes) {
+    const std::int64_t rows = s.rows;
+    const std::int64_t cols = s.cols;
+    const std::size_t n = static_cast<std::size_t>(rows * cols);
+    const std::string label = std::to_string(rows) + "x" + std::to_string(cols);
+
+    DeviceBuffer<float> x(random_host(n, 1u));
+    DeviceBuffer<float> res(random_host(n, 2u));
+    DeviceBuffer<float> weight(random_host(static_cast<std::size_t>(cols), 3u));
+    DeviceBuffer<float> norm_out(n);
+    DeviceBuffer<float> sum_out(n);
+    DeviceBuffer<float> temp_sum(n);
+
+    const double flops = 5.0 * d(rows) * d(cols);
+    const double separate_bytes = (5.0 * d(n) + d(cols)) * sizeof(float);
+    const double fused_bytes = (4.0 * d(n) + d(cols)) * sizeof(float);
+
+    t.measure_gpu("residual+rmsnorm (separate)", label, flops, separate_bytes,
+                  [&] {
+                    engine::cuda::vector_add(x.get(), res.get(), temp_sum.get(), rows * cols);
+                    engine::cuda::rmsnorm(temp_sum.get(), weight.get(), norm_out.get(), rows, cols, 1e-5f);
+                  },
+                  /*warmup=*/5, reps);
+
+    t.measure_gpu("residual_rmsnorm (fused)", label, flops, fused_bytes,
+                  [&] {
+                    engine::cuda::residual_rmsnorm(x.get(), res.get(), weight.get(),
+                                                   norm_out.get(), sum_out.get(),
+                                                   rows, cols, 1e-5f);
+                  },
+                  /*warmup=*/5, reps);
+  }
+}
+
+void bench_rmsnorm_linear(Table& t, int reps) {
+  const struct { std::int64_t M, N, K; } shapes[] = {
+      {1, 4096, 4096},     // single-token decode
+      {512, 4096, 4096},   // prefill batch
+      {1, 12288, 4096},    // QKV projection
+  };
+
+  for (const auto& s : shapes) {
+    const std::int64_t M = s.M;
+    const std::int64_t N = s.N;
+    const std::int64_t K = s.K;
+    const std::string label = std::to_string(M) + "x" + std::to_string(N) + "x" + std::to_string(K);
+
+    DeviceBuffer<float> in(random_host(static_cast<std::size_t>(M * K), 1u));
+    DeviceBuffer<float> weight(random_host(static_cast<std::size_t>(K), 2u));
+    DeviceBuffer<float> W(random_host(static_cast<std::size_t>(K * N), 3u));
+    DeviceBuffer<float> out(static_cast<std::size_t>(M * N));
+    DeviceBuffer<float> temp(static_cast<std::size_t>(M * K));
+
+    const double flops = 4.0 * d(M) * d(K) + 2.0 * d(M) * d(N) * d(K);
+    const double separate_bytes = (d(M) * d(K) * 2.0 + d(K) + d(K) * d(N) + d(M) * d(N)) * sizeof(float);
+    const double fused_bytes = (d(M) * d(K) + d(K) + d(K) * d(N) + d(M) * d(N)) * sizeof(float);
+
+    t.measure_gpu("rmsnorm+matmul (separate)", label, flops, separate_bytes,
+                  [&] {
+                    engine::cuda::rmsnorm(in.get(), weight.get(), temp.get(), M, K, 1e-5f);
+                    engine::cuda::matmul_tiled(temp.get(), W.get(), out.get(), M, N, K);
+                  },
+                  /*warmup=*/3, reps);
+
+    t.measure_gpu("rmsnorm_linear (fused)", label, flops, fused_bytes,
+                  [&] {
+                    engine::cuda::rmsnorm_linear(in.get(), weight.get(), W.get(), out.get(),
+                                                 M, N, K, 1e-5f);
+                  },
+                  /*warmup=*/3, reps);
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -395,6 +477,8 @@ int main(int argc, char** argv) {
   bench_softmax(t, reps);
   bench_rmsnorm(t, reps);
   bench_matmul(t, reps, /*include_large=*/!quick);
+  bench_residual_rmsnorm(t, reps);
+  bench_rmsnorm_linear(t, reps);
   t.print();
 
   if (t.has_unimplemented()) {

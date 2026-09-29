@@ -61,9 +61,15 @@ passed 80   failed 0   pending 0   skipped 0
 | 5 | `matmul_naive` | ✅ Complete (coalesced 16x16 2D mapping) | ✅ Measured (1,852 GFLOP/s @ 4096^3) |
 | 6 | `matmul_tiled` | ✅ Complete (shared-memory 32x32 tiled GEMM) | ✅ Measured (2,563 GFLOP/s @ 4096^3, +38% over naive) |
 
-### ❌ Module 3+ — Future Work (not started)
+### ✅ Module 3 — Kernel Fusion (2/2 complete)
 
-- [ ] Kernel fusion (pre-attention & feedforward fusion)
+| # | Kernel | Status | Description |
+|---|---|---|---|
+| 7 | `rmsnorm_linear` | ✅ Complete | Fused RMSNorm + Linear projection (pre-attention / pre-FFN) |
+| 8 | `residual_rmsnorm` | ✅ Complete | Fused Residual Add + RMSNorm (post-attention / post-FFN) |
+
+### ❌ Module 4+ — Future Work (not started)
+
 - [ ] FlashAttention (tiled online softmax + GEMM fusion)
 - [ ] Quantization — packed INT4 weights + dequant kernels
 - [ ] KV-cache optimization — ring-buffer with zero-copy slicing
@@ -76,8 +82,8 @@ passed 80   failed 0   pending 0   skipped 0
 
 ## Immediate next steps
 
-1. **Kernel Fusion (Module 3)** — combine RMSNorm + QKV projection, or Softmax + Attention
-2. **FlashAttention Implementation** — generalise tiled online softmax to avoid materializing $S = QK^T$
+1. **FlashAttention Implementation (Module 4)** — generalise tiled online softmax to avoid materializing $S = QK^T$
+2. **Quantization (Module 5)** — packed INT4 weights + dequant kernels
 3. **Record findings in lab notebook** (`docs/lab-notebook.md`)
 
 ## Known issues / blockers

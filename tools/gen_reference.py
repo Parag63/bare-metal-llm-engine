@@ -121,6 +121,26 @@ class NumpyBackend:
     def matmul(a, b):
         return a.astype(np.float64) @ b.astype(np.float64)
 
+    @staticmethod
+    def residual_rmsnorm(x, residual, weight, eps):
+        x64 = x.astype(np.float64)
+        res64 = residual.astype(np.float64)
+        sum64 = x64 + res64
+        mean_sq = np.mean(sum64 * sum64, axis=-1, keepdims=True)
+        norm = sum64 / np.sqrt(mean_sq + eps)
+        if weight is not None:
+            norm = norm * weight.astype(np.float64)
+        return norm, sum64
+
+    @staticmethod
+    def rmsnorm_linear(x, weight, W, eps):
+        x64 = x.astype(np.float64)
+        mean_sq = np.mean(x64 * x64, axis=-1, keepdims=True)
+        temp = x64 / np.sqrt(mean_sq + eps)
+        if weight is not None:
+            temp = temp * weight.astype(np.float64)
+        return temp @ W.astype(np.float64)
+
 
 class TorchBackend:
     name = "torch"
@@ -157,6 +177,24 @@ class TorchBackend:
 
     def matmul(self, a, b):
         return (self._t(a) @ self._t(b)).numpy()
+
+    def residual_rmsnorm(self, x, residual, weight, eps):
+        t = self.torch
+        x64 = self._t(x)
+        res64 = self._t(residual)
+        sum64 = x64 + res64
+        norm = sum64 * t.rsqrt(sum64.pow(2).mean(-1, keepdim=True) + eps)
+        if weight is not None:
+            norm = norm * self._t(weight)
+        return norm.numpy(), sum64.numpy()
+
+    def rmsnorm_linear(self, x, weight, W, eps):
+        t = self.torch
+        x64 = self._t(x)
+        temp = x64 * t.rsqrt(x64.pow(2).mean(-1, keepdim=True) + eps)
+        if weight is not None:
+            temp = temp * self._t(weight)
+        return (temp @ self._t(W)).numpy()
 
 
 def select_backend(requested: str):
@@ -214,6 +252,23 @@ MATMUL_SHAPES = [
     (128, 64, 256),     # all three dims different: catches K/N stride confusion
     (17, 23, 31),       # no dim divisible by any tile size: catches edge padding
     (512, 512, 512),
+]
+
+# Module 3 -- (rows, cols, with_weight)
+RESIDUAL_RMSNORM_SHAPES = [
+    (1, 4096, True),      # Single token
+    (128, 4096, True),    # Prefill batch
+    (32, 127, True),      # Awkward width
+    (32, 4096, False),    # weight == nullptr path
+]
+
+# Module 3 -- (M, N, K, with_weight)
+RMSNORM_LINEAR_SHAPES = [
+    (1, 4096, 4096, True),     # Single-token decode, LLaMA-7B dims
+    (32, 4096, 4096, True),    # Small batch
+    (1, 12288, 4096, True),    # QKV projection (3 x 4096)
+    (17, 127, 31, True),       # Edge-case: nothing divides anything
+    (32, 4096, 4096, False),   # weight == nullptr path
 ]
 
 
@@ -301,6 +356,46 @@ def build_cases(rng, backend):
             "B": b,
             "expected": backend.matmul(a, b),
         }
+
+    # --- residual_rmsnorm (Exercise 8) --------------------------------------
+    for rows, cols, with_weight in RESIDUAL_RMSNORM_SHAPES:
+        x = rng.standard_normal((rows, cols), dtype=np.float32)
+        res = rng.standard_normal((rows, cols), dtype=np.float32)
+        tensors = {"x": x, "residual": res}
+        weight = None
+        if with_weight:
+            weight = (rng.standard_normal(cols, dtype=np.float32) * 0.1 + 1.0)
+            tensors["weight"] = weight
+        norm_exp, sum_exp = backend.residual_rmsnorm(x, res, weight, eps)
+        tensors["expected"] = norm_exp
+        tensors["sum_out"] = sum_exp
+        suffix = "w" if with_weight else "now"
+        yield f"residual_rmsnorm__{rows}x{cols}_{suffix}", tensors
+
+    # zeros case
+    zeros_x = np.zeros((2, 256), dtype=np.float32)
+    zeros_res = np.zeros((2, 256), dtype=np.float32)
+    norm_exp, sum_exp = backend.residual_rmsnorm(zeros_x, zeros_res, None, eps)
+    yield "residual_rmsnorm__zeros", {
+        "x": zeros_x,
+        "residual": zeros_res,
+        "expected": norm_exp,
+        "sum_out": sum_exp,
+    }
+
+    # --- rmsnorm_linear (Exercise 7) ----------------------------------------
+    for m, n, k, with_weight in RMSNORM_LINEAR_SHAPES:
+        scale_w = 1.0 / np.sqrt(max(k, 1))
+        x = rng.standard_normal((m, k), dtype=np.float32)
+        W = (rng.standard_normal((k, n), dtype=np.float32) * scale_w).astype(np.float32)
+        tensors = {"input": x, "W": W}
+        weight = None
+        if with_weight:
+            weight = (rng.standard_normal(k, dtype=np.float32) * 0.1 + 1.0)
+            tensors["weight"] = weight
+        tensors["expected"] = backend.rmsnorm_linear(x, weight, W, eps)
+        suffix = "w" if with_weight else "now"
+        yield f"rmsnorm_linear__{m}x{n}x{k}_{suffix}", tensors
 
 
 def main() -> int:
