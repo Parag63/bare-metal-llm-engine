@@ -15,7 +15,7 @@ set(ENGINE_TEST_SOURCES
   golden.cpp             # ENGREF01 reader
   test_dtype.cpp         # dtype table, sizes, INT4 packing arithmetic
   test_cpu_ref.cpp       # the CPU oracle, vs tools/gen_reference.py
-  test_tensor.cpp        # Module 1 specification (mostly TEST_PENDING until Oct 2026)
+  test_tensor.cpp        # Module 1 specification (all tests passing)
 )
 
 # test_kernels.cu is added ONLY when there is an nvcc to compile it. On the laptop
@@ -101,16 +101,16 @@ endif()
 # so that a renamed suite cannot leave behind a ctest entry that runs zero tests and
 # reports PASS forever.
 #
-# It deliberately does NOT check for "at least one test passed" -- a suite that is
-# entirely TEST_PENDING (tensor.*, until Module 1 is written) passes nothing and that
-# is the correct state, not a failure.
+# It deliberately does NOT check for "at least one test passed" -- this matters for
+# future modules where a suite may be entirely TEST_PENDING while the module is
+# being implemented.
 #-----------------------------------------------------------------------------------
 set(ENGINE_TEST_SUITES
   dtype        # DType metadata and quantisation arithmetic
   golden       # is the reference data itself trustworthy?
   cpu_ref      # the CPU oracle, vs PyTorch/NumPy
   storage      # Storage allocation and device rejection
-  tensor       # Module 1: shapes, strides, views  (pending until implemented)
+  tensor       # Module 1: shapes, strides, views  (all passing)
 )
 
 if(ENGINE_CUDA_ENABLED)

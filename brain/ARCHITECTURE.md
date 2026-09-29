@@ -36,11 +36,11 @@ bare-metal-llm-engine/
 │       └── matmul_cpu.cpp
 ├── kernels/            # CUDA kernels (the exercise ladder)
 │   ├── vector_add.cu   # Exercise 1 — WORKED EXAMPLE ✅
-│   ├── reduce_sum.cu   # Exercise 2 — ✅ implemented
-│   ├── softmax.cu      # Exercise 3 — ❌ stubbed
-│   ├── rmsnorm.cu      # Exercise 4 — ❌ stubbed
-│   ├── matmul_naive.cu # Exercise 5 — ❌ stubbed
-│   └── matmul_tiled.cu # Exercise 6 — ❌ stubbed
+│   ├── reduce_sum.cu   # Exercise 2 — ✅ implemented (two-stage + warp shuffle)
+│   ├── softmax.cu      # Exercise 3 — ✅ implemented (three-pass + block reduction)
+│   ├── rmsnorm.cu      # Exercise 4 — ✅ implemented (sum-of-squares + rsqrtf)
+│   ├── matmul_naive.cu # Exercise 5 — ✅ implemented (coalesced 16x16 2D mapping)
+│   └── matmul_tiled.cu # Exercise 6 — ✅ implemented (shared-memory 32x32 tiled GEMM)
 ├── tests/              # Test suites
 │   ├── test_framework.hpp/cpp  # Custom test harness with TEST/TEST_PENDING
 │   ├── test_dtype.cpp          # DType tests
@@ -95,12 +95,12 @@ Six kernels, each building on the previous:
 
 | # | Kernel | Arithmetic Intensity | Status |
 |---|---|---|---|
-| 1 | `vector_add` | 0.08 (memory-bound) | ✅ Complete |
-| 2 | `reduce_sum` | 0.25 (memory-bound) | ✅ Complete |
-| 3 | `softmax_rows` | 0.6 (memory-bound) | ❌ Stubbed |
-| 4 | `rmsnorm` | 0.5 (memory-bound) | ❌ Stubbed |
-| 5 | `matmul_naive` | 0.25 (memory-bound) | ❌ Stubbed |
-| 6 | `matmul_tiled` | 8.0 (still memory-bound) | ❌ Stubbed |
+| 1 | `vector_add` | 0.08 (memory-bound) | ✅ Complete (432.6 GB/s, 85.8% peak) |
+| 2 | `reduce_sum` | 0.25 (memory-bound) | ✅ Complete (458.3 GB/s, 90.9% peak) |
+| 3 | `softmax_rows` | 0.6 (memory-bound) | ✅ Complete (435.7 GB/s, 86.4% peak) |
+| 4 | `rmsnorm` | 0.5 (memory-bound) | ✅ Complete (435.5 GB/s, 86.4% peak) |
+| 5 | `matmul_naive` | 0.25 (memory-bound) | ✅ Complete (1,852 GFLOP/s @ 4096³) |
+| 6 | `matmul_tiled` | 8.0 (still memory-bound) | ✅ Complete (2,563 GFLOP/s @ 4096³) |
 
 Balance point on RTX 4090: ~82 FLOP/byte. Everything below that is memory-bound.
 

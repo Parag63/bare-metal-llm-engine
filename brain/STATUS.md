@@ -1,6 +1,6 @@
 # Current Status
 
-> **Last updated:** 2026-09-25
+> **Last updated:** 2026-09-29
 >
 > This file is the single source of truth for "what's done, what's in progress, and
 > what's next." Update it whenever a milestone is completed.
@@ -82,6 +82,7 @@ passed 80   failed 0   pending 0   skipped 0
 
 ## Known issues / blockers
 
-- GPU benchmarks for `reduce_sum` have not been recorded yet (Machine B access needed)
-- Lab notebook Week 01 measurements are all "pending"
+- Lab notebook is behind: Week 01 GPU measurements are "pending", and Weeks 02–05
+  (exercises 3–6) have not been written yet
 - `colab/` directory is empty (future use)
+- README.md status badge on GitHub may still show the old description until the next push

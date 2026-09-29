@@ -2,8 +2,8 @@
 //===----------------------------------------------------------------------===//
 // engine/tensor.hpp -- Module 1, the tensor abstraction (Objective 1).
 //
-// SCHEDULED FOR OCTOBER 2026. The declarations are complete and the test suite in
-// tests/test_tensor.cpp is written; src/tensor.cpp is stubbed for you to implement.
+// IMPLEMENTED. All 10 steps complete in src/tensor.cpp (559 lines). 24 tensor
+// tests + 4 storage tests passing. See ADR 0002 for the Storage/Tensor split.
 //
 //===----------------------------------------------------------------------===//
 // THE ONE DESIGN DECISION THAT MATTERS HERE

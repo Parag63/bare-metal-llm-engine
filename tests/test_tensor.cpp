@@ -1,18 +1,12 @@
 //===----------------------------------------------------------------------===//
-// tests/test_tensor.cpp -- the specification for Module 1 (October 2026).
+// tests/test_tensor.cpp -- the specification for Module 1 (COMPLETE).
 //
-// THESE TESTS ARE THE DEFINITION OF DONE. Everything below is registered with
-// TEST_PENDING, which means it runs, and a failure is reported as PENDING rather
-// than FAILED so the suite stays green while the module is outstanding. As you
-// implement each method in src/tensor.cpp, the runner will tell you:
+// ALL TESTS PASSING. Every TEST_PENDING has been promoted to TEST. These now
+// serve as permanent regression guards for the tensor library.
 //
-//     [PENDING-PASS] tensor.numel_is_the_product_of_shape  <-- implemented!
-//
-// at which point you change that test's TEST_PENDING to TEST and it becomes a
-// permanent regression guard. The pending count is your progress bar.
-//
-// Recommended order is in the header comment of src/tensor.cpp; the tests are laid
-// out in that same order so you can work top to bottom.
+// The tests are laid out in the implementation order from src/tensor.cpp:
+// contiguous_strides → to_string → constructor → is_contiguous → data/ptr →
+// reshape → permute/transpose → slice → contiguous/clone/to → from_blob.
 //
 //===----------------------------------------------------------------------===//
 // CONVENTIONS PINNED DOWN HERE (decide once, test, never wonder again)

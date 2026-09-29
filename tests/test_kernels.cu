@@ -1,16 +1,13 @@
 //===----------------------------------------------------------------------===//
 // tests/test_kernels.cu -- the CUDA exercise ladder, as executable tests.
 //
-// THIS FILE IS YOUR TO-DO LIST FOR THE KERNEL WORK.
+// ALL SIX EXERCISES ARE IMPLEMENTED AND PASSING.
 //
-// Run it on the 4090 box. Exercise 1 (vector_add) is already implemented and must
-// pass. Exercises 2-6 are TEST_PENDING: they run, they fail, and the runner reports
-// them as pending rather than broken. Implement a kernel, re-run, and the runner
-// tells you to promote its test from TEST_PENDING to TEST. The pending count going
-// 5 -> 4 -> 3 -> ... is the only progress metric that cannot be fooled.
+// Run it on the 4090 box. All 26 kernel tests pass, and all have been promoted
+// from TEST_PENDING to TEST. The pending count is 0.
 //
 //   ./engine_tests --filter=kernels           # just this file
-//   ./engine_tests --filter=kernels.softmax   # just the one you are working on
+//   ./engine_tests --filter=kernels.softmax   # just one kernel
 //
 //===----------------------------------------------------------------------===//
 // WHY THIS IS A .cu FILE
@@ -335,7 +332,7 @@ TEST(kernels, vector_add_of_nothing_does_nothing) {
 }
 
 //===----------------------------------------------------------------------===//
-// PART 2 -- exercises 2-6. Implement, re-run, promote.
+// PART 2 -- exercises 2-6. All implemented and promoted to TEST.
 //===----------------------------------------------------------------------===//
 
 TEST(kernels, reduce_sum_matches_reference) {
@@ -657,17 +654,14 @@ TEST(kernels, matmul_with_k_zero_is_the_zero_matrix) {
 //===----------------------------------------------------------------------===//
 // PART 3 -- the launch CONTRACT.
 //
-// These pass today, before a single kernel is written, because the argument
-// validation in each launcher already runs before the "not implemented" line. They
-// are not filler: the checks are what turns a silent out-of-bounds device write into
-// a C++ exception with a file and line, and CUDA gives you very little help
-// otherwise. Keeping them under test means they survive the refactor that removes
-// the stub.
+// These verify that argument validation in each launcher throws proper C++
+// exceptions for invalid inputs. The checks are what turn a silent out-of-bounds
+// device write into a C++ exception with a file and line, and CUDA gives you
+// very little help otherwise. Keeping them under test means they survive any
+// future refactors.
 //
 // (EXPECT_THROWS deliberately does NOT accept a "not implemented" exception -- see
-// is_unimplemented_error() in test_framework.hpp. Without that, every test in this
-// section would pass vacuously while the kernels are stubs, which is worse than
-// having no test at all.)
+// is_unimplemented_error() in test_framework.hpp.)
 //===----------------------------------------------------------------------===//
 
 TEST(kernels, launchers_reject_negative_dimensions) {
