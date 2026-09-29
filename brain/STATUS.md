@@ -82,7 +82,9 @@ passed 80   failed 0   pending 0   skipped 0
 
 ## Known issues / blockers
 
-- Lab notebook is behind: Week 01 GPU measurements are "pending", and Weeks 02–05
-  (exercises 3–6) have not been written yet
+- Week 01 GPU measurements ("pending: run on Machine B") have not been backfilled — the
+  lab notebook records what was believed at the time, per the "never edit past entries"
+  rule. The actual numbers (458.3 GB/s, 90.9% peak) are recorded in STATUS.md and
+  ARCHITECTURE.md.
 - `colab/` directory is empty (future use)
-- README.md status badge on GitHub may still show the old description until the next push
+
