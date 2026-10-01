@@ -60,13 +60,17 @@ std::string mib(std::size_t bytes) {
 
 int main(int argc, char** argv) {
   bool quick = false;
+  bool json_output = false;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     if (arg == "--quick") {
       quick = true;
+    } else if (arg == "--json") {
+      json_output = true;
     } else if (arg == "--help" || arg == "-h") {
-      std::printf("usage: bench_cpu_ref [--quick]\n");
+      std::printf("usage: bench_cpu_ref [--quick] [--json]\n");
       std::printf("  --quick   fewer repetitions, skips the 1024^3 matmul\n");
+      std::printf("  --json    output results as machine-readable JSON\n");
       return 0;
     } else {
       std::fprintf(stderr, "unknown argument: %s\n", arg.c_str());
@@ -182,13 +186,16 @@ int main(int argc, char** argv) {
     }
   }
 
-  t.print();
-
-  std::printf(
-      "\nWhen you quote a speedup against these numbers, say what the baseline is:\n"
-      "  \"Nx faster than a single-threaded scalar C++ reference implementation\"\n"
-      "and not \"Nx faster than CPU\". The first is a fact; the second is a claim you\n"
-      "cannot defend, because a blocked multi-threaded AVX2 matmul would be far\n"
-      "closer to the GPU than this code is.\n");
+  if (json_output) {
+    t.print_json(std::cout);
+  } else {
+    t.print();
+    std::printf(
+        "\nWhen you quote a speedup against these numbers, say what the baseline is:\n"
+        "  \"Nx faster than a single-threaded scalar C++ reference implementation\"\n"
+        "and not \"Nx faster than CPU\". The first is a fact; the second is a claim you\n"
+        "cannot defend, because a blocked multi-threaded AVX2 matmul would be far\n"
+        "closer to the GPU than this code is.\n");
+  }
   return 0;
 }

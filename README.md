@@ -7,10 +7,10 @@ inference path.
 
 B.Tech CSE major project · Parag Das (2303344) · Jul 2026 – Jun 2027
 
-> **Status: Modules 1 & 2 complete. Moving to kernel fusion and FlashAttention.**
-> The tensor library, all six CUDA kernels, and the full verification/benchmark
-> infrastructure are implemented and verified. `passed 80  failed 0  pending 0` on
-> the CUDA-enabled build (RTX 4070 SUPER, nvcc 12.6, 2026-09-25). Memory-bound
+> **Status: Modules 1, 2 & 3 complete. Moving to FlashAttention (Module 4).**
+> The tensor library, all eight CUDA kernels (6 ladder kernels + 2 fused kernels), and the full
+> verification/benchmark infrastructure are implemented and verified. `passed 92  failed 0  pending 0` on
+> the CUDA-enabled build (RTX 4070 SUPER, nvcc 12.6, 2026-09-29). Memory-bound
 > kernels achieve 85–91% of peak bandwidth; the tiled matmul reaches 2,563 GFLOP/s
 > at 4096³ (+38% over naive).
 
@@ -53,16 +53,16 @@ include/engine/     public headers — dtype, tensor, allocator, device_buffer,
                     check (error handling), cpu_ref, kernels (launch API), cuda_device
 src/                C++ implementation (tensor.cpp: 559 lines, Module 1)
 src/cpu_ref/        the CPU oracle: scalar, FP64 accumulators, obvious over fast
-kernels/            CUDA kernels — all six implemented and benchmarked
+kernels/            CUDA kernels — all eight implemented (6 ladder + 2 fused ops)
 tests/              custom harness + suites: dtype, golden, cpu_ref, storage, tensor,
-                    kernels (80 tests, all passing)
+                    kernels (92 tests, all passing)
 tests/golden/       generated float64 reference data — gitignored, regenerate it
 bench/              bench_cpu_ref (the denominator) and bench_kernels (the results)
 tools/              gen_reference.py
 cmake/              CUDA detection, warning flags, config header template
 brain/              persistent AI/human context — project state, conventions, decisions
 runbook/            operational procedures — build, test, benchmark, add-kernel
-docs/               environment, exercise ladder, ADRs, lab notebook
+docs/               environment, exercise ladder, ADRs, lab notebook, architecture flowcharts
 ```
 
 ## How correctness is established
@@ -127,18 +127,29 @@ SUPER with locked GPU clocks:
 
 | # | Kernel | New idea | GPU result |
 |---|---|---|---|
-| 1 | `vector_add` | threads, blocks, grid-stride loops | ✅ 432.6 GB/s (85.8% peak) |
-| 2 | `reduce_sum` | shared memory, `__syncthreads`, warp shuffles | ✅ 458.3 GB/s (90.9% peak) |
-| 3 | `softmax_rows` | per-row reduction, numerical stability | ✅ 435.7 GB/s (86.4% peak) |
-| 4 | `rmsnorm` | reusing the reduction pattern | ✅ 435.5 GB/s (86.4% peak) |
-| 5 | `matmul_naive` | 2-D indexing, memory traffic problem | ✅ 1,852 GFLOP/s @ 4096³ |
-| 6 | `matmul_tiled` | shared-memory tiling and data reuse | ✅ 2,563 GFLOP/s @ 4096³ (+38%) |
+| 1 | `vector_add` | threads, blocks, grid-stride loops | ✅ 419.1 GB/s (83.2% peak) |
+| 2 | `reduce_sum` | shared memory, `__syncthreads`, warp shuffles | ✅ 456.1 GB/s (90.5% peak) |
+| 3 | `softmax_rows` | per-row reduction, numerical stability | ✅ 434.1 GB/s (86.1% peak) |
+| 4 | `rmsnorm` | reusing the reduction pattern | ✅ 435.0 GB/s (86.3% peak) |
+| 5 | `matmul_naive` | 2-D indexing, memory traffic problem | ✅ 2268 GFLOP/s @ 2048^3 |
+| 6 | `matmul_tiled` | shared-memory tiling and data reuse | ✅ 2728 GFLOP/s @ 2048^3 (+20%) |
+| 7 | `gemv` | decode token projection (M=1), 128-bit vector loads | ✅ 474.0 GB/s (94.0% peak) |
 
-Design details in **[docs/02-cuda-exercises.md](docs/02-cuda-exercises.md)**.
+### Kernel fusion (Module 3 — complete)
 
-Arithmetic intensity, against the RTX 4090's ~82 FLOP/byte balance point, tells you which
-resource limits each one: `vector_add` is 0.08 (memory-bound by a factor of a thousand),
-`rmsnorm` 0.5, `softmax` 0.6, and matmul at 1024³ is 170 — the first compute-bound
+Fusing memory-bound operations between transformer sub-layers to eliminate DRAM round-trips:
+
+| # | Kernel | Fused operations | Design rationale |
+|---|---|---|---|
+| 8 | `rmsnorm_linear` | RMSNorm + Linear projection | Keeps normalized row in shared memory; saves 16 MiB DRAM round-trip per layer |
+| 9 | `residual_rmsnorm` | Residual Add + RMSNorm | Computes residual sum and normalized state in a single pass; saves 8 MiB DRAM traffic |
+
+Design details in **[docs/02-cuda-exercises.md](docs/02-cuda-exercises.md)** and **[ADR 0006](docs/adr/0006-kernel-fusion-strategy.md)**. Complete reference diagrams in **[docs/llm-inference-flowchart.md](docs/llm-inference-flowchart.md)**.
+Empirical analysis of non-optimizations and bottlenecks is recorded in **[docs/negative-results.md](docs/negative-results.md)**, and full hardware roofline curves are visualized in **[docs/roofline.png](docs/roofline.png)**.
+
+Arithmetic intensity, against the RTX 4070 SUPER's ~164 FLOP/byte balance point, tells you which
+resource limits each one: `vector_add` is 0.08 (memory-bound by a factor of two thousand),
+`gemv` is 0.5, `rmsnorm` 0.5, `softmax` 0.6, and matmul at 1024³ is 170 — the first compute-bound
 kernel in the project, and the only one where being clever about arithmetic wins anything.
 
 ## Design decisions
@@ -150,6 +161,7 @@ kernel in the project, and the only one where being clever about arithmetic wins
 | [0003](docs/adr/0003-raw-pointer-kernel-api.md) | Kernel launchers take raw pointers and dimensions, not `Tensor` — decouples the kernel ladder from Module 1 |
 | [0004](docs/adr/0004-cublas-baseline-only.md) | cuBLAS is a benchmark baseline, linked into exactly one target, never an implementation |
 | [0005](docs/adr/0005-cuda-arch-explicit.md) | `ENGINE_CUDA_ARCH` is explicit (`89`), and mismatches warn loudly — a wrong-arch build otherwise silently JITs and benchmarks nothing meaningful |
+| [0006](docs/adr/0006-kernel-fusion-strategy.md) | Kernel fusion strategy — fuse memory-bound elementwise operations between sub-layers to eliminate DRAM traffic |
 
 ## Build options
 
@@ -174,9 +186,10 @@ files; `--target bench` runs the benchmark binaries.
 - [x] **Module 2 — CUDA Kernel Ladder** (complete). Six hand-written kernels from
   `vector_add` through `matmul_tiled`, with three-tier verification and GPU benchmarks.
   26 kernel tests, all passing. Memory-bound kernels at 85–91% peak bandwidth.
-- [ ] **Kernel Fusion** — combine RMSNorm + QKV projection, or Softmax + Attention, to
-  reduce launch overhead (~5 µs/launch × 320 launches/token = ~600 tok/s ceiling).
-- [ ] **FlashAttention** — tiled online softmax + GEMM fusion, avoiding materialisation
+- [x] **Module 3 — Kernel Fusion** (complete). Fused RMSNorm + Linear projection (exercise 7)
+  and Fused Residual Add + RMSNorm (exercise 8). Eliminates intermediate DRAM roundtrips
+  and kernel launch overhead. Verified against golden reference data.
+- [ ] **Module 4 — FlashAttention** — tiled online softmax + GEMM fusion, avoiding materialisation
   of the full S = QK^T attention-score matrix.
 - [ ] **Quantization** — packed INT4 weights with dequantisation kernels.
 - [ ] **KV-Cache** — ring-buffer cache with zero-copy slicing via the Tensor view system.

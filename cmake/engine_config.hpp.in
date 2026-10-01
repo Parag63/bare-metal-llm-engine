@@ -16,3 +16,6 @@
 // The CUDA architecture(s) this build targets, as a string, e.g. "89" for an RTX 4090.
 // Empty on CPU-only builds. Printed by benchmarks so results are self-documenting.
 #define ENGINE_CUDA_ARCH_STRING "@ENGINE_CUDA_ARCH@"
+
+// Git commit hash of the build tree
+#define ENGINE_GIT_HASH "@ENGINE_GIT_HASH@"

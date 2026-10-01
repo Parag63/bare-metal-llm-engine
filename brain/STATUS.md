@@ -1,6 +1,6 @@
 # Current Status
 
-> **Last updated:** 2026-09-29
+> **Last updated:** 2026-10-01
 >
 > This file is the single source of truth for "what's done, what's in progress, and
 > what's next." Update it whenever a milestone is completed.
@@ -8,9 +8,9 @@
 ## Test score (verified on Machine B, RTX 4070 SUPER, sm_89)
 
 ```
-passed 92   failed 0   pending 0   skipped 0
+passed 97   failed 0   pending 0   skipped 0
 ```
-*(CUDA-enabled build with nvcc 12.6, RTX 4070 SUPER — 2026-09-29)*
+*(CUDA-enabled build with nvcc 12.6, RTX 4070 SUPER — 2026-10-01)*
 
 ### Test suite breakdown
 
@@ -18,79 +18,57 @@ passed 92   failed 0   pending 0   skipped 0
 |---|---|---|
 | `dtype` | 10 | ✅ All passing |
 | `golden` | 6 | ✅ All passing |
-| `cpu_ref` | 16 | ✅ All 16 passing (includes Module 3 fused ops) |
+| `cpu_ref` | 18 | ✅ All 18 passing (includes Module 3 fused ops + GEMV) |
 | `storage` | 4 | ✅ All passing |
 | `tensor` | 24 | ✅ All passing (GPU + CPU verified) |
-| `kernels` | 32 | ✅ All 32 passing (all 8 kernels + contracts verified) |
+| `kernels` | 35 | ✅ All 35 passing (all 9 kernels + contracts verified) |
 
-## Module completion
+---
 
-### ✅ Infrastructure (100%)
+## Action List Gap Analysis Status (from `plans/llm-engine-action-list.docx`)
 
-- [x] CMake build system (CUDA-optional, supports WSL & Linux & MSVC)
-- [x] Custom test harness (`TEST`, `TEST_PENDING`, `SKIP_TEST`)
-- [x] Benchmark harness (CUDA events, warmup, median/min, spread)
-- [x] Golden reference generator (`gen_reference.py`)
-- [x] Build/test/run scripts (bash + PowerShell)
-- [x] `.clang-format`, `.gitignore`
-- [x] 5 ADR documents
-- [x] Lab notebook template + entries
+### Project-Wide & Infrastructure
+- [x] **[Must]** Automated README results table generated via script (`tools/generate_results_table.py`)
+- [x] **[Must]** Save environment details with every benchmark run (`driver_version`, `clock_rate_mhz`, `peak_bandwidth_gbs`, `git_hash`, compiler flags)
+- [x] **[Must]** Benchmark harness JSON output (`--json` flag on `bench_kernels` and `bench_cpu_ref`)
+- [x] **[Should]** CI building CPU-only and running CPU tests (`.github/workflows/ci.yml`)
+- [x] **[Should]** Roofline plot script against bandwidth and compute ceilings (`tools/roofline_plot.py` -> `docs/roofline.png`)
+- [x] **[Should]** "Negative results" page for non-optimizations and bottlenecks (`docs/negative-results.md`)
+- [ ] **[Must]** Benchmark script running `llama.cpp`'s `llama-bench` on same machine, model, and prompt lengths (Scheduled for Module 8)
+- [ ] **[Stretch]** Thin HTTP streaming serving layer (Scheduled for Module 8)
 
-### ✅ Module 1 — Tensor Library (100% complete & verified)
+### Completed Modules (1, 2, 3)
+- [x] **Module 1 (Tensor Library):** Storage, views, strided slicing, reshape, permute, contiguous, clone, from_blob.
+  - *Upcoming refinements:* FP16 end-to-end path (Nov 2026), PoolAllocator + accounting (Nov 2026), Stream/event wrapper (Nov 2026).
+- [x] **Module 2 (Kernel Ladder):**
+  - [x] 6 ladder kernels: `vector_add`, `reduce_sum`, `softmax_rows`, `rmsnorm`, `matmul_naive`, `matmul_tiled`.
+  - [x] **[Must]** GEMV kernel for decode token generation (`kernels/gemv.cu`, achieves **474 GB/s / 94.0% peak BW**, $+14\%$ faster than cuBLAS).
+  - *Upcoming refinements:* Register-tiled GEMM + vectorized loads + double buffering to close gap to cuBLAS (Nov 2026).
+- [x] **Module 3 (Kernel Fusion):**
+  - [x] `rmsnorm_linear` (RMSNorm + Linear projection, eliminates 16 MiB DRAM roundtrip at $M=512$).
+  - [x] `residual_rmsnorm` (Residual Add + RMSNorm, eliminates 8 MiB DRAM roundtrip at $M=512$).
+  - [x] **[Must]** Tested fusion at decode shapes ($M=1$) vs prefill ($M=512$), documented why 16 KiB intermediate buffer is L2 cache resident in `docs/negative-results.md` and `docs/lab-notebook.md`.
+  - [x] **[Should]** Profiling script for Nsight Compute (`scripts/profile_kernels.sh`).
 
-- [x] `Storage` — refcounted byte buffer, CPU + CUDA allocation, non-owning borrows
-- [x] `Tensor::contiguous_strides`, `numel`, `nbytes`, `size`
-- [x] `Tensor::to_string`
-- [x] Constructor, `Tensor::zeros`
-- [x] `Tensor::is_contiguous`
-- [x] `Tensor::data`, `Tensor::ptr<T>`
-- [x] `Tensor::reshape` (with -1 inference)
-- [x] `Tensor::permute`, `Tensor::transpose`
-- [x] `Tensor::slice`
-- [x] `Tensor::contiguous`, `Tensor::clone`, `Tensor::to`
-- [x] `Tensor::from_blob`
+---
 
-### ✅ Module 2 — CUDA Kernel Ladder (6/6 complete & benchmarked)
+## Detailed Roadmap & Updated Timeline (Oct 2026 – Jun 2027)
 
-| # | Kernel | Status | GPU benchmarks? |
+| Month | Module | Milestone & Deliverables | Priority Items |
 |---|---|---|---|
-| 1 | `vector_add` | ✅ Complete (worked example) | ✅ Measured (432.6 GB/s, 85.8% peak) |
-| 2 | `reduce_sum` | ✅ Complete (two-stage + warp shuffle) | ✅ Measured (458.3 GB/s, 90.9% peak) |
-| 3 | `softmax_rows` | ✅ Complete (three-pass + block reduction) | ✅ Measured (435.7 GB/s, 86.4% peak) |
-| 4 | `rmsnorm` | ✅ Complete (sum-of-squares + rsqrtf) | ✅ Measured (435.5 GB/s, 86.4% peak) |
-| 5 | `matmul_naive` | ✅ Complete (coalesced 16x16 2D mapping) | ✅ Measured (1,852 GFLOP/s @ 4096^3) |
-| 6 | `matmul_tiled` | ✅ Complete (shared-memory 32x32 tiled GEMM) | ✅ Measured (2,563 GFLOP/s @ 4096^3, +38% over naive) |
+| **Oct 2026** | **Module 4: FlashAttention** | • Naive attention baseline ($S \times S$ matrix)<br>• Causal masking + GQA (32 Q heads, 4 KV heads)<br>• Float64 stability test across sequence lengths<br>• Tiled online softmax kernel + memory crossover benchmark<br>• Separate prefill & decode attention kernels<br>• RoPE, SwiGLU, Embedding lookup, Argmax/sampling kernels | `[Must]`×4<br>`[Should]`×2 |
+| **Nov 2026** | **Infrastructure & Ladder Refinements** | • Register-tiled GEMM (`matmul_register_tiled`, float4 loads, double buffer)<br>• End-to-end FP16 Tensor/kernel data path<br>• `PoolAllocator` with memory accounting (peak/current device bytes)<br>• CUDA stream/event asynchronous copy/compute wrapper | `[Must]`×2<br>`[Should]`×2 |
+| **Dec 2026 – Jan 2027** | **Module 5: Quantization** | • Q8_0 fallback + Q4_0 real GGUF block layout (32 weights/block + FP16 scale)<br>• Fused dequantize-and-multiply kernel for GEMV (decode) then prefill<br>• Perplexity measurement: FP16 vs Q8 vs Q4 vs `llama.cpp`<br>• Effective bandwidth per token reporting | `[Must]`×3<br>`[Should]`×1 |
+| **Feb 2027** | **Module 6: KV-Cache** | • Preallocated per-layer cache + incremental decode correctness test<br>• Memory math in notebook (~22 KB/token for TinyLlama FP16)<br>• Head-major vs sequence-major cache layout comparison<br>• [Stretch] INT8 KV quantization or paged allocator | `[Must]`×2<br>`[Should]`×1<br>`[Stretch]`×1 |
+| **Mar 2027** | **Module 7: Model Loader** | • Full GGUF parser (header, metadata, tensor table, alignment)<br>• Memory-mapped weights (`mmap` on Linux/WSL, `MapViewOfFile` on Windows)<br>• Dynamic tokenizer & architecture metadata reading from GGUF<br>• Tensor-by-tensor validation against official `gguf` library<br>• Synthetic GGUF fixture generator script for CI | `[Must]`×3<br>`[Should]`×1 |
+| **Apr – May 2027** | **Module 8: End-to-End Inference** | • BPE tokenizer with byte fallback, validated against reference tokenizer<br>• Layer-by-layer comparison tool against PyTorch reference<br>• Greedy, temperature, top-k, top-p sampling<br>• End-to-end TinyLlama 1.1B inference<br>• Headline benchmark: prefill & decode tok/s vs `llama.cpp`<br>• Compare decode speed to memory bandwidth ceiling (~230 tok/s FP16, ~780 tok/s Q4)<br>• [Stretch] CUDA Graphs for decode launch overhead | `[Must]`×5<br>`[Stretch]`×1 |
+| **Jun 2027** | **Deliverables & Thesis** | • Gap analysis write-up vs `llama.cpp`<br>• Public lab notebook with predictions vs measurements<br>• Two technical blog posts ("Why tiled GEMM sat at 7% of peak", "Where decode time goes")<br>• Final Major Project Dissertation & Defense | Deliverables×4 |
 
-### ✅ Module 3 — Kernel Fusion (2/2 complete)
+---
 
-| # | Kernel | Status | Description |
-|---|---|---|---|
-| 7 | `rmsnorm_linear` | ✅ Complete | Fused RMSNorm + Linear projection (pre-attention / pre-FFN) |
-| 8 | `residual_rmsnorm` | ✅ Complete | Fused Residual Add + RMSNorm (post-attention / post-FFN) |
+## Immediate Next Steps (October 2026)
 
-### ❌ Module 4+ — Future Work (not started)
-
-- [ ] FlashAttention (tiled online softmax + GEMM fusion)
-- [ ] Quantization — packed INT4 weights + dequant kernels
-- [ ] KV-cache optimization — ring-buffer with zero-copy slicing
-- [ ] GGUF-style model loader — mmap'd weights
-- [ ] Tokenizer — BPE
-- [ ] Sampler — top-k, top-p, temperature
-- [ ] Python bindings
-- [ ] End-to-end inference: TinyLlama 1.1B
-- [ ] Headline result: quantized Llama-2-7B
-
-## Immediate next steps
-
-1. **FlashAttention Implementation (Module 4)** — generalise tiled online softmax to avoid materializing $S = QK^T$
-2. **Quantization (Module 5)** — packed INT4 weights + dequant kernels
-3. **Record findings in lab notebook** (`docs/lab-notebook.md`)
-
-## Known issues / blockers
-
-- Week 01 GPU measurements ("pending: run on Machine B") have not been backfilled — the
-  lab notebook records what was believed at the time, per the "never edit past entries"
-  rule. The actual numbers (458.3 GB/s, 90.9% peak) are recorded in STATUS.md and
-  ARCHITECTURE.md.
-- `colab/` directory is empty (future use)
-
+1. **Module 4: Naive Attention Baseline** — build $S \times S$ attention matrix reference.
+2. **Support Causal Masking & GQA** — 32 Q heads sharing 4 KV heads for TinyLlama.
+3. **FlashAttention Implementation** — online softmax tile-by-tile fusion.
+4. **Prerequisite Kernels for TinyLlama** — RoPE (Rotary Embeddings) and SwiGLU.

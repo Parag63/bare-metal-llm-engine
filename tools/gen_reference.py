@@ -141,6 +141,10 @@ class NumpyBackend:
             temp = temp * weight.astype(np.float64)
         return temp @ W.astype(np.float64)
 
+    @staticmethod
+    def gemv(A, x):
+        return x.astype(np.float64) @ A.astype(np.float64)
+
 
 class TorchBackend:
     name = "torch"
@@ -195,6 +199,9 @@ class TorchBackend:
         if weight is not None:
             temp = temp * self._t(weight)
         return (temp @ self._t(W)).numpy()
+
+    def gemv(self, A, x):
+        return (self._t(x) @ self._t(A)).numpy()
 
 
 def select_backend(requested: str):
@@ -269,6 +276,14 @@ RMSNORM_LINEAR_SHAPES = [
     (1, 12288, 4096, True),    # QKV projection (3 x 4096)
     (17, 127, 31, True),       # Edge-case: nothing divides anything
     (32, 4096, 4096, False),   # weight == nullptr path
+]
+
+# GEMV shapes -- (N, K)
+GEMV_SHAPES = [
+    (4096, 4096),     # Standard decode token projection
+    (12288, 4096),    # Wide projection (MLP Gate/Up projection)
+    (127, 31),        # Irregular shape (bounds check & alignment test)
+    (64, 128),        # Small power of 2
 ]
 
 
@@ -396,6 +411,17 @@ def build_cases(rng, backend):
         tensors["expected"] = backend.rmsnorm_linear(x, weight, W, eps)
         suffix = "w" if with_weight else "now"
         yield f"rmsnorm_linear__{m}x{n}x{k}_{suffix}", tensors
+
+    # --- gemv ---------------------------------------------------------------
+    for n, k in GEMV_SHAPES:
+        scale_a = 1.0 / np.sqrt(max(k, 1))
+        a = (rng.standard_normal((k, n), dtype=np.float32) * scale_a).astype(np.float32)
+        x = rng.standard_normal(k, dtype=np.float32)
+        yield f"gemv__{n}x{k}", {
+            "A": a,
+            "x": x,
+            "expected": backend.gemv(a, x),
+        }
 
 
 def main() -> int:

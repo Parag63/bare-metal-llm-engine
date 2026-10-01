@@ -105,6 +105,27 @@
 
 namespace engbench {
 
+inline std::string escape_json(const std::string& s) {
+  std::ostringstream o;
+  for (char c : s) {
+    if (c == '"') o << "\\\"";
+    else if (c == '\\') o << "\\\\";
+    else if (c == '\b') o << "\\b";
+    else if (c == '\f') o << "\\f";
+    else if (c == '\n') o << "\\n";
+    else if (c == '\r') o << "\\r";
+    else if (c == '\t') o << "\\t";
+    else if (static_cast<unsigned char>(c) <= 0x1f) {
+      char buf[8];
+      std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
+      o << buf;
+    } else {
+      o << c;
+    }
+  }
+  return o.str();
+}
+
 //===----------------------------------------------------------------------===//
 // Statistics over a set of per-iteration timings.
 //===----------------------------------------------------------------------===//
@@ -267,6 +288,36 @@ struct Result {
     if (bytes <= 0.0) return 0.0;
     return flops / bytes;
   }
+
+  /// Serialize this result to a JSON object string.
+  std::string to_json() const {
+    std::ostringstream oss;
+    oss << "    {\n";
+    oss << "      \"name\": \"" << escape_json(name) << "\",\n";
+    oss << "      \"size\": \"" << escape_json(size) << "\",\n";
+    oss << "      \"implemented\": " << (implemented ? "true" : "false");
+    if (!implemented) {
+      oss << ",\n      \"note\": \"" << escape_json(note) << "\"\n";
+      oss << "    }";
+      return oss.str();
+    }
+    oss << ",\n";
+    oss << "      \"median_ms\": " << stats.median_ms << ",\n";
+    oss << "      \"min_ms\": " << stats.min_ms << ",\n";
+    oss << "      \"max_ms\": " << stats.max_ms << ",\n";
+    oss << "      \"reps\": " << stats.reps << ",\n";
+    oss << "      \"spread_pct\": " << stats.spread_pct() << ",\n";
+    oss << "      \"flops\": " << std::fixed << flops << ",\n";
+    oss << "      \"bytes\": " << std::fixed << bytes << ",\n";
+    oss << "      \"gflops\": " << gflops() << ",\n";
+    oss << "      \"gbps\": " << gbps() << ",\n";
+    const double peak_bw = engine::cuda_peak_bandwidth_gbs();
+    const double pct_bw = (bytes > 0.0 && peak_bw > 0.0) ? (100.0 * gbps() / peak_bw) : 0.0;
+    oss << "      \"pct_peak_bw\": " << pct_bw << ",\n";
+    oss << "      \"arithmetic_intensity\": " << arithmetic_intensity() << "\n";
+    oss << "    }";
+    return oss.str();
+  }
 };
 
 //===----------------------------------------------------------------------===//
@@ -369,6 +420,12 @@ class Table {
     // date is not reproducible, and in six months you will not be able to reconstruct
     // any of it. This footer is the difference between a result and a rumour.
     os << "\nHardware: " << engine::cuda_device_summary() << "\n";
+#if ENGINE_HAS_CUDA
+    os << "Driver version: " << engine::cuda_driver_version() << "\n";
+    if (engine::cuda_clock_rate_khz() > 0) {
+      os << "GPU clock rate: " << (engine::cuda_clock_rate_khz() / 1000) << " MHz\n";
+    }
+#endif
     if (peak_bw > 0.0) {
       os << "Peak DRAM bandwidth (theoretical): " << num(peak_bw) << " GB/s\n";
     }
@@ -389,6 +446,31 @@ class Table {
             " using the machine, the clocks\nwere moving, or the kernel is too short"
             " to measure -- find out which and\nre-run before recording the number.\n";
     }
+  }
+
+  /// Print all results as a JSON document for scripting and plot generation.
+  void print_json(std::ostream& os = std::cout) const {
+    const double peak_bw = engine::cuda_peak_bandwidth_gbs();
+    os << "{\n";
+    os << "  \"title\": \"" << escape_json(title_) << "\",\n";
+    os << "  \"environment\": {\n";
+    os << "    \"device\": \"" << escape_json(engine::cuda_device_summary()) << "\",\n";
+    os << "    \"driver_version\": \"" << escape_json(engine::cuda_driver_version()) << "\",\n";
+    os << "    \"clock_rate_mhz\": " << (engine::cuda_clock_rate_khz() / 1000) << ",\n";
+    os << "    \"peak_bandwidth_gbs\": " << peak_bw << ",\n";
+    os << "    \"git_hash\": \"" << escape_json(ENGINE_GIT_HASH) << "\",\n";
+    os << "    \"build_description\": \"" << escape_json(build_description()) << "\"\n";
+    os << "  },\n";
+    os << "  \"results\": [\n";
+    for (std::size_t i = 0; i < rows_.size(); ++i) {
+      os << rows_[i].to_json();
+      if (i + 1 < rows_.size()) {
+        os << ",";
+      }
+      os << "\n";
+    }
+    os << "  ]\n";
+    os << "}\n";
   }
 
   /// True if any row failed because the kernel is not written yet. main() uses this
@@ -462,6 +544,7 @@ class Table {
 #else
     oss << ", CPU-only build";
 #endif
+    oss << ", git " << ENGINE_GIT_HASH;
     oss << ", " << __DATE__ << " " << __TIME__;
     return oss.str();
   }

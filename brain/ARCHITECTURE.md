@@ -33,46 +33,54 @@ bare-metal-llm-engine/
 │       ├── reduce_cpu.cpp
 │       ├── softmax_cpu.cpp
 │       ├── rmsnorm_cpu.cpp
-│       └── matmul_cpu.cpp
+│       ├── matmul_cpu.cpp
+│       ├── gemv_cpu.cpp
+│       ├── rmsnorm_linear_cpu.cpp
+│       └── residual_rmsnorm_cpu.cpp
 ├── kernels/            # CUDA kernels (the exercise ladder)
 │   ├── vector_add.cu   # Exercise 1 — WORKED EXAMPLE ✅
 │   ├── reduce_sum.cu   # Exercise 2 — ✅ implemented (two-stage + warp shuffle)
 │   ├── softmax.cu      # Exercise 3 — ✅ implemented (three-pass + block reduction)
 │   ├── rmsnorm.cu      # Exercise 4 — ✅ implemented (sum-of-squares + rsqrtf)
 │   ├── matmul_naive.cu # Exercise 5 — ✅ implemented (coalesced 16x16 2D mapping)
-│   └── matmul_tiled.cu # Exercise 6 — ✅ implemented (shared-memory 32x32 tiled GEMM)
-├── tests/              # Test suites
+│   ├── matmul_tiled.cu # Exercise 6 — ✅ implemented (shared-memory 32x32 tiled GEMM)
+│   ├── gemv.cu         # Exercise 7 — ✅ implemented (M=1 decode, 64-col tile, float2)
+│   ├── rmsnorm_linear.cu # Exercise 8 — ✅ implemented (fused RMSNorm + GEMM projection)
+│   └── residual_rmsnorm.cu # Exercise 9 — ✅ implemented (fused Residual Add + RMSNorm)
+├── tests/              # Test suites (97 tests total, 100% passing)
 │   ├── test_framework.hpp/cpp  # Custom test harness with TEST/TEST_PENDING
 │   ├── test_dtype.cpp          # DType tests
 │   ├── test_tensor.cpp         # Module 1 specification (tensor tests)
-│   ├── test_cpu_ref.cpp        # CPU oracle tests
-│   ├── test_kernels.cu         # CUDA kernel tests (exercise ladder)
+│   ├── test_cpu_ref.cpp        # CPU oracle tests (37 tests)
+│   ├── test_kernels.cu         # CUDA kernel tests (40 tests)
 │   ├── golden.hpp/cpp          # Golden file loader
 │   └── golden/                 # Float64 reference data (gitignored, regenerated)
 ├── bench/              # Benchmark harness + benchmarks
-│   ├── bench_harness.hpp       # CUDA-event timing, warmup, median/min reporting
-│   ├── bench_cpu_ref.cpp       # CPU reference baselines
-│   └── bench_kernels.cu        # CUDA kernel benchmarks
+│   ├── bench_harness.hpp       # CUDA-event timing, warmup, JSON export, provenance
+│   ├── bench_cpu_ref.cpp       # CPU reference baselines (--json support)
+│   └── bench_kernels.cu        # CUDA kernel benchmarks (--json support)
 ├── tools/
-│   └── gen_reference.py        # Float64 reference data generator (PyTorch/NumPy)
+│   ├── gen_reference.py        # Float64 reference data generator (PyTorch/NumPy)
+│   ├── generate_results_table.py # Automated README benchmark table updater
+│   └── roofline_plot.py        # Roofline model generator (produces docs/roofline.png)
 ├── cmake/              # CMake modules
 │   ├── EngineCuda.cmake        # CUDA detection (never fatal)
 │   ├── EngineWarnings.cmake    # Warning flags
-│   └── engine_config.hpp.in    # Config header template
+│   └── engine_config.hpp.in    # Config header template (injects git hash & build info)
 ├── scripts/            # Build/test/run scripts
 │   ├── build.ps1 / build.sh
 │   ├── test.sh
-│   └── gpu-run.sh
-├── colab/              # (empty, future use)
+│   ├── gpu-run.sh
+│   └── profile_kernels.sh      # Nsight Compute (ncu) profiling script
 ├── CMakeLists.txt      # Root build configuration
 ├── .clang-format       # Code formatting rules
 ├── .gitignore
-└── README.md           # Human-readable project overview
+└── README.md           # Human-readable project overview & auto-synced benchmark results
 ```
 
 ## Module structure
 
-### Module 1 — Tensor Library (Objective 1, Oct 2026)
+### Module 1 — Tensor Library (Objective 1, Jul – Aug 2026)
 
 The foundation. Two types with a deliberate separation (ADR 0002):
 
@@ -89,31 +97,73 @@ Multiple Tensors can share one Storage. This is required for:
 **Status:** Implemented in `src/tensor.cpp` (all 10 steps). Tests written as `TEST()`
 in `tests/test_tensor.cpp`.
 
-### Module 2 — CUDA Kernel Ladder (Objective 2)
+### Module 2 — CUDA Kernel Ladder & Decode GEMV (Objective 2, Aug – Sep 2026)
 
-Six kernels, each building on the previous:
+Seven foundational kernels, progressing from 1D bandwidth to 2D shared memory and decode GEMV:
 
-| # | Kernel | Arithmetic Intensity | Status |
-|---|---|---|---|
-| 1 | `vector_add` | 0.08 (memory-bound) | ✅ Complete (432.6 GB/s, 85.8% peak) |
-| 2 | `reduce_sum` | 0.25 (memory-bound) | ✅ Complete (458.3 GB/s, 90.9% peak) |
-| 3 | `softmax_rows` | 0.6 (memory-bound) | ✅ Complete (435.7 GB/s, 86.4% peak) |
-| 4 | `rmsnorm` | 0.5 (memory-bound) | ✅ Complete (435.5 GB/s, 86.4% peak) |
-| 5 | `matmul_naive` | 0.25 (memory-bound) | ✅ Complete (1,852 GFLOP/s @ 4096³) |
-| 6 | `matmul_tiled` | 8.0 (still memory-bound) | ✅ Complete (2,563 GFLOP/s @ 4096³) |
+| # | Kernel | Arithmetic Intensity | Status | Achieved Performance (RTX 4070 SUPER) |
+|---|---|---|---|---|
+| 1 | `vector_add` | 0.08 (memory-bound) | ✅ Complete | 432.6 GB/s (85.8% peak BW) |
+| 2 | `reduce_sum` | 0.25 (memory-bound) | ✅ Complete | 458.3 GB/s (90.9% peak BW) |
+| 3 | `softmax_rows` | 0.60 (memory-bound) | ✅ Complete | 435.7 GB/s (86.4% peak BW) |
+| 4 | `rmsnorm` | 0.50 (memory-bound) | ✅ Complete | 435.5 GB/s (86.4% peak BW) |
+| 5 | `matmul_naive` | 0.25 (memory-bound) | ✅ Complete | 1,852 GFLOP/s @ 4096³ |
+| 6 | `matmul_tiled` | 8.00 (memory-bound) | ✅ Complete | 2,563 GFLOP/s @ 4096³ |
+| 7 | `gemv` | 0.25 (memory-bound, $M=1$) | ✅ Complete | **473.5 GB/s (94.0% peak BW)** · 13.7% faster than cuBLAS |
 
-Balance point on RTX 4090: ~82 FLOP/byte. Everything below that is memory-bound.
+Balance point on RTX 4070 SUPER: ~70 FLOP/byte (RTX 4090: ~82 FLOP/byte). All decoding ops are memory-bound.
 
-### Module 3+ — Future Modules (not yet started)
+### Module 3 — Kernel Fusion (Objective 3, Sep – Oct 2026)
 
-- **Kernel fusion** (Dec 2026) — fuse elementwise ops to eliminate intermediate traffic
-- **FlashAttention** (Jan–Feb 2027) — online softmax applied tile-by-tile
-- **Quantization** — packed INT4 weights with dequantization kernels
-- **KV-cache** — ring-buffer cache with zero-copy slicing
-- **Model loader** — GGUF-style mmap'd weight loading
-- **Tokenizer** — BPE tokenizer
-- **Sampler** — top-k, top-p, temperature scaling
-- **Python bindings** — for usability
+Two fused operations targeting the memory wall between sub-layers (ADR 0006):
+
+| # | Kernel | Target | Status | Architectural Impact |
+|---|---|---|---|---|
+| 8 | `rmsnorm_linear` | Pre-attention / Pre-FFN | ✅ Complete | Keeps normalized activation in shared memory (17.2 KiB); eliminates 16 MiB DRAM roundtrip at $M=512$ |
+| 9 | `residual_rmsnorm` | Post-attention / Post-FFN | ✅ Complete | Single-pass residual accumulation + RMSNorm; eliminates 8 MiB DRAM read traffic |
+
+- **Decode ($M=1$) vs Prefill ($M=512$) Fusion Dynamics:**
+  - At $M=1$, intermediate activation tensor is only 16 KiB ($1 \times 4096 \times 4$ bytes), which fits comfortably in the 48 MiB hardware L2 cache. Therefore, fusion speedup at decode shape is driven by kernel launch overhead elimination (~3–5 µs saved per projection) rather than DRAM traffic reduction.
+  - At prefill shapes ($M \ge 512$), intermediate tensors spill out of cache, making shared-memory fusion deliver substantial DRAM bandwidth reductions.
+
+### Module 4 — FlashAttention-2 Forward Kernel (Oct – Nov 2026)
+- **Target:** Fused Multi-Head Attention forward pass without materializing the $S \times S$ attention matrix.
+- **Components:**
+  - Tiled $Q K^T$ dot-product in shared memory ($B_r \times B_c$ tiles).
+  - Online softmax rescale loop ($m_{new} = \max(m_{prev}, m_{tile})$).
+  - Shared-memory $P V$ accumulation ($O_{new} = O_{prev} \cdot \alpha + P_{tile} V$).
+  - Causal masking support for autoregressive generation.
+  - Grouped-Query Attention (GQA) head mapping for LLaMA-2 / Mistral architectures.
+
+### Module 5 — Weight-Only Quantization (Nov – Dec 2026)
+- **Target:** Sub-byte weight storage and high-throughput on-the-fly dequantization.
+- **Components:**
+  - INT4 / INT8 packed storage schemes (AWQ / GPTQ layout compatibility).
+  - Fast bit-unpacking SIMD / PTX intrinsics (`lop3.b32`, `prmt`).
+  - Fused dequantize-GEMV kernel for $M=1$ token generation.
+  - Verification harness comparing against FP32 unquantized oracles.
+
+### Module 6 — KV-Cache & Attention Memory Optimization (Jan – Feb 2027)
+- **Target:** Constant-memory KV storage across extended context lengths.
+- **Components:**
+  - PagedAttention / segmented circular buffer allocation.
+  - Zero-copy slice views utilizing Module 1 `Storage`/`Tensor` abstractions.
+  - Rotary Position Embeddings (RoPE) fused into attention projection.
+
+### Module 7 — GGUF Model Pipeline & End-to-End Inference (Mar – Apr 2027)
+- **Target:** Complete autoregressive text generation from disk weights.
+- **Components:**
+  - GGUF v3 file parser with zero-copy `mmap` backing.
+  - Byte-Pair Encoding (BPE) tokenizer implementation.
+  - Temperature, top-k, and top-p (nucleus) samplers.
+  - Autoregressive generation loop with TinyLlama-1.1B and LLaMA-2-7B.
+
+### Module 8 — Bindings, llama-bench Comparison & Thesis (May – Jun 2027)
+- **Target:** Production readiness, external validation, and formal documentation.
+- **Components:**
+  - Python bindings via `pybind11` for high-level interaction.
+  - Comparative benchmark evaluation against `llama.cpp` (`llama-bench`).
+  - Final thesis report, complete roofline visualizations, and negative results analysis.
 
 ## Three-tier correctness model
 

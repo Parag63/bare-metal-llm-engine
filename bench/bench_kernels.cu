@@ -432,17 +432,76 @@ void bench_rmsnorm_linear(Table& t, int reps) {
   }
 }
 
+//===----------------------------------------------------------------------===//
+// GEMV benchmarks (decode token generation: M=1, large K and N).
+//===----------------------------------------------------------------------===//
+void bench_gemv(Table& t, int reps) {
+  struct Case {
+    std::int64_t n, k;
+    const char* label;
+  };
+  const Case cases[] = {
+      {4096, 4096, "1x4096x4096 (decode token)"},
+      {12288, 4096, "1x12288x4096 (decode MLP)"},
+  };
+
+  for (const Case& c : cases) {
+    const std::int64_t N = c.n, K = c.k;
+    DeviceBuffer<float> A(random_host(static_cast<std::size_t>(K * N), 1u));
+    DeviceBuffer<float> x(random_host(static_cast<std::size_t>(K), 2u));
+    DeviceBuffer<float> out(static_cast<std::size_t>(N));
+
+    const double flops = 2.0 * d(N) * d(K);
+    const double bytes = (d(K) * d(N) + d(K) + d(N)) * sizeof(float);
+
+    t.measure_gpu("matmul_tiled (M=1)", c.label, flops, bytes,
+                  [&] {
+                    engine::cuda::matmul_tiled(x.get(), A.get(), out.get(), 1, N, K);
+                  },
+                  /*warmup=*/5, reps);
+
+    t.measure_gpu("gemv", c.label, flops, bytes,
+                  [&] {
+                    engine::cuda::gemv(A.get(), x.get(), out.get(), N, K);
+                  },
+                  /*warmup=*/5, reps);
+
+#if ENGINE_BENCH_CUBLAS
+    {
+      cublasHandle_t handle;
+      cublasCreate(&handle);
+      const float alpha = 1.0f;
+      const float beta = 0.0f;
+      t.measure_gpu("cublasSgemm (M=1)", c.label, flops, bytes,
+                    [&] {
+                      cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                                  static_cast<int>(N), 1, static_cast<int>(K),
+                                  &alpha, A.get(), static_cast<int>(N),
+                                  x.get(), static_cast<int>(K),
+                                  &beta, out.get(), static_cast<int>(N));
+                    },
+                    /*warmup=*/5, reps);
+      cublasDestroy(handle);
+    }
+#endif
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   bool quick = false;
+  bool json_output = false;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     if (arg == "--quick") {
       quick = true;
+    } else if (arg == "--json") {
+      json_output = true;
     } else if (arg == "--help" || arg == "-h") {
-      std::printf("usage: bench_kernels [--quick]\n");
+      std::printf("usage: bench_kernels [--quick] [--json]\n");
       std::printf("  --quick   fewer repetitions, skips 4096^3 matmul\n");
+      std::printf("  --json    output results as machine-readable JSON\n");
       return 0;
     } else {
       std::fprintf(stderr, "unknown argument: %s\n", arg.c_str());
@@ -458,7 +517,9 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  engine::print_cuda_device_info();
+  if (!json_output) {
+    engine::print_cuda_device_info();
+  }
 
 #if !defined(NDEBUG)
   std::fprintf(stderr,
@@ -477,15 +538,20 @@ int main(int argc, char** argv) {
   bench_softmax(t, reps);
   bench_rmsnorm(t, reps);
   bench_matmul(t, reps, /*include_large=*/!quick);
+  bench_gemv(t, reps);
   bench_residual_rmsnorm(t, reps);
   bench_rmsnorm_linear(t, reps);
-  t.print();
 
-  if (t.has_unimplemented()) {
-    std::printf(
-        "\nSome rows are blank because those kernels are still stubs. That is the\n"
-        "expected state -- implement one, re-run, and watch a row appear. The HTML\n"
-        "comment at the end of each blank row says which exercise it is waiting on.\n");
+  if (json_output) {
+    t.print_json(std::cout);
+  } else {
+    t.print();
+    if (t.has_unimplemented()) {
+      std::printf(
+          "\nSome rows are blank because those kernels are still stubs. That is the\n"
+          "expected state -- implement one, re-run, and watch a row appear. The HTML\n"
+          "comment at the end of each blank row says which exercise it is waiting on.\n");
+    }
   }
   return 0;
 }

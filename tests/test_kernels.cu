@@ -1,9 +1,9 @@
 //===----------------------------------------------------------------------===//
 // tests/test_kernels.cu -- the CUDA exercise ladder, as executable tests.
 //
-// ALL SIX EXERCISES ARE IMPLEMENTED AND PASSING.
+// ALL EIGHT EXERCISES ARE IMPLEMENTED AND PASSING.
 //
-// Run it on the 4090 box. All 26 kernel tests pass, and all have been promoted
+// Run it on the 4090 box. All kernel tests pass, and all have been promoted
 // from TEST_PENDING to TEST. The pending count is 0.
 //
 //   ./engine_tests --filter=kernels           # just this file
@@ -899,6 +899,99 @@ TEST(kernels, rmsnorm_linear_agrees_with_separate_rmsnorm_and_matmul) {
 }
 
 //===----------------------------------------------------------------------===//
+// Exercise 9 (GEMV) -- Matrix-Vector product for decode token generation.
+//===----------------------------------------------------------------------===//
+
+struct GemvShape {
+  std::int64_t n, k;
+};
+
+const GemvShape kGemvShapes[] = {
+    {4096, 4096},
+    {12288, 4096},
+    {127, 31},
+    {64, 128},
+};
+
+TEST(kernels, gemv_matches_reference) {
+  REQUIRE_CUDA_DEVICE();
+
+  for (const GemvShape& s : kGemvShapes) {
+    const std::string stem = "gemv__" + std::to_string(s.n) + "x" + std::to_string(s.k);
+    LOAD_GOLDEN(g, stem);
+
+    const auto& A = g.at("A").data;
+    const auto& x = g.at("x").data;
+    const auto& expected = g.at("expected").data;
+
+    ASSERT_EQ(A.size(), usize(s.k * s.n));
+    ASSERT_EQ(x.size(), usize(s.k));
+    ASSERT_EQ(expected.size(), usize(s.n));
+
+    DeviceBuffer<float> d_A(A);
+    DeviceBuffer<float> d_x(x);
+    DeviceBuffer<float> d_out(s.n);
+    d_out.zero();
+
+    engine::cuda::gemv(d_A.get(), d_x.get(), d_out.get(), s.n, s.k);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    const std::vector<float> host = d_out.download();
+    CHECK_CASE(stem, host.data(), expected.data(), usize(s.n), kMatmulRtol, kMatmulAtol);
+  }
+}
+
+TEST(kernels, gemv_agrees_with_matmul_naive_at_M1) {
+  REQUIRE_CUDA_DEVICE();
+
+  for (const GemvShape& s : kGemvShapes) {
+    const std::string stem = "gemv__" + std::to_string(s.n) + "x" + std::to_string(s.k);
+    LOAD_GOLDEN(g, stem);
+
+    const auto& A = g.at("A").data;
+    const auto& x = g.at("x").data;
+
+    DeviceBuffer<float> d_A(A);
+    DeviceBuffer<float> d_x(x);
+    DeviceBuffer<float> d_gemv_out(s.n);
+    DeviceBuffer<float> d_matmul_out(s.n);
+    d_gemv_out.zero();
+    d_matmul_out.zero();
+
+    engine::cuda::gemv(d_A.get(), d_x.get(), d_gemv_out.get(), s.n, s.k);
+    engine::cuda::matmul_naive(d_x.get(), d_A.get(), d_matmul_out.get(), 1, s.n, s.k);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    const std::vector<float> gemv_res = d_gemv_out.download();
+    const std::vector<float> matmul_res = d_matmul_out.download();
+
+    CHECK_CASE(stem + " (gemv vs matmul_naive)", gemv_res.data(), matmul_res.data(),
+               usize(s.n), kMatmulRtol, kMatmulAtol);
+  }
+}
+
+TEST(kernels, gemv_of_zero_input) {
+  REQUIRE_CUDA_DEVICE();
+
+  const std::int64_t N = 64, K = 128;
+  std::vector<float> zeros(usize(K), 0.0f);
+  std::vector<float> ones(usize(K * N), 1.0f);
+
+  DeviceBuffer<float> d_A(ones);
+  DeviceBuffer<float> d_x(zeros);
+  DeviceBuffer<float> d_out(N);
+  d_out.zero();
+
+  engine::cuda::gemv(d_A.get(), d_x.get(), d_out.get(), N, K);
+  CUDA_CHECK(cudaDeviceSynchronize());
+
+  const std::vector<float> host = d_out.download();
+  for (float v : host) {
+    EXPECT_EQ(v, 0.0f);
+  }
+}
+
+//===----------------------------------------------------------------------===//
 // PART 3 -- the launch CONTRACT.
 //
 // These verify that argument validation in each launcher throws proper C++
@@ -930,6 +1023,8 @@ TEST(kernels, launchers_reject_negative_dimensions) {
   EXPECT_THROWS_MSG(engine::cuda::rmsnorm_linear(p, p, p, p, -1, 4, 4, 1e-5f), "negative");
   EXPECT_THROWS_MSG(engine::cuda::rmsnorm_linear(p, p, p, p, 4, -1, 4, 1e-5f), "negative");
   EXPECT_THROWS_MSG(engine::cuda::rmsnorm_linear(p, p, p, p, 4, 4, -1, 1e-5f), "negative");
+  EXPECT_THROWS_MSG(engine::cuda::gemv(p, p, p, -1, 4), "non-negative");
+  EXPECT_THROWS_MSG(engine::cuda::gemv(p, p, p, 4, -1), "non-negative");
 
   // eps < 0 would put a negative number under the square root.
   EXPECT_THROWS_MSG(engine::cuda::rmsnorm(p, p, p, 4, 4, -1.0f), "eps");
@@ -961,6 +1056,9 @@ TEST(kernels, launchers_reject_null_pointers) {
   EXPECT_THROWS_MSG(engine::cuda::rmsnorm_linear(nullptr, p, p, p, 2, 2, 2, 1e-5f), "null");
   EXPECT_THROWS_MSG(engine::cuda::rmsnorm_linear(p, p, nullptr, p, 2, 2, 2, 1e-5f), "null");
   EXPECT_THROWS_MSG(engine::cuda::rmsnorm_linear(p, p, p, nullptr, 2, 2, 2, 1e-5f), "null");
+  EXPECT_THROWS_MSG(engine::cuda::gemv(nullptr, p, p, 4, 4), "null");
+  EXPECT_THROWS_MSG(engine::cuda::gemv(p, nullptr, p, 4, 4), "null");
+  EXPECT_THROWS_MSG(engine::cuda::gemv(p, p, nullptr, 4, 4), "null");
 
   // rmsnorm's, residual_rmsnorm's, and rmsnorm_linear's `weight` is ALLOWED to be null:
   // "no learned gain" is a valid configuration, not a mistake.
@@ -992,6 +1090,8 @@ TEST(kernels, empty_work_is_a_no_op_not_an_error) {
   EXPECT_NO_THROW(engine::cuda::rmsnorm_linear(p, p, p, p, 0, 8, 8, 1e-5f));
   EXPECT_NO_THROW(engine::cuda::rmsnorm_linear(p, p, p, p, 8, 0, 8, 1e-5f));
   EXPECT_NO_THROW(engine::cuda::rmsnorm_linear(p, p, p, p, 8, 8, 0, 1e-5f));
+  EXPECT_NO_THROW(engine::cuda::gemv(p, p, p, 0, 8));
+  EXPECT_NO_THROW(engine::cuda::gemv(p, p, p, 8, 0));
 
   // And nothing may have been launched, let alone written.
   CUDA_CHECK(cudaDeviceSynchronize());

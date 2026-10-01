@@ -28,6 +28,8 @@ namespace engine {
 std::string cuda_device_summary() { return "no CUDA device (CPU-only build)"; }
 int cuda_device_count() { return 0; }
 double cuda_peak_bandwidth_gbs() { return 0.0; }
+std::string cuda_driver_version() { return "none"; }
+int cuda_clock_rate_khz() { return 0; }
 void print_cuda_device_info() {
   std::printf("CUDA: not available -- this is a CPU-only build.\n");
 }
@@ -61,6 +63,18 @@ double cuda_peak_bandwidth_gbs() {
   const double clock_hz = static_cast<double>(prop.memoryClockRate) * 1.0e3;
   const double bus_bytes = static_cast<double>(prop.memoryBusWidth) / 8.0;
   return clock_hz * bus_bytes * 2.0 / 1.0e9;
+}
+
+std::string cuda_driver_version() {
+  int drv = 0;
+  if (cudaDriverGetVersion(&drv) != cudaSuccess) return "unknown";
+  return std::to_string(drv / 1000) + "." + std::to_string((drv % 100) / 10);
+}
+
+int cuda_clock_rate_khz() {
+  cudaDeviceProp prop{};
+  if (!get_props(prop)) return 0;
+  return prop.clockRate;
 }
 
 std::string cuda_device_summary() {
@@ -109,7 +123,7 @@ void print_cuda_device_info() {
   std::printf("  Max threads / block       : %d\n", prop.maxThreadsPerBlock);
   std::printf("  Max threads / SM          : %d\n", prop.maxThreadsPerMultiProcessor);
   std::printf("  Shared mem / block        : %zu B\n", prop.sharedMemPerBlock);
-  std::printf("  Shared mem / block optin  : %d B\n", prop.sharedMemPerBlockOptin);
+  std::printf("  Shared mem / block optin  : %zu B\n", static_cast<size_t>(prop.sharedMemPerBlockOptin));
   std::printf("  Shared mem / SM           : %zu B\n", prop.sharedMemPerMultiprocessor);
   std::printf("  Registers / block         : %d\n", prop.regsPerBlock);
   std::printf("  L2 cache                  : %d KiB\n", prop.l2CacheSize / 1024);

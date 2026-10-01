@@ -20,7 +20,8 @@
 | Runbook | When to use |
 |---|---|
 | [Run CUDA kernels on Machine B](gpu-workflow.md) | Every time you push new kernel code |
-| [Run benchmarks with locked clocks](benchmark.md) | When recording performance numbers for the lab notebook |
+| [Run benchmarks with locked clocks](benchmark.md) | When recording performance numbers, exporting JSON, syncing README, or running `llama-bench` |
+| [Profile kernels with Nsight Compute](profile-nsight.md) | When analyzing DRAM throughput, memory roofline, occupancy, or bank conflicts |
 
 ### Maintenance
 | Runbook | When to use |

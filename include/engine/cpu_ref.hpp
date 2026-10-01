@@ -53,6 +53,10 @@ void rmsnorm(const float* in, const float* weight, float* out, std::int64_t rows
 void matmul(const float* A, const float* B, float* C, std::int64_t M, std::int64_t N,
             std::int64_t K);
 
+/// Dense matrix-vector product: out[N] = x[K] * A[K x N], row-major.
+/// Equivalent to matmul with M=1. Accumulates in double.
+void gemv(const float* A, const float* x, float* out, std::int64_t N, std::int64_t K);
+
 //===----------------------------------------------------------------------===//
 // Module 3 — Fused operations.
 //

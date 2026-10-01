@@ -15,6 +15,10 @@
 | [ADR-0003](../docs/adr/0003-raw-pointer-kernel-api.md) | Raw pointer kernel API | Kernel launchers take raw pointers and dimensions, not `Tensor` — decouples the kernel ladder from Module 1 |
 | [ADR-0004](../docs/adr/0004-cublas-baseline-only.md) | cuBLAS is baseline only | cuBLAS is a benchmark baseline, linked into exactly one target, never an implementation |
 | [ADR-0005](../docs/adr/0005-cuda-arch-explicit.md) | Explicit CUDA arch | `ENGINE_CUDA_ARCH` is explicit (`89`), not auto-detected — mismatches warn loudly |
+| [ADR-0006](../docs/adr/0006-kernel-fusion-strategy.md) | Kernel fusion strategy | Target transformer sub-layer boundaries (`RMSNorm+Linear`, `Residual+RMSNorm`) to eliminate intermediate DRAM traffic |
+| [ADR-0007](../docs/adr/0007-gemv-decode-specialization.md) | GEMV decode specialization | Dedicated matrix-vector kernel for $M=1$ autoregressive decode, reaching 94.0% peak BW and beating cuBLAS |
+| [ADR-0008](../docs/adr/0008-benchmark-harness-provenance.md) | Benchmark harness JSON & provenance | Structured `--json` export, device driver, hardware clock, and git commit hash tracking |
+| [ADR-0009](../docs/adr/0009-negative-results-reporting.md) | Negative results reporting | Explicitly document optimizations that failed or degraded performance to preserve empirical boundaries |
 
 ## Informal Decisions
 
@@ -83,3 +87,19 @@ tolerances. The test deliberately feeds an all-zeros row to catch this.
 **Why:** `CUDA_CHECK_KERNEL()` is expanded inside `kernels/*.cu`, which compile into
 the `engine` library. Defining the flag on the test executable has zero effect — the
 macro was already expanded when the library was compiled. This was a real bug in Week 00.
+
+### D-009: 64-column tiling with float2 coalescing for GEMV
+**Date:** Oct 2026 (Exercise 7)
+**Decision:** `gemv` maps 64 columns of $B$ per block, using 256 threads (8 warps). Each warp reduces $K$ cooperatively using 64-bit `float2` loads and warp shuffles before writing to shared memory.
+**Why:** During autoregressive generation ($M=1$), 2D tiled GEMM wastes thread resources and achieves low occupancy because $M < TILE$. The dedicated GEMV kernel achieves 473.5 GB/s (94.0% peak bandwidth), outperforming cuBLAS by 13.7%.
+
+### D-010: Automated README benchmark synchronization via Python parser
+**Date:** Oct 2026
+**Decision:** `tools/generate_results_table.py` parses the `--json` output of `bench_kernels` and directly updates the markdown results table in `README.md`.
+**Why:** Prevents manual copy-paste drift between lab notebook runs and public documentation. Enforces git provenance and machine configuration headers automatically.
+
+### D-011: L2 cache residency accounting for $M=1$ fusion speedup
+**Date:** Oct 2026
+**Decision:** Do not attribute $M=1$ kernel fusion speedups to DRAM traffic reduction in the lab notebook.
+**Why:** At $M=1, K=4096$, the intermediate activation tensor is only 16 KiB. Modern Ada Lovelace GPUs have 48–72 MiB L2 cache, meaning the intermediate data stays in L2 even in unfused execution. The measured 3–5 µs speedup per projection is entirely due to eliminating kernel launch overhead, not DRAM bandwidth savings.
+

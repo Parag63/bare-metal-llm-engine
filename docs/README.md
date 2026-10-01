@@ -14,9 +14,13 @@
 - [**02 — CUDA Exercise Ladder**](02-cuda-exercises.md) — six kernels in order, each
   introducing one new idea. Read before starting any kernel work.
 
-### Performance Record
-- [**Lab Notebook**](lab-notebook.md) — weekly entries with predictions, measurements,
-  and analysis. The primary evidence of how the project progressed.
+### Architecture & Deep Dives
+- [**LLM Inference Flowchart**](llm-inference-flowchart.md) — comprehensive end-to-end flowchart of bare-metal LLM execution without external ML runtimes
+- [**Empirical Roofline Analysis**](roofline.png) — hardware memory bandwidth vs arithmetic intensity ceilings plotted against all kernels
+
+### Performance & Experimental Record
+- [**Lab Notebook**](lab-notebook.md) — weekly entries with predictions, measurements, and analysis (primary evidence)
+- [**Negative Results & Empirical Boundaries**](negative-results.md) — catalog of optimizations that failed or degraded throughput and their microarchitectural causes
 
 ### Architectural Decision Records (ADRs)
 Formal records of significant design decisions and their rationale.
@@ -28,6 +32,10 @@ Formal records of significant design decisions and their rationale.
 | [ADR-0003](adr/0003-raw-pointer-kernel-api.md) | Raw pointer kernel API | Kernels take raw pointers, not Tensor — decouples exercises from Module 1 |
 | [ADR-0004](adr/0004-cublas-baseline-only.md) | cuBLAS is baseline only | cuBLAS is in one benchmark target, never in the engine |
 | [ADR-0005](adr/0005-cuda-arch-explicit.md) | Explicit CUDA arch | `ENGINE_CUDA_ARCH=89` — wrong-arch builds fail loudly |
+| [ADR-0006](adr/0006-kernel-fusion-strategy.md) | Kernel fusion strategy | Target transformer sub-layer boundaries (`RMSNorm+Linear`, `Residual+RMSNorm`) to eliminate intermediate DRAM traffic |
+| [ADR-0007](adr/0007-gemv-decode-specialization.md) | GEMV decode specialization | Dedicated matrix-vector kernel for $M=1$ autoregressive decode, achieving 94.0% peak BW and beating cuBLAS |
+| [ADR-0008](adr/0008-benchmark-harness-provenance.md) | Benchmark harness JSON & provenance | Structured `--json` export, device driver, hardware clock, and git commit hash tracking |
+| [ADR-0009](adr/0009-negative-results-reporting.md) | Negative results reporting | Explicitly document optimizations that failed or degraded performance to preserve empirical boundaries |
 
 ### API Reference (to be added)
 

@@ -67,6 +67,68 @@ Build type: RelWithDebInfo / Release
 
 ---
 
+## Week 07 — 2026-10-01 · Dedicated GEMV Kernel, JSON Benchmark Harness, and Roofline Analysis
+
+**Objective / module:** Action List [Must] deliverables — GEMV decode kernel (Item D2), JSON benchmark output (Item B1), Environment capture (Item A3), Roofline plot (Item A5), and Negative Results (Item A6).
+
+### What I did
+
+1. **Implemented Dedicated GEMV Kernel (`kernels/gemv.cu`, `src/cpu_ref/gemv_cpu.cpp`):**
+   - Autoregressive decode runs at $M=1$. The 2D tiled GEMM wastes ~97% of shared-memory threads at $M=1$.
+   - Designed a dedicated GEMV kernel parallelizing across $N$ output columns (64 columns per block) and cooperatively reducing $K$ across 8 warps (256 threads per block) with 128-bit `float2` coalesced memory transactions.
+   - Verified against CPU reference, independent PyTorch/NumPy golden data, and contract tests in `test_kernels.cu`. Total tests passing increased from 92 to 97.
+2. **Benchmark Harness JSON Output (`bench/bench_harness.hpp`, `bench_kernels.cu`, `bench_cpu_ref.cpp`):**
+   - Added `--json` flag to `bench_kernels` and `bench_cpu_ref`.
+   - Enhanced provenance footer with driver version (`13.2`), locked GPU clock (`2475 MHz`), and git hash (`ENGINE_GIT_HASH`) automatically injected via CMake.
+3. **Automated Results Table Generator (`tools/generate_results_table.py`):**
+   - Single-command script to execute benchmarks or parse JSON and regenerate markdown results tables in `README.md`.
+4. **Automated Roofline Model (`tools/roofline_plot.py`):**
+   - Generates publication-ready log-log roofline plot (`docs/roofline.png`) placing every kernel against the 504 GB/s bandwidth ceiling and 82.6 TFLOP/s compute ceiling.
+5. **Negative Results Documentation (`docs/negative-results.md`):**
+   - Documented empirical findings on shared-memory bank padding, cache residency at $M=1$, and grid saturation.
+
+### Does it work
+
+Full test suite verification:
+```
+ctest --test-dir build --output-on-failure
+passed 97   failed 0   pending 0   skipped 0
+```
+All 5 new GEMV tests passing cleanly:
+- `cpu_ref.gemv_matches_reference`
+- `cpu_ref.gemv_agrees_with_matmul_at_m1`
+- `kernels.gemv_matches_reference`
+- `kernels.gemv_agrees_with_matmul_naive_at_M1`
+- `kernels.gemv_of_zero_input`
+
+### Prediction, written before measuring
+
+- For GEMV at $1 \times 4096 \times 4096$: Arithmetic intensity is $0.5\text{ FLOP/B}$. Pure memory bandwidth bound.
+- Predicted throughput: $\ge 420\text{ GB/s}$ ($\ge 85\%$ of peak).
+- Speedup over `matmul_tiled (M=1)`: predicted $\ge 3\times$.
+
+### Measurement
+
+Hardware: NVIDIA GeForce RTX 4070 SUPER | sm_89 | 12.0 GiB | 56 SMs | 504.0 GB/s
+Driver: 13.2 | GPU clock: 2475 MHz | Build: optimised (NDEBUG set), CUDA arch 89, git 47a8557
+
+| Kernel | Size | Median (ms) | GFLOP/s | GB/s | % Peak BW | AI (FLOP/B) |
+|---|---|---:|---:|---:|---:|---:|
+| `matmul_tiled (M=1)` | 1x4096x4096 (decode token) | 0.521 ms | 64.5 | 129.0 | 25.6% | 0.500 |
+| `gemv` | 1x4096x4096 (decode token) | **0.144 ms** | **232.6** | **465.4** | **92.3%** | 0.500 |
+| `cublasSgemm (M=1)` | 1x4096x4096 (decode token) | 0.145 ms | 231.9 | 464.1 | 92.1% | 0.500 |
+| `matmul_tiled (M=1)` | 1x12288x4096 (decode MLP) | 1.230 ms | 81.8 | 163.6 | 32.5% | 0.500 |
+| `gemv` | 1x12288x4096 (decode MLP) | **0.425 ms** | **236.7** | **473.5** | **94.0%** | 0.500 |
+| `cublasSgemm (M=1)` | 1x12288x4096 (decode MLP) | 0.484 ms | 208.1 | 416.3 | 82.6% | 0.500 |
+
+### Prediction vs measurement — what the gap was
+
+- Measured $465.4\text{ GB/s}$ ($92.3\%$ peak BW) at $4096^2$ and $473.5\text{ GB/s}$ ($94.0\%$ peak BW) at $12288 \times 4096$.
+- GEMV is **$3.62\times$ faster** than `matmul_tiled` at $4096^2$, and **$2.89\times$ faster** at $12288 \times 4096$.
+- It matches or outperforms `cublasSgemm` at $M=1$ (cuBLAS achieves 416.3 GB/s on the wide MLP projection; our GEMV reaches 473.5 GB/s, $+13.7\%$ faster than cuBLAS).
+
+---
+
 ## Week 06 — 2026-09-29 · Kernel Fusion (Module 3, exercises 7 & 8)
 
 **Objective / module:** Module 3 — Kernel Fusion: `rmsnorm_linear` (Exercise 7) and `residual_rmsnorm` (Exercise 8).
@@ -94,6 +156,31 @@ Verified via full test suite:
 - For `residual_rmsnorm` at $512 \times 4096$: Unfused moves 20 bytes/element; fused moves 16 bytes/element (20% reduction in DRAM traffic, saving 8 MiB). Predicted speedup: ~1.20x–1.25x.
 - For `rmsnorm_linear` at $1 \times 4096 \times 4096$ (decode): Dominated by GEMV memory bandwidth and kernel launch overhead. Eliminating 1 launch (~3–5 µs) is a measurable win on short operations.
 - For `rmsnorm_linear` at $512 \times 4096 \times 4096$ (prefill): Eliminating 8 MiB of write and 8 MiB of read traffic (16 MiB DRAM round-trip). Predicted speedup: ~1.15x–1.30x over separate RMSNorm + tiled GEMM.
+
+### Measurement & Decode Shape Analysis (Item E2)
+
+Hardware: NVIDIA GeForce RTX 4070 SUPER | sm_89 | Driver: 13.2 | Clock: 2475 MHz
+
+| Kernel Configuration | Shape | Median (ms) | Speedup / Note |
+|---|---|---|---|
+| `residual+rmsnorm (separate)` | 1x4096 (decode) | 0.0065 ms | Baseline |
+| `residual_rmsnorm (fused)` | 1x4096 (decode) | 0.0062 ms | +5% (eliminated launch overhead) |
+| `residual+rmsnorm (separate)` | 512x4096 (prefill) | 0.0230 ms | Baseline |
+| `residual_rmsnorm (fused)` | 512x4096 (prefill) | 0.0190 ms | **+21.1% speedup** (DRAM write eliminated) |
+| `rmsnorm+matmul (separate)` | 1x4096x4096 (decode) | 0.533 ms | Baseline |
+| `rmsnorm_linear (fused)` | 1x4096x4096 (decode) | 0.366 ms | **+45.6% speedup** (launch overhead + L2 reuse) |
+| `rmsnorm+matmul (separate)` | 1x12288x4096 (decode MLP) | 1.240 ms | Baseline |
+| `rmsnorm_linear (fused)` | 1x12288x4096 (decode MLP) | 0.488 ms | **+2.54× speedup** (dominant decode projection) |
+| `rmsnorm+matmul (separate)` | 512x4096x4096 (prefill) | 6.89 ms | Baseline |
+| `rmsnorm_linear (fused)` | 512x4096x4096 (prefill) | 13.56 ms | Tile under-utilization in naive 1D shared row broadcast |
+
+#### Decode Shape ($M=1$) vs Prefill Shape ($M=512$) Analysis
+At decode shape ($M=1, K=4096$):
+The eliminated intermediate tensor is only $1 \times 4096 \times 4\text{ B} = 16\text{ KiB}$.
+On the RTX 4070 SUPER, the L2 cache is **48 MiB**. A 16 KiB buffer fits entirely inside L2 cache with room to spare! Thus, the separate pipeline suffers **no DRAM roundtrip** for the activation tensor. The observed speedup at $M=1$ is driven almost entirely by eliminating the $3\text{--}5\,\mu\text{s}$ CUDA launch overhead and maintaining hot register/L1 state, rather than saving DRAM bandwidth.
+
+At prefill shape ($M=512, K=4096$):
+The intermediate is $512 \times 4096 \times 4\text{ B} = 8\text{ MiB}$ write + $8\text{ MiB}$ read = $16\text{ MiB}$ DRAM roundtrip. For `residual_rmsnorm`, this yields a clean 21% speedup matching our 20% DRAM reduction prediction.
 
 ### Next steps
 

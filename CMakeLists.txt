@@ -95,6 +95,20 @@ include(cmake/EngineCuda.cmake)
 engine_setup_cuda()   # sets ENGINE_CUDA_ENABLED, may enable_language(CUDA)
 
 #-----------------------------------------------------------------------------------
+# Git commit hash for provenance reporting
+#-----------------------------------------------------------------------------------
+execute_process(
+  COMMAND git rev-parse --short HEAD
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  OUTPUT_VARIABLE ENGINE_GIT_HASH
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  ERROR_QUIET
+)
+if(NOT ENGINE_GIT_HASH)
+  set(ENGINE_GIT_HASH "unknown")
+endif()
+
+#-----------------------------------------------------------------------------------
 # Generated configuration header
 #   Lets C++ code do `#if ENGINE_HAS_CUDA` instead of guessing.
 #-----------------------------------------------------------------------------------
@@ -121,6 +135,7 @@ set(ENGINE_SOURCES
   src/cpu_ref/matmul_cpu.cpp
   src/cpu_ref/residual_rmsnorm_cpu.cpp
   src/cpu_ref/rmsnorm_linear_cpu.cpp
+  src/cpu_ref/gemv_cpu.cpp
 )
 
 set(ENGINE_CUDA_SOURCES
@@ -130,6 +145,7 @@ set(ENGINE_CUDA_SOURCES
   kernels/rmsnorm.cu
   kernels/matmul_naive.cu
   kernels/matmul_tiled.cu
+  kernels/gemv.cu
   kernels/residual_rmsnorm.cu
   kernels/rmsnorm_linear.cu
 )

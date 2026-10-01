@@ -48,23 +48,72 @@ cmake --build build -j
 ### 3. Run the benchmarks
 
 ```bash
-# CPU reference baselines
+# CPU reference baselines (standard table)
 build/bin/bench_cpu_ref
 
-# CUDA kernel benchmarks
+# CUDA kernel benchmarks (standard table)
 build/bin/bench_kernels
+
+# Export structured JSON with git hash and driver provenance
+build/bin/bench_kernels --json > results.json
 ```
 
-### 4. Record the results
+### 4. Automated README Table Synchronization
+
+Instead of manual copy-pasting, use the automated table generator to synchronize `README.md`:
+
+```bash
+# Option A: Run benchmark and update README.md directly
+python3 tools/generate_results_table.py --update-readme
+
+# Option B: Ingest an existing JSON file and update README.md
+python3 tools/generate_results_table.py --input results.json --update-readme
+```
+
+This updates the benchmark table and provenance block in `README.md` without human error.
+
+### 5. Generate Roofline Plot
+
+Generate an empirical roofline visualization comparing all measured kernels against theoretical DRAM bandwidth and FP32 compute ceilings:
+
+```bash
+# Generates docs/roofline.png from the latest benchmark run
+python3 tools/roofline_plot.py --output docs/roofline.png
+
+# Or specify a pre-generated JSON benchmark file
+python3 tools/roofline_plot.py --input results.json --output docs/roofline.png
+```
+
+### 6. External Comparison with `llama-bench` (llama.cpp)
+
+To evaluate our hand-written kernels against the industry-standard `llama.cpp` inference engine:
+
+```bash
+# 1. Clone and build llama.cpp with CUDA enabled
+git clone https://github.com/ggerganov/llama.cpp
+cd llama.cpp
+cmake -B build -DGGML_CUDA=ON
+cmake --build build --config Release -j
+
+# 2. Run prompt processing (prefill, M=512) and token generation (decode, M=1) benchmarks
+# Example for TinyLlama-1.1B or LLaMA-2-7B GGUF models:
+./build/bin/llama-bench -m models/tinyllama-1.1b-chat.Q4_K_M.gguf -p 512 -n 128 -t 1
+
+# 3. Parameter alignment:
+# - Prefill throughput (tokens/sec) corresponds to batched GEMM / attention speed (M=512)
+# - Decode throughput (tokens/sec) corresponds directly to our gemv kernel throughput (M=1)
+# 4. Record comparison in docs/lab-notebook.md under the active milestone
+```
+
+### 7. Record the results in the Lab Notebook
 
 In `docs/lab-notebook.md`:
-1. **Paste the entire benchmark table** including the provenance footer (device,
-   theoretical peak bandwidth, CUDA arch, build type, timestamp)
-2. **Record the locked GPU clock** next to the table
-3. **Note the build type** (RelWithDebInfo, Release, Debug)
-4. **Check the spread column** — flag anything above 10% as untrustworthy
+1. **Paste the benchmark table or reference the generated JSON artifact** including provenance (device, driver, clocks, commit hash).
+2. **Record the locked GPU clock** next to the table.
+3. **Note the build type** (RelWithDebInfo, Release, Debug).
+4. **Check the spread column** — flag anything above 10% as untrustworthy.
 
-### 5. Unlock the clocks when done
+### 8. Unlock the clocks when done
 
 ```bash
 sudo nvidia-smi -rgc
@@ -77,8 +126,10 @@ sudo nvidia-smi -rgc
 nvidia-smi -pm 1
 nvidia-smi -lgc 2100
 
-# Run benchmarks
-.\build\bin\bench_kernels.exe
+# Run benchmarks inside WSL
+wsl ./build/bin/bench_kernels
+wsl python3 tools/generate_results_table.py --update-readme
+wsl python3 tools/roofline_plot.py
 
 # Unlock when done
 nvidia-smi -rgc
@@ -95,7 +146,7 @@ nvidia-smi -rgc
 - **spread** — `(max − min) / median`. Above 10% = flag with `(!)` and explain why
 - **% peak BW** — how close to the hardware's theoretical memory bandwidth
 - **AI (FLOP/B)** — arithmetic intensity. Determines whether the kernel is memory-bound
-  or compute-bound against the RTX 4090's ~82 FLOP/byte balance point
+  or compute-bound against the RTX 4070 SUPER's ~70 FLOP/byte (RTX 4090 ~82 FLOP/byte) balance point
 
 ## Troubleshooting
 
@@ -105,3 +156,5 @@ nvidia-smi -rgc
 | Benchmark takes very long | Check `ENGINE_SYNC_CHECK_KERNELS` is OFF |
 | `% peak BW` above 100% | Byte count formula is wrong — check ideal traffic calculation |
 | Numbers don't match lab notebook | Different clock speed, build type, or driver version |
+| `generate_results_table.py` fails | Ensure `build/bin/bench_kernels` exists and is built |
+

@@ -633,3 +633,55 @@ TEST(cpu_ref, rmsnorm_linear_agrees_with_separate_rmsnorm_and_matmul) {
                fused_out.size(), kExactRtol, kExactAtol);
   }
 }
+
+//===----------------------------------------------------------------------===//
+// GEMV (Matrix-vector product) tests.
+//===----------------------------------------------------------------------===//
+
+struct GemvShape {
+  std::int64_t n, k;
+};
+
+const GemvShape kGemvShapes[] = {
+    {4096, 4096},
+    {12288, 4096},
+    {127, 31},
+    {64, 128},
+};
+
+TEST(cpu_ref, gemv_matches_reference) {
+  for (const auto& s : kGemvShapes) {
+    const std::string stem = "gemv__" + std::to_string(s.n) + "x" + std::to_string(s.k);
+    LOAD_GOLDEN(g, stem);
+    const auto& A = g.at("A");
+    const auto& x = g.at("x");
+    const auto& exp = g.at("expected");
+
+    ASSERT_EQ(A.numel(), s.k * s.n);
+    ASSERT_EQ(x.numel(), s.k);
+    ASSERT_EQ(exp.numel(), s.n);
+
+    std::vector<float> out(static_cast<std::size_t>(s.n), 0.0f);
+    engine::cpu::gemv(A.data.data(), x.data.data(), out.data(), s.n, s.k);
+
+    CHECK_CASE(stem, out.data(), exp.data.data(), out.size(), kMatmulRtol, kMatmulAtol);
+  }
+}
+
+TEST(cpu_ref, gemv_agrees_with_matmul_at_m1) {
+  for (const auto& s : kGemvShapes) {
+    const std::string stem = "gemv__" + std::to_string(s.n) + "x" + std::to_string(s.k);
+    LOAD_GOLDEN(g, stem);
+    const auto& A = g.at("A");
+    const auto& x = g.at("x");
+
+    std::vector<float> out_gemv(static_cast<std::size_t>(s.n), 0.0f);
+    std::vector<float> out_matmul(static_cast<std::size_t>(s.n), 0.0f);
+
+    engine::cpu::gemv(A.data.data(), x.data.data(), out_gemv.data(), s.n, s.k);
+    engine::cpu::matmul(x.data.data(), A.data.data(), out_matmul.data(), 1, s.n, s.k);
+
+    CHECK_CASE(stem + " (gemv vs matmul M=1)", out_gemv.data(), out_matmul.data(),
+               out_gemv.size(), kExactRtol, kExactAtol);
+  }
+}

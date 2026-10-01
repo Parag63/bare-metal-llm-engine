@@ -33,4 +33,10 @@ int cuda_device_count();
 /// further effort belongs elsewhere.
 double cuda_peak_bandwidth_gbs();
 
+/// Driver version string (e.g. "12.6"). Returns "none" on CPU-only builds.
+std::string cuda_driver_version();
+
+/// Device clock rate in kHz. Returns 0 on CPU-only builds.
+int cuda_clock_rate_khz();
+
 }  // namespace engine

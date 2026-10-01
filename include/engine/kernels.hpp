@@ -70,6 +70,11 @@ void matmul_naive(const float* A, const float* B, float* C, std::int64_t M,
 void matmul_tiled(const float* A, const float* B, float* C, std::int64_t M,
                   std::int64_t N, std::int64_t K, cudaStream_t stream = 0);
 
+/// GEMV: Matrix-vector multiply out[N] = x[K] * A[K x N], row-major.
+/// Specialized for M=1 decode-time token generation to bypass 2D tile waste.
+void gemv(const float* A, const float* x, float* out, std::int64_t N,
+          std::int64_t K, cudaStream_t stream = 0);
+
 //===----------------------------------------------------------------------===//
 // Module 3 — Fused operations.
 //===----------------------------------------------------------------------===//
