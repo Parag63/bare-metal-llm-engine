@@ -1,0 +1,13 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# If the engine was built with CUDA, consumers will need CUDAToolkit for CUDA::cudart
+set(BARE_METAL_LLM_HAS_CUDA @ENGINE_CUDA_ENABLED@)
+if(BARE_METAL_LLM_HAS_CUDA)
+  find_dependency(CUDAToolkit)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/bare_metal_llm_targets.cmake")
+
+check_required_components(bare_metal_llm)

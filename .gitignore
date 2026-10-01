@@ -5,6 +5,7 @@
 # flags, and the flags themselves are recorded in scripts/ and docs/.
 build/
 build-*/
+examples/build*/
 cmake-build-*/
 out/
 

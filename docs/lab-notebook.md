@@ -67,7 +67,71 @@ Build type: RelWithDebInfo / Release
 
 ---
 
+## Week 08 (Part 3) — 2026-10-01 · Phase 3: Portability & Packaging (CMake Export, Downstream Integration, and Clang/GCC Dual Validation)
+
+**Objective / module:** Phase 3 (Portability & Packaging) — Add CMake `install` target and package configuration export so external projects can consume the engine via `find_package(bare_metal_llm)`, validate clean builds across both GCC 13.3.0 and Clang 18.1.3 (with `-DENGINE_WERROR=ON`), and demonstrate a downstream consumer application in `examples/minimal.cpp` compiling against the installed package with zero source tree references.
+
+### What I did
+
+1. **Modern CMake Packaging & Export (`CMakeLists.txt`, `cmake/bare_metal_llm-config.cmake.in`):**
+   - Configured target include directories using generator expressions (`$<BUILD_INTERFACE:...>` and `$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>`).
+   - Defined target alias `bare_metal_llm::engine ALIAS engine`.
+   - Added `GNUInstallDirs` and `CMakePackageConfigHelpers` rules to install libraries (`libengine.a`), public headers (`include/`), generated config (`engine/config.hpp`), and target exports (`bare_metal_llm_targets.cmake`).
+   - Authored `cmake/bare_metal_llm-config.cmake.in` with `CMakeFindDependencyMacro` to automatically resolve `CUDAToolkit` when built with CUDA support.
+   - Generated `bare_metal_llm-config-version.cmake` with `SameMajorVersion` compatibility.
+2. **Minimal Downstream Integration Example (`examples/minimal.cpp`, `examples/CMakeLists.txt`):**
+   - Created `examples/minimal.cpp` that exercises the public API: CPU `Tensor` creation, `DType` inspection, CPU reference math (`cpu::vector_add`), and CUDA device queries (`cuda_device_summary()`, `cuda_peak_bandwidth_gbs()`, `cuda_live_sm_clock_mhz()`).
+   - Created standalone `examples/CMakeLists.txt` that depends strictly on `find_package(bare_metal_llm REQUIRED)` with zero relative paths back to the engine source tree.
+   - Added `ENGINE_BUILD_EXAMPLES` option to the root build to ensure continuous in-tree validation during regular builds and CI.
+3. **Dual-Compiler Validation (GCC 13.3.0 + Clang 18.1.3):**
+   - Installed Clang 18.1.3 on WSL.
+   - Built the full CUDA engine with GCC 13.3.0 and nvcc 12.6, installed to `build/install`, and compiled `examples/` against it.
+   - Configured a separate build directory `build-clang` with Clang 18.1.3 (`-DCMAKE_CXX_COMPILER=clang++ -DENGINE_WITH_CUDA=OFF -DENGINE_WERROR=ON`), built the engine with zero warnings as errors, ran `ctest` 100% green, installed to `build-clang/install`, and built the downstream example against it.
+
+### Does it work
+
+1. **GCC 13.3.0 + nvcc 12.6 (CUDA Enabled):**
+   ```
+   ctest --test-dir build --output-on-failure
+   100% tests passed, 0 tests failed out of 7 (97 individual tests passed)
+   ```
+2. **Clang 18.1.3 (CPU Reference, Werror Enabled):**
+   ```
+   ctest --test-dir build-clang --output-on-failure
+   100% tests passed, 0 tests failed out of 6 (64 individual CPU tests passed)
+   ```
+3. **Downstream Package Consumption:**
+   ```
+   =====================================================
+     bare_metal_llm Downstream Integration Verification 
+   =====================================================
+   Engine version       : 0.1.0
+   CUDA support enabled : YES
+   Created Tensor shape : [2, 4]
+   Tensor dtype         : f32 (4 bytes/elem)
+   CPU vector_add result: [11, 22, 33, 44]
+   Active CUDA Device   : NVIDIA GeForce RTX 4070 SUPER | sm_89 | 12.0 GiB | 56 SMs | 99 KiB shared/block | 504.0 GB/s
+   Theoretical Peak BW  : 504.048 GB/s
+   Live SM Clock (NVML) : 2475 MHz
+
+   [PASS] Downstream integration verified successfully!
+   ```
+
+### Prediction, written before measuring
+
+1. **Downstream CMake Resolution:** Downstream CMake should resolve `find_package(bare_metal_llm REQUIRED)` and transitively inherit include directories and `CUDA::cudart` dependencies without requiring any manual `include_directories()` or source tree paths.
+2. **Compiler Portability:** Codebase should build cleanly under Clang 18 with `-Werror` without warning flags on template instantiation, struct alignment, or lambda captures.
+
+### Measurement & Verification
+
+- Both GCC and Clang builds completed with zero warnings and zero errors.
+- Downstream binary `minimal` compiled cleanly against the installed package in isolation and executed successfully under both CUDA and CPU-only toolchains.
+- CMake exported package was verified at `lib/cmake/bare_metal_llm/bare_metal_llm-config.cmake`.
+
+---
+
 ## Week 08 (Part 2) — 2026-10-01 · Phase 2: Fusion Validation (Nsight Compute DRAM Profiling, 1D vs 2D Tiling Trade-Off, and Dynamic Dispatch)
+
 
 **Objective / module:** Phase 2 (Fusion Validation) — Empirically validate theoretical DRAM traffic models (8 MiB and 16 MiB predictions) using NVIDIA Nsight Compute (`ncu`) hardware performance counters, prove the architectural root cause of the $M=512$ fusion regression, restrict dispatch in `kernels/rmsnorm_linear.cu` to decode shapes ($M=1$), and ensure 100% test suite correctness.
 

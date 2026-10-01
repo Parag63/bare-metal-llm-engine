@@ -48,10 +48,11 @@ endif()
 #-----------------------------------------------------------------------------------
 # Options
 #-----------------------------------------------------------------------------------
-option(ENGINE_BUILD_TESTS "Build the unit test suite"       ON)
-option(ENGINE_BUILD_BENCH "Build the benchmark executables" ON)
-option(ENGINE_WITH_CUDA   "Build CUDA kernels if nvcc is available" ON)
-option(ENGINE_WERROR      "Treat compiler warnings as errors" OFF)
+option(ENGINE_BUILD_TESTS    "Build the unit test suite"               ON)
+option(ENGINE_BUILD_BENCH    "Build the benchmark executables"         ON)
+option(ENGINE_BUILD_EXAMPLES "Build downstream integration examples"   ON)
+option(ENGINE_WITH_CUDA      "Build CUDA kernels if nvcc is available" ON)
+option(ENGINE_WERROR         "Treat compiler warnings as errors"       OFF)
 
 # Force CUDA_CHECK_KERNEL() to synchronise even in optimised builds.
 #
@@ -155,11 +156,15 @@ if(ENGINE_CUDA_ENABLED)
 endif()
 
 add_library(engine STATIC ${ENGINE_SOURCES})
+add_library(bare_metal_llm::engine ALIAS engine)
+
+include(GNUInstallDirs)
 
 target_include_directories(engine
   PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_BINARY_DIR}/generated)
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/generated>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
 if(ENGINE_CUDA_ENABLED)
   # cudart is needed by the *C++* translation units too (allocator.cpp calls
@@ -182,6 +187,55 @@ include(cmake/EngineWarnings.cmake)
 engine_apply_warnings(engine)
 
 #-----------------------------------------------------------------------------------
+# Installation and CMake package export
+#
+# Allows downstream consumers to link with:
+#   find_package(bare_metal_llm REQUIRED)
+#   target_link_libraries(my_app PRIVATE bare_metal_llm::engine)
+#-----------------------------------------------------------------------------------
+include(CMakePackageConfigHelpers)
+
+install(TARGETS engine
+  EXPORT bare_metal_llm_targets
+  ARCHIVE  DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  LIBRARY  DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  RUNTIME  DESTINATION ${CMAKE_INSTALL_BINDIR}
+  INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+install(DIRECTORY include/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/generated/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+install(EXPORT bare_metal_llm_targets
+  FILE bare_metal_llm_targets.cmake
+  NAMESPACE bare_metal_llm::
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/bare_metal_llm
+)
+
+write_basic_package_version_file(
+  ${CMAKE_CURRENT_BINARY_DIR}/bare_metal_llm-config-version.cmake
+  VERSION ${PROJECT_VERSION}
+  COMPATIBILITY SameMajorVersion
+)
+
+configure_package_config_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bare_metal_llm-config.cmake.in
+  ${CMAKE_CURRENT_BINARY_DIR}/bare_metal_llm-config.cmake
+  INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/bare_metal_llm
+)
+
+install(FILES
+  ${CMAKE_CURRENT_BINARY_DIR}/bare_metal_llm-config.cmake
+  ${CMAKE_CURRENT_BINARY_DIR}/bare_metal_llm-config-version.cmake
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/bare_metal_llm
+)
+
+#-----------------------------------------------------------------------------------
 # Tests and benchmarks
 #-----------------------------------------------------------------------------------
 if(ENGINE_BUILD_TESTS)
@@ -191,6 +245,10 @@ endif()
 
 if(ENGINE_BUILD_BENCH)
   add_subdirectory(bench)
+endif()
+
+if(ENGINE_BUILD_EXAMPLES)
+  add_subdirectory(examples)
 endif()
 
 #-----------------------------------------------------------------------------------
