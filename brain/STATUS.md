@@ -8,7 +8,7 @@
 ## Test score (verified on Machine B, RTX 4070 SUPER, sm_89)
 
 ```
-passed 97   failed 0   pending 0   skipped 0
+passed 107   failed 0   pending 0   skipped 0
 ```
 *(CUDA-enabled build with nvcc 12.6, RTX 4070 SUPER — 2026-10-01)*
 
@@ -18,10 +18,19 @@ passed 97   failed 0   pending 0   skipped 0
 |---|---|---|
 | `dtype` | 10 | ✅ All passing |
 | `golden` | 6 | ✅ All passing |
-| `cpu_ref` | 18 | ✅ All 18 passing (includes Module 3 fused ops + GEMV) |
+| `cpu_ref` | 23 | ✅ All 23 passing (includes Module 3 fused ops, GEMV, FP16 GEMV, embedding, argmax) |
 | `storage` | 4 | ✅ All passing |
-| `tensor` | 24 | ✅ All passing (GPU + CPU verified) |
-| `kernels` | 35 | ✅ All 35 passing (all 9 kernels + contracts verified) |
+| `tensor` | 24 | ✅ All passing (GPU + CPU verified, const and half accessors) |
+| `kernels` | 40 | ✅ All 40 passing (12 kernels + contracts verified) |
+
+---
+
+## Phase 3 Completion: FP16 and Missing Inference Kernels
+- [x] **FP16 Type Integration:** `include/engine/half.hpp` bridging CUDA `__half` with bit-exact host-side binary16; `Tensor::ptr<half>()` and `const ptr<half>() const`.
+- [x] **FP16 GEMV:** `kernels/gemv_fp16.cu` with `half2` vector loads and FP32 accumulator. Achieves **0.075 ms** (vs 0.143 ms FP32, $1.91\times$ speedup) and $1,142.8\text{ GB/s}$ in L2.
+- [x] **Token Embedding Gather:** `kernels/embedding.cu` (FP32 & FP16) with 128-bit vector memory instructions (`float4`, `uint4`).
+- [x] **Greedy Argmax Sampling:** `kernels/argmax.cu` (FP32 & FP16) with 16-warp shuffle reduction and deterministic tie breaking.
+- [x] **Verification & Provenance:** 107 / 107 tests passing, derived error tolerances ($2 \times 10^{-3}$ for FP16), lab notebook predictions recorded first, results table and roofline updated.
 
 ---
 

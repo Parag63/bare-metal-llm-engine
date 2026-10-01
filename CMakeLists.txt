@@ -137,6 +137,8 @@ set(ENGINE_SOURCES
   src/cpu_ref/residual_rmsnorm_cpu.cpp
   src/cpu_ref/rmsnorm_linear_cpu.cpp
   src/cpu_ref/gemv_cpu.cpp
+  src/cpu_ref/embedding_cpu.cpp
+  src/cpu_ref/argmax_cpu.cpp
 )
 
 set(ENGINE_CUDA_SOURCES
@@ -147,6 +149,9 @@ set(ENGINE_CUDA_SOURCES
   kernels/matmul_naive.cu
   kernels/matmul_tiled.cu
   kernels/gemv.cu
+  kernels/gemv_fp16.cu
+  kernels/embedding.cu
+  kernels/argmax.cu
   kernels/residual_rmsnorm.cu
   kernels/rmsnorm_linear.cu
 )

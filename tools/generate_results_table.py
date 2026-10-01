@@ -26,9 +26,11 @@ def run_benchmarks(binary_path: str, quick: bool = False) -> dict:
     return json.loads(proc.stdout)
 
 
-def find_result(results: list, name_prefix: str, size_filter: str = None) -> dict:
+def find_result(results: list, name_prefix: str, size_filter: str = None, exact: bool = False) -> dict:
     for r in results:
-        if r.get("name", "").startswith(name_prefix):
+        r_name = r.get("name", "")
+        matches_name = (r_name == name_prefix) if exact else r_name.startswith(name_prefix)
+        if matches_name:
             if size_filter is None or size_filter in r.get("size", ""):
                 return r
     return None
@@ -40,34 +42,34 @@ def format_readme_table(data: dict) -> str:
     peak_bw = env.get("peak_bandwidth_gbs", 504.0)
 
     # 1. vector_add (16M or 64M elements: 192 MiB or 768 MiB total traffic)
-    va = (find_result(results, "vector_add", "768.0 MiB") or 
-          find_result(results, "vector_add", "192.0 MiB") or
-          find_result(results, "vector_add", "MiB"))
+    va = (find_result(results, "vector_add", "768.0 MiB", exact=True) or 
+          find_result(results, "vector_add", "192.0 MiB", exact=True) or
+          find_result(results, "vector_add", "MiB", exact=True))
     va_str = f"✅ {va['gbps']:.1f} GB/s ({va['pct_peak_bw']:.1f}% peak)" if va else "❌ Not found"
 
     # 2. reduce_sum (16M or 64M elements: 64 MiB or 256 MiB total traffic)
-    rs = (find_result(results, "reduce_sum", "256.0 MiB") or 
-          find_result(results, "reduce_sum", "64.0 MiB") or
-          find_result(results, "reduce_sum", "MiB"))
+    rs = (find_result(results, "reduce_sum", "256.0 MiB", exact=True) or 
+          find_result(results, "reduce_sum", "64.0 MiB", exact=True) or
+          find_result(results, "reduce_sum", "MiB", exact=True))
     rs_str = f"✅ {rs['gbps']:.1f} GB/s ({rs['pct_peak_bw']:.1f}% peak)" if rs else "❌ Not found"
 
     # 3. softmax_rows (4096 x 4096 attention scores or 128 x 4096)
-    sm = (find_result(results, "softmax_rows", "4096 x 4096") or 
-          find_result(results, "softmax_rows", "4096"))
+    sm = (find_result(results, "softmax_rows", "4096 x 4096", exact=True) or 
+          find_result(results, "softmax_rows", "4096", exact=True))
     sm_str = f"✅ {sm['gbps']:.1f} GB/s ({sm['pct_peak_bw']:.1f}% peak)" if sm else "❌ Not found"
 
     # 4. rmsnorm (4096 x 4096 or 512 x 4096)
-    rn = (find_result(results, "rmsnorm", "4096 x 4096") or 
-          find_result(results, "rmsnorm", "512 x 4096") or
-          find_result(results, "rmsnorm", "4096"))
+    rn = (find_result(results, "rmsnorm", "4096 x 4096", exact=True) or 
+          find_result(results, "rmsnorm", "512 x 4096", exact=True) or
+          find_result(results, "rmsnorm", "4096", exact=True))
     rn_str = f"✅ {rn['gbps']:.1f} GB/s ({rn['pct_peak_bw']:.1f}% peak)" if rn else "❌ Not found"
 
     # 5. matmul_naive (4096^3 or largest available)
-    mn = find_result(results, "matmul_naive", "4096^3") or find_result(results, "matmul_naive", "2048^3") or find_result(results, "matmul_naive", "1024^3")
+    mn = find_result(results, "matmul_naive", "4096^3", exact=True) or find_result(results, "matmul_naive", "2048^3", exact=True) or find_result(results, "matmul_naive", "1024^3", exact=True)
     mn_str = f"✅ {mn['gflops']:.0f} GFLOP/s @ {mn['size']}" if mn else "❌ Not found"
 
     # 6. matmul_tiled
-    mt = find_result(results, "matmul_tiled", "4096^3") or find_result(results, "matmul_tiled", "2048^3") or find_result(results, "matmul_tiled", "1024^3")
+    mt = find_result(results, "matmul_tiled", "4096^3", exact=True) or find_result(results, "matmul_tiled", "2048^3", exact=True) or find_result(results, "matmul_tiled", "1024^3", exact=True)
     if mt and mn and mn.get("gflops", 0) > 0:
         speedup_pct = ((mt["gflops"] - mn["gflops"]) / mn["gflops"]) * 100.0
         mt_str = f"✅ {mt['gflops']:.0f} GFLOP/s @ {mt['size']} (+{speedup_pct:.0f}%)"
@@ -77,11 +79,11 @@ def format_readme_table(data: dict) -> str:
         mt_str = "❌ Not found"
 
     # 7. gemv (decode M=1)
-    gv = find_result(results, "gemv", "12288x4096") or find_result(results, "gemv", "4096x4096") or find_result(results, "gemv")
+    gv = find_result(results, "gemv", "1x4096x4096", exact=True) or find_result(results, "gemv", "4096x4096", exact=True)
     gv_str = f"✅ {gv['gbps']:.1f} GB/s ({gv['pct_peak_bw']:.1f}% peak)" if gv else "❌ Not found"
 
     # 8. residual_rmsnorm (fused add + rmsnorm)
-    rr = find_result(results, "residual_rmsnorm", "512x4096") or find_result(results, "residual_rmsnorm")
+    rr = find_result(results, "residual_rmsnorm (fused)", "512x4096") or find_result(results, "residual_rmsnorm (fused)") or find_result(results, "residual_rmsnorm", exact=True)
     rr_sep = find_result(results, "residual+rmsnorm (separate)", "512x4096") or find_result(results, "residual+rmsnorm (separate)")
     if rr and rr_sep and rr_sep.get("median_ms", 0) > 0:
         rr_speedup = ((rr_sep["median_ms"] - rr["median_ms"]) / rr_sep["median_ms"]) * 100.0
@@ -92,7 +94,7 @@ def format_readme_table(data: dict) -> str:
         rr_str = "❌ Not found"
 
     # 9. rmsnorm_linear (fused rmsnorm + linear)
-    rl = find_result(results, "rmsnorm_linear (fused)", "1x4096x4096") or find_result(results, "rmsnorm_linear")
+    rl = find_result(results, "rmsnorm_linear (dispatched)", "1x4096x4096") or find_result(results, "rmsnorm_linear (1D fused)", "1x4096x4096") or find_result(results, "rmsnorm_linear")
     rl_sep = find_result(results, "rmsnorm+matmul (separate)", "1x4096x4096")
     if rl and rl_sep and rl_sep.get("median_ms", 0) > 0:
         rl_speedup = ((rl_sep["median_ms"] - rl["median_ms"]) / rl_sep["median_ms"]) * 100.0
@@ -101,6 +103,24 @@ def format_readme_table(data: dict) -> str:
         rl_str = f"✅ {rl['median_ms']:.3f} ms"
     else:
         rl_str = "❌ Not found"
+
+    # 10. gemv_fp16
+    g16 = find_result(results, "gemv_fp16", "1x4096x4096", exact=True) or find_result(results, "gemv_fp16", "4096x4096", exact=True)
+    if g16 and gv and g16.get("min_ms", 0) > 0 and gv.get("min_ms", 0) > 0:
+        g16_speedup = gv["min_ms"] / g16["min_ms"]
+        g16_str = f"✅ {g16['min_ms']:.3f} ms ({g16_speedup:.2f}× speedup over FP32)"
+    elif g16:
+        g16_str = f"✅ {g16['min_ms']:.3f} ms"
+    else:
+        g16_str = "❌ Not found"
+
+    # 11. embedding
+    emb = find_result(results, "embedding (FP32)") or find_result(results, "embedding")
+    emb_str = f"✅ {emb['min_ms']:.3f} ms (128-bit vector loads)" if emb else "❌ Not found"
+
+    # 12. argmax
+    am = find_result(results, "argmax (FP32)") or find_result(results, "argmax")
+    am_str = f"✅ {am['min_ms']:.3f} ms (deterministic tie-breaking)" if am else "❌ Not found"
 
     table_lines = [
         "| # | Kernel | New idea | GPU result |",
@@ -114,6 +134,9 @@ def format_readme_table(data: dict) -> str:
         f"| 7 | `gemv` | decode token projection (M=1), 128-bit vector loads | {gv_str} |",
         f"| 8 | `residual_rmsnorm` | fused elementwise add + row reduction in 1 pass | {rr_str} |",
         f"| 9 | `rmsnorm_linear` | fused activation normalization + linear projection | {rl_str} |",
+        f"| 10 | `gemv_fp16` | decode token projection in FP16 with FP32 accumulator | {g16_str} |",
+        f"| 11 | `embedding` | token gather from row-major embedding table (FP32 & FP16) | {emb_str} |",
+        f"| 12 | `argmax` | greedy token sampling via 16-warp shuffle reduction | {am_str} |",
     ]
     return "\n".join(table_lines)
 

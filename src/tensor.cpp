@@ -551,8 +551,34 @@ T* Tensor::ptr(Device expect) {
   return static_cast<T*>(this->data());
 }
 
+template <typename T>
+const T* Tensor::ptr(Device expect) const {
+  ENGINE_CHECK(device_ == expect,
+               "Tensor::ptr: expected device " + std::string(device_name(expect)) +
+                   " but tensor is on " + std::string(device_name(device_)));
+
+  if (!dtype_is_sub_byte(dtype_)) {
+    ENGINE_CHECK(sizeof(T) == dtype_size(dtype_),
+                 "Tensor::ptr: sizeof(T)=" + std::to_string(sizeof(T)) +
+                     " does not match dtype element size " +
+                     std::to_string(dtype_size(dtype_)));
+  }
+
+  return static_cast<const T*>(this->data());
+}
+
 template float* Tensor::ptr<float>(Device);
+template half* Tensor::ptr<half>(Device);
 template int* Tensor::ptr<int>(Device);
+template std::int64_t* Tensor::ptr<std::int64_t>(Device);
+template std::uint16_t* Tensor::ptr<std::uint16_t>(Device);
 template unsigned char* Tensor::ptr<unsigned char>(Device);
+
+template const float* Tensor::ptr<float>(Device) const;
+template const half* Tensor::ptr<half>(Device) const;
+template const int* Tensor::ptr<int>(Device) const;
+template const std::int64_t* Tensor::ptr<std::int64_t>(Device) const;
+template const std::uint16_t* Tensor::ptr<std::uint16_t>(Device) const;
+template const unsigned char* Tensor::ptr<unsigned char>(Device) const;
 
 }  // namespace engine

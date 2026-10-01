@@ -67,6 +67,14 @@ std::vector<float> random_host(std::size_t n, unsigned seed = 20260826u) {
   return v;
 }
 
+std::vector<engine::half> random_host_half(std::size_t n, unsigned seed = 20260826u) {
+  std::mt19937 gen(seed);
+  std::normal_distribution<float> dist(0.0f, 1.0f);
+  std::vector<engine::half> v(n);
+  for (std::size_t i = 0; i < n; ++i) v[i] = engine::float_to_half(dist(gen));
+  return v;
+}
+
 std::string mib(std::size_t bytes) {
   char buf[64];
   std::snprintf(buf, sizeof(buf), "%.1f MiB", static_cast<double>(bytes) / (1024.0 * 1024.0));
@@ -502,6 +510,39 @@ void bench_gemv(Table& t, int reps) {
                   },
                   /*warmup=*/5, reps);
 
+    // FP16 GEMV (Cold DRAM streaming)
+    {
+      const std::size_t matrix_bytes_fp16 = matrix_elems * sizeof(engine::half);
+      const std::size_t num_buffers_fp16 = (matrix_bytes_fp16 >= 128 * 1024 * 1024) ? 2 : 4;
+      std::vector<DeviceBuffer<engine::half>> A_pool_fp16;
+      A_pool_fp16.reserve(num_buffers_fp16);
+      for (std::size_t b = 0; b < num_buffers_fp16; ++b) {
+        A_pool_fp16.emplace_back(random_host_half(matrix_elems, static_cast<unsigned>(b + 100)));
+      }
+      DeviceBuffer<engine::half> x_fp16(random_host_half(static_cast<std::size_t>(K), 2026u));
+      DeviceBuffer<engine::half> out_fp16(static_cast<std::size_t>(N));
+
+      const double bytes_fp16 = (d(K) * d(N) + d(K) + d(N)) * sizeof(engine::half);
+
+      // Warm L2 measurement for 4096^2
+      if (N == 4096 && K == 4096) {
+        t.measure_gpu("gemv_fp16 (warm L2)", c.label, flops, bytes_fp16,
+                      [&] {
+                        engine::cuda::gemv_fp16(A_pool_fp16[0].get(), x_fp16.get(), out_fp16.get(), N, K);
+                      },
+                      /*warmup=*/5, reps);
+      }
+
+      std::size_t iter_gemv_fp16 = 0;
+      t.measure_gpu("gemv_fp16", c.label, flops, bytes_fp16,
+                    [&] {
+                      const auto& A_cur = A_pool_fp16[iter_gemv_fp16 % num_buffers_fp16];
+                      iter_gemv_fp16++;
+                      engine::cuda::gemv_fp16(A_cur.get(), x_fp16.get(), out_fp16.get(), N, K);
+                    },
+                    /*warmup=*/5, reps);
+    }
+
 #if ENGINE_BENCH_CUBLAS
     {
       cublasHandle_t handle;
@@ -523,6 +564,77 @@ void bench_gemv(Table& t, int reps) {
       cublasDestroy(handle);
     }
 #endif
+  }
+}
+
+void bench_missing_kernels(Table& t, int reps) {
+  // 1. Embedding lookup
+  {
+    const std::int64_t vocab = 32000;
+    const std::int64_t hidden = 4096;
+
+    // Prefill: T = 512
+    {
+      const std::int64_t T = 512;
+      std::vector<float> h_table = random_host(static_cast<std::size_t>(vocab * hidden));
+      std::vector<std::int32_t> h_ids(static_cast<std::size_t>(T));
+      for (std::size_t i = 0; i < h_ids.size(); ++i) h_ids[i] = static_cast<std::int32_t>(i % vocab);
+
+      DeviceBuffer<float> d_table(h_table);
+      DeviceBuffer<std::int32_t> d_ids(h_ids);
+      DeviceBuffer<float> d_out(static_cast<std::size_t>(T * hidden));
+
+      const double bytes = d(T * hidden) * sizeof(float) * 2.0;
+      t.measure_gpu("embedding (FP32)", "512 tokens (prefill)", /*flops=*/0.0, bytes,
+                    [&] {
+                      engine::cuda::embedding(d_table.get(), d_ids.get(), d_out.get(), T, hidden, vocab);
+                    },
+                    /*warmup=*/5, reps);
+    }
+
+    // FP16 Prefill: T = 512
+    {
+      const std::int64_t T = 512;
+      std::vector<engine::half> h_table = random_host_half(static_cast<std::size_t>(vocab * hidden));
+      std::vector<std::int32_t> h_ids(static_cast<std::size_t>(T));
+      for (std::size_t i = 0; i < h_ids.size(); ++i) h_ids[i] = static_cast<std::int32_t>(i % vocab);
+
+      DeviceBuffer<engine::half> d_table(h_table);
+      DeviceBuffer<std::int32_t> d_ids(h_ids);
+      DeviceBuffer<engine::half> d_out(static_cast<std::size_t>(T * hidden));
+
+      const double bytes = d(T * hidden) * sizeof(engine::half) * 2.0;
+      t.measure_gpu("embedding_fp16", "512 tokens (prefill)", /*flops=*/0.0, bytes,
+                    [&] {
+                      engine::cuda::embedding_fp16(d_table.get(), d_ids.get(), d_out.get(), T, hidden, vocab);
+                    },
+                    /*warmup=*/5, reps);
+    }
+  }
+
+  // 2. Argmax / greedy sampling
+  {
+    const std::int64_t vocab = 32000;
+    std::vector<float> h_logits = random_host(static_cast<std::size_t>(vocab));
+    DeviceBuffer<float> d_logits(h_logits);
+    DeviceBuffer<std::int32_t> d_out(1);
+
+    const double bytes_f32 = d(vocab) * sizeof(float) + sizeof(std::int32_t);
+    t.measure_gpu("argmax (FP32)", "V=32000 (greedy sample)", /*flops=*/d(vocab), bytes_f32,
+                  [&] {
+                    engine::cuda::argmax(d_logits.get(), d_out.get(), vocab);
+                  },
+                  /*warmup=*/5, reps);
+
+    std::vector<engine::half> h_logits_fp16 = random_host_half(static_cast<std::size_t>(vocab));
+    DeviceBuffer<engine::half> d_logits_fp16(h_logits_fp16);
+
+    const double bytes_fp16 = d(vocab) * sizeof(engine::half) + sizeof(std::int32_t);
+    t.measure_gpu("argmax_fp16", "V=32000 (greedy sample)", /*flops=*/d(vocab), bytes_fp16,
+                  [&] {
+                    engine::cuda::argmax_fp16(d_logits_fp16.get(), d_out.get(), vocab);
+                  },
+                  /*warmup=*/5, reps);
   }
 }
 
@@ -580,6 +692,7 @@ int main(int argc, char** argv) {
   bench_gemv(t, reps);
   bench_residual_rmsnorm(t, reps);
   bench_rmsnorm_linear(t, reps);
+  bench_missing_kernels(t, reps);
 
   if (json_output) {
     t.print_json(std::cout);

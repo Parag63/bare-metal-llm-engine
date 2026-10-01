@@ -25,11 +25,14 @@
 
 #if ENGINE_HAS_CUDA
 
+#include <engine/half.hpp>
 #include <cuda_runtime.h>
 
 #include <cstdint>
 
 namespace engine::cuda {
+
+using engine::half;
 
 //===----------------------------------------------------------------------===//
 // All pointers below are DEVICE pointers. Passing a host pointer will not fail
@@ -103,6 +106,30 @@ void residual_rmsnorm(const float* x, const float* residual,
                       const float* weight, float* norm_out, float* sum_out,
                       std::int64_t rows, std::int64_t cols,
                       float eps, cudaStream_t stream = 0);
+
+//===----------------------------------------------------------------------===//
+// Phase 3 — FP16 and missing inference kernels.
+//===----------------------------------------------------------------------===//
+
+/// Dense matrix-vector product in FP16: out[N] = x[K] * A[K x N], row-major.
+/// Specialized for decode token generation using 128-bit vector memory instructions.
+void gemv_fp16(const half* A, const half* x, half* out,
+               std::int64_t N, std::int64_t K, cudaStream_t stream = 0);
+
+/// Embedding lookup: gathers rows from `table` into `out` according to `input_ids`.
+/// table: [vocab_size, hidden_dim], input_ids: [num_tokens], out: [num_tokens, hidden_dim]
+void embedding(const float* table, const std::int32_t* input_ids, float* out,
+               std::int64_t num_tokens, std::int64_t hidden_dim, std::int64_t vocab_size,
+               cudaStream_t stream = 0);
+void embedding_fp16(const half* table, const std::int32_t* input_ids, half* out,
+                    std::int64_t num_tokens, std::int64_t hidden_dim, std::int64_t vocab_size,
+                    cudaStream_t stream = 0);
+
+/// Argmax / Greedy sampling: finds the index of the maximum logit and writes to out_token.
+void argmax(const float* logits, std::int32_t* out_token, std::int64_t vocab_size,
+            cudaStream_t stream = 0);
+void argmax_fp16(const half* logits, std::int32_t* out_token, std::int64_t vocab_size,
+                 cudaStream_t stream = 0);
 
 }  // namespace engine::cuda
 

@@ -43,6 +43,7 @@
 #include "test_framework.hpp"
 
 #include <engine/check.hpp>
+#include <engine/cpu_ref.hpp>
 #include <engine/cuda_device.hpp>
 #include <engine/device_buffer.hpp>
 #include <engine/kernels.hpp>
@@ -992,16 +993,184 @@ TEST(kernels, gemv_of_zero_input) {
 }
 
 //===----------------------------------------------------------------------===//
+// Phase 3 -- FP16 and missing inference kernels: gemv_fp16, embedding, argmax
+//===----------------------------------------------------------------------===//
+
+TEST(kernels, gemv_fp16_matches_cpu_ref) {
+  REQUIRE_CUDA_DEVICE();
+
+  struct Shape { std::int64_t n, k; };
+  const Shape shapes[] = {
+    {64, 64},
+    {128, 256},
+    {4096, 4096},
+    {73, 125},  // unaligned fallback
+  };
+
+  for (const auto& s : shapes) {
+    std::vector<engine::half> h_A(static_cast<std::size_t>(s.k * s.n));
+    std::vector<engine::half> h_x(static_cast<std::size_t>(s.k));
+    std::vector<engine::half> exp(static_cast<std::size_t>(s.n));
+
+    for (std::size_t i = 0; i < h_A.size(); ++i) {
+      h_A[i] = engine::float_to_half(static_cast<float>(static_cast<int>(i % 19) - 9) * 0.05f);
+    }
+    for (std::size_t i = 0; i < h_x.size(); ++i) {
+      h_x[i] = engine::float_to_half(static_cast<float>(static_cast<int>(i % 13) - 6) * 0.05f);
+    }
+
+    engine::cpu::gemv_fp16(h_A.data(), h_x.data(), exp.data(), s.n, s.k);
+
+    DeviceBuffer<engine::half> d_A(h_A);
+    DeviceBuffer<engine::half> d_x(h_x);
+    DeviceBuffer<engine::half> d_out(static_cast<std::size_t>(s.n));
+    d_out.zero();
+
+    engine::cuda::gemv_fp16(d_A.get(), d_x.get(), d_out.get(), s.n, s.k);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    const std::vector<engine::half> host = d_out.download();
+    std::vector<float> host_f(host.size());
+    std::vector<float> exp_f(exp.size());
+    for (std::size_t i = 0; i < host.size(); ++i) {
+      host_f[i] = engine::half_to_float(host[i]);
+      exp_f[i] = engine::half_to_float(exp[i]);
+    }
+
+    CHECK_CASE("gemv_fp16__" + std::to_string(s.n) + "x" + std::to_string(s.k),
+               host_f.data(), exp_f.data(), host_f.size(), 2e-3, 2e-3);
+  }
+}
+
+TEST(kernels, embedding_f32_matches_cpu_ref) {
+  REQUIRE_CUDA_DEVICE();
+
+  struct Case { std::int64_t v, d, t; };
+  const Case cases[] = {
+    {1000, 256, 5},
+    {100, 65, 3},  // unaligned fallback
+  };
+
+  for (const auto& c : cases) {
+    std::vector<float> table(static_cast<std::size_t>(c.v * c.d));
+    for (std::size_t i = 0; i < table.size(); ++i) {
+      table[i] = static_cast<float>(i) * 0.1f;
+    }
+
+    std::vector<std::int32_t> ids = {0, static_cast<std::int32_t>(c.v - 1), 7};
+    while (static_cast<std::int64_t>(ids.size()) < c.t) {
+      ids.push_back(static_cast<std::int32_t>(ids.size() % c.v));
+    }
+
+    std::vector<float> exp(static_cast<std::size_t>(c.t * c.d));
+    engine::cpu::embedding(table.data(), ids.data(), exp.data(), c.t, c.d, c.v);
+
+    DeviceBuffer<float> d_table(table);
+    DeviceBuffer<std::int32_t> d_ids(ids);
+    DeviceBuffer<float> d_out(static_cast<std::size_t>(c.t * c.d));
+    d_out.zero();
+
+    engine::cuda::embedding(d_table.get(), d_ids.get(), d_out.get(), c.t, c.d, c.v);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    const std::vector<float> host = d_out.download();
+    CHECK_CASE("embedding_f32", host.data(), exp.data(), host.size(), 0.0, 0.0);
+  }
+}
+
+TEST(kernels, embedding_fp16_matches_cpu_ref) {
+  REQUIRE_CUDA_DEVICE();
+
+  struct Case { std::int64_t v, d, t; };
+  const Case cases[] = {
+    {500, 128, 4},
+    {50, 65, 2},
+  };
+
+  for (const auto& c : cases) {
+    std::vector<engine::half> table(static_cast<std::size_t>(c.v * c.d));
+    for (std::size_t i = 0; i < table.size(); ++i) {
+      table[i] = engine::float_to_half(static_cast<float>(i % 31));
+    }
+
+    std::vector<std::int32_t> ids = {1, static_cast<std::int32_t>(c.v - 1)};
+    while (static_cast<std::int64_t>(ids.size()) < c.t) {
+      ids.push_back(static_cast<std::int32_t>(ids.size() % c.v));
+    }
+
+    std::vector<engine::half> exp(static_cast<std::size_t>(c.t * c.d));
+    engine::cpu::embedding_fp16(table.data(), ids.data(), exp.data(), c.t, c.d, c.v);
+
+    DeviceBuffer<engine::half> d_table(table);
+    DeviceBuffer<std::int32_t> d_ids(ids);
+    DeviceBuffer<engine::half> d_out(static_cast<std::size_t>(c.t * c.d));
+    d_out.zero();
+
+    engine::cuda::embedding_fp16(d_table.get(), d_ids.get(), d_out.get(), c.t, c.d, c.v);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    const std::vector<engine::half> host = d_out.download();
+    for (std::size_t i = 0; i < host.size(); ++i) {
+      EXPECT_EQ(engine::half_to_float(host[i]), engine::half_to_float(exp[i]));
+    }
+  }
+}
+
+TEST(kernels, argmax_matches_cpu_ref) {
+  REQUIRE_CUDA_DEVICE();
+
+  const std::int64_t vocab_size = 32000;
+  std::vector<float> logits(static_cast<std::size_t>(vocab_size));
+  for (std::size_t i = 0; i < logits.size(); ++i) {
+    logits[i] = static_cast<float>(static_cast<int>(i % 1000) - 500) * 0.01f;
+  }
+  // Inject winner at index 17532
+  logits[17532] = 999.0f;
+  // Inject identical tie at later index 29111 -> tiebreaker must pick 17532
+  logits[29111] = 999.0f;
+
+  const std::int32_t exp = engine::cpu::argmax(logits.data(), vocab_size);
+  EXPECT_EQ(exp, 17532);
+
+  DeviceBuffer<float> d_logits(logits);
+  DeviceBuffer<std::int32_t> d_out(1);
+  d_out.zero();
+
+  engine::cuda::argmax(d_logits.get(), d_out.get(), vocab_size);
+  CUDA_CHECK(cudaDeviceSynchronize());
+
+  const std::vector<std::int32_t> host = d_out.download();
+  EXPECT_EQ(host[0], exp);
+}
+
+TEST(kernels, argmax_fp16_matches_cpu_ref) {
+  REQUIRE_CUDA_DEVICE();
+
+  const std::int64_t vocab_size = 32000;
+  std::vector<engine::half> logits(static_cast<std::size_t>(vocab_size));
+  for (std::size_t i = 0; i < logits.size(); ++i) {
+    logits[i] = engine::float_to_half(static_cast<float>(static_cast<int>(i % 100) - 50));
+  }
+  // Inject winner at index 8412
+  logits[8412] = engine::float_to_half(500.0f);
+  logits[21000] = engine::float_to_half(500.0f);
+
+  const std::int32_t exp = engine::cpu::argmax_fp16(logits.data(), vocab_size);
+  EXPECT_EQ(exp, 8412);
+
+  DeviceBuffer<engine::half> d_logits(logits);
+  DeviceBuffer<std::int32_t> d_out(1);
+  d_out.zero();
+
+  engine::cuda::argmax_fp16(d_logits.get(), d_out.get(), vocab_size);
+  CUDA_CHECK(cudaDeviceSynchronize());
+
+  const std::vector<std::int32_t> host = d_out.download();
+  EXPECT_EQ(host[0], exp);
+}
+
+//===----------------------------------------------------------------------===//
 // PART 3 -- the launch CONTRACT.
-//
-// These verify that argument validation in each launcher throws proper C++
-// exceptions for invalid inputs. The checks are what turn a silent out-of-bounds
-// device write into a C++ exception with a file and line, and CUDA gives you
-// very little help otherwise. Keeping them under test means they survive any
-// future refactors.
-//
-// (EXPECT_THROWS deliberately does NOT accept a "not implemented" exception -- see
-// is_unimplemented_error() in test_framework.hpp.)
 //===----------------------------------------------------------------------===//
 
 TEST(kernels, launchers_reject_negative_dimensions) {
@@ -1010,6 +1179,14 @@ TEST(kernels, launchers_reject_negative_dimensions) {
   DeviceBuffer<float> d(16);
   d.zero();
   float* p = d.get();
+
+  DeviceBuffer<engine::half> d_h(16);
+  d_h.zero();
+  engine::half* p_h = d_h.get();
+
+  DeviceBuffer<std::int32_t> d_i(16);
+  d_i.zero();
+  std::int32_t* p_i = d_i.get();
 
   EXPECT_THROWS_MSG(engine::cuda::vector_add(p, p, p, -1), "non-negative");
   EXPECT_THROWS_MSG(engine::cuda::reduce_sum(p, p, -1), "non-negative");
@@ -1025,6 +1202,18 @@ TEST(kernels, launchers_reject_negative_dimensions) {
   EXPECT_THROWS_MSG(engine::cuda::rmsnorm_linear(p, p, p, p, 4, 4, -1, 1e-5f), "negative");
   EXPECT_THROWS_MSG(engine::cuda::gemv(p, p, p, -1, 4), "non-negative");
   EXPECT_THROWS_MSG(engine::cuda::gemv(p, p, p, 4, -1), "non-negative");
+  EXPECT_THROWS_MSG(engine::cuda::gemv_fp16(p_h, p_h, p_h, -1, 4), "non-negative");
+  EXPECT_THROWS_MSG(engine::cuda::gemv_fp16(p_h, p_h, p_h, 4, -1), "non-negative");
+  EXPECT_THROWS_MSG(engine::cuda::embedding(p, p_i, p, -1, 4, 10), "non-negative");
+  EXPECT_THROWS_MSG(engine::cuda::embedding(p, p_i, p, 4, -1, 10), "non-negative");
+  EXPECT_THROWS_MSG(engine::cuda::embedding(p, p_i, p, 4, 4, 0), "positive");
+  EXPECT_THROWS_MSG(engine::cuda::embedding_fp16(p_h, p_i, p_h, -1, 4, 10), "non-negative");
+  EXPECT_THROWS_MSG(engine::cuda::embedding_fp16(p_h, p_i, p_h, 4, -1, 10), "non-negative");
+  EXPECT_THROWS_MSG(engine::cuda::embedding_fp16(p_h, p_i, p_h, 4, 4, 0), "positive");
+  EXPECT_THROWS_MSG(engine::cuda::argmax(p, p_i, 0), "positive");
+  EXPECT_THROWS_MSG(engine::cuda::argmax(p, p_i, -1), "positive");
+  EXPECT_THROWS_MSG(engine::cuda::argmax_fp16(p_h, p_i, 0), "positive");
+  EXPECT_THROWS_MSG(engine::cuda::argmax_fp16(p_h, p_i, -1), "positive");
 
   // eps < 0 would put a negative number under the square root.
   EXPECT_THROWS_MSG(engine::cuda::rmsnorm(p, p, p, 4, 4, -1.0f), "eps");
@@ -1038,6 +1227,14 @@ TEST(kernels, launchers_reject_null_pointers) {
   DeviceBuffer<float> d(16);
   d.zero();
   float* p = d.get();
+
+  DeviceBuffer<engine::half> d_h(16);
+  d_h.zero();
+  engine::half* p_h = d_h.get();
+
+  DeviceBuffer<std::int32_t> d_i(16);
+  d_i.zero();
+  std::int32_t* p_i = d_i.get();
 
   EXPECT_THROWS_MSG(engine::cuda::vector_add(nullptr, p, p, 4), "null");
   EXPECT_THROWS_MSG(engine::cuda::vector_add(p, nullptr, p, 4), "null");
@@ -1059,6 +1256,19 @@ TEST(kernels, launchers_reject_null_pointers) {
   EXPECT_THROWS_MSG(engine::cuda::gemv(nullptr, p, p, 4, 4), "null");
   EXPECT_THROWS_MSG(engine::cuda::gemv(p, nullptr, p, 4, 4), "null");
   EXPECT_THROWS_MSG(engine::cuda::gemv(p, p, nullptr, 4, 4), "null");
+  EXPECT_THROWS_MSG(engine::cuda::gemv_fp16(nullptr, p_h, p_h, 4, 4), "null");
+  EXPECT_THROWS_MSG(engine::cuda::gemv_fp16(p_h, nullptr, p_h, 4, 4), "null");
+  EXPECT_THROWS_MSG(engine::cuda::gemv_fp16(p_h, p_h, nullptr, 4, 4), "null");
+  EXPECT_THROWS_MSG(engine::cuda::embedding(nullptr, p_i, p, 4, 4, 10), "null");
+  EXPECT_THROWS_MSG(engine::cuda::embedding(p, nullptr, p, 4, 4, 10), "null");
+  EXPECT_THROWS_MSG(engine::cuda::embedding(p, p_i, nullptr, 4, 4, 10), "null");
+  EXPECT_THROWS_MSG(engine::cuda::embedding_fp16(nullptr, p_i, p_h, 4, 4, 10), "null");
+  EXPECT_THROWS_MSG(engine::cuda::embedding_fp16(p_h, nullptr, p_h, 4, 4, 10), "null");
+  EXPECT_THROWS_MSG(engine::cuda::embedding_fp16(p_h, p_i, nullptr, 4, 4, 10), "null");
+  EXPECT_THROWS_MSG(engine::cuda::argmax(nullptr, p_i, 10), "null");
+  EXPECT_THROWS_MSG(engine::cuda::argmax(p, nullptr, 10), "null");
+  EXPECT_THROWS_MSG(engine::cuda::argmax_fp16(nullptr, p_i, 10), "null");
+  EXPECT_THROWS_MSG(engine::cuda::argmax_fp16(p_h, nullptr, 10), "null");
 
   // rmsnorm's, residual_rmsnorm's, and rmsnorm_linear's `weight` is ALLOWED to be null:
   // "no learned gain" is a valid configuration, not a mistake.
@@ -1073,6 +1283,14 @@ TEST(kernels, empty_work_is_a_no_op_not_an_error) {
   DeviceBuffer<float> d(16);
   d.zero();
   float* p = d.get();
+
+  DeviceBuffer<engine::half> d_h(16);
+  d_h.zero();
+  engine::half* p_h = d_h.get();
+
+  DeviceBuffer<std::int32_t> d_i(16);
+  d_i.zero();
+  std::int32_t* p_i = d_i.get();
 
   // Zero rows or zero columns must return without launching, for the same
   // cudaErrorInvalidConfiguration reason as vector_add above. reduce_sum is the
@@ -1092,6 +1310,12 @@ TEST(kernels, empty_work_is_a_no_op_not_an_error) {
   EXPECT_NO_THROW(engine::cuda::rmsnorm_linear(p, p, p, p, 8, 8, 0, 1e-5f));
   EXPECT_NO_THROW(engine::cuda::gemv(p, p, p, 0, 8));
   EXPECT_NO_THROW(engine::cuda::gemv(p, p, p, 8, 0));
+  EXPECT_NO_THROW(engine::cuda::gemv_fp16(p_h, p_h, p_h, 0, 8));
+  EXPECT_NO_THROW(engine::cuda::gemv_fp16(p_h, p_h, p_h, 8, 0));
+  EXPECT_NO_THROW(engine::cuda::embedding(p, p_i, p, 0, 8, 10));
+  EXPECT_NO_THROW(engine::cuda::embedding(p, p_i, p, 8, 0, 10));
+  EXPECT_NO_THROW(engine::cuda::embedding_fp16(p_h, p_i, p_h, 0, 8, 10));
+  EXPECT_NO_THROW(engine::cuda::embedding_fp16(p_h, p_i, p_h, 8, 0, 10));
 
   // And nothing may have been launched, let alone written.
   CUDA_CHECK(cudaDeviceSynchronize());

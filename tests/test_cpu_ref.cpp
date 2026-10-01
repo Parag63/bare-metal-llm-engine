@@ -685,3 +685,113 @@ TEST(cpu_ref, gemv_agrees_with_matmul_at_m1) {
                out_gemv.size(), kExactRtol, kExactAtol);
   }
 }
+
+//===----------------------------------------------------------------------===//
+// Phase 3 — FP16 and missing inference kernels: gemv_fp16, embedding, argmax
+//===----------------------------------------------------------------------===//
+
+TEST(cpu_ref, gemv_fp16_matches_scalar_reference) {
+  const std::int64_t N = 64;
+  const std::int64_t K = 128;
+  std::vector<engine::half> A(static_cast<std::size_t>(K * N));
+  std::vector<engine::half> x(static_cast<std::size_t>(K));
+  std::vector<engine::half> out(static_cast<std::size_t>(N));
+
+  for (std::size_t i = 0; i < A.size(); ++i) {
+    A[i] = engine::float_to_half(static_cast<float>(static_cast<int>(i % 17) - 8) * 0.1f);
+  }
+  for (std::size_t i = 0; i < x.size(); ++i) {
+    x[i] = engine::float_to_half(static_cast<float>(static_cast<int>(i % 13) - 6) * 0.1f);
+  }
+
+  engine::cpu::gemv_fp16(A.data(), x.data(), out.data(), N, K);
+
+  for (std::int64_t j = 0; j < N; ++j) {
+    double acc = 0.0;
+    for (std::int64_t k = 0; k < K; ++k) {
+      acc += static_cast<double>(engine::half_to_float(x[static_cast<std::size_t>(k)])) *
+             static_cast<double>(engine::half_to_float(A[static_cast<std::size_t>(k * N + j)]));
+    }
+    float expected = static_cast<float>(acc);
+    float actual = engine::half_to_float(out[static_cast<std::size_t>(j)]);
+    EXPECT_NEAR(actual, expected, 2e-3);
+  }
+}
+
+TEST(cpu_ref, embedding_lookup_matches_expected) {
+  const std::int64_t vocab_size = 50;
+  const std::int64_t hidden_dim = 16;
+  const std::int64_t num_tokens = 4;
+
+  std::vector<float> table(static_cast<std::size_t>(vocab_size * hidden_dim));
+  for (std::size_t i = 0; i < table.size(); ++i) {
+    table[i] = static_cast<float>(i) * 0.5f;
+  }
+
+  std::vector<std::int32_t> input_ids = {0, 7, 49, 12};
+  std::vector<float> out(static_cast<std::size_t>(num_tokens * hidden_dim), -1.0f);
+
+  engine::cpu::embedding(table.data(), input_ids.data(), out.data(), num_tokens, hidden_dim, vocab_size);
+
+  for (std::int64_t t = 0; t < num_tokens; ++t) {
+    std::int32_t id = input_ids[static_cast<std::size_t>(t)];
+    for (std::int64_t d = 0; d < hidden_dim; ++d) {
+      EXPECT_EQ(out[static_cast<std::size_t>(t * hidden_dim + d)],
+                table[static_cast<std::size_t>(id * hidden_dim + d)]);
+    }
+  }
+
+  // Bounds checks throw
+  std::vector<std::int32_t> bad_ids = {50};
+  EXPECT_THROWS(engine::cpu::embedding(table.data(), bad_ids.data(), out.data(), 1, hidden_dim, vocab_size));
+  bad_ids = {-1};
+  EXPECT_THROWS(engine::cpu::embedding(table.data(), bad_ids.data(), out.data(), 1, hidden_dim, vocab_size));
+}
+
+TEST(cpu_ref, embedding_fp16_lookup_matches_expected) {
+  const std::int64_t vocab_size = 32;
+  const std::int64_t hidden_dim = 16;
+  const std::int64_t num_tokens = 3;
+
+  std::vector<engine::half> table(static_cast<std::size_t>(vocab_size * hidden_dim));
+  for (std::size_t i = 0; i < table.size(); ++i) {
+    table[i] = engine::float_to_half(static_cast<float>(i));
+  }
+
+  std::vector<std::int32_t> input_ids = {2, 31, 0};
+  std::vector<engine::half> out(static_cast<std::size_t>(num_tokens * hidden_dim));
+
+  engine::cpu::embedding_fp16(table.data(), input_ids.data(), out.data(), num_tokens, hidden_dim, vocab_size);
+
+  for (std::int64_t t = 0; t < num_tokens; ++t) {
+    std::int32_t id = input_ids[static_cast<std::size_t>(t)];
+    for (std::int64_t d = 0; d < hidden_dim; ++d) {
+      EXPECT_EQ(engine::half_to_float(out[static_cast<std::size_t>(t * hidden_dim + d)]),
+                engine::half_to_float(table[static_cast<std::size_t>(id * hidden_dim + d)]));
+    }
+  }
+}
+
+TEST(cpu_ref, argmax_finds_maximum_and_tiebreaks) {
+  std::vector<float> logits = {1.0f, 5.5f, 3.2f, 5.5f, 2.0f};
+  // Max is 5.5f, occurring at index 1 and index 3. Lowest index is 1.
+  std::int32_t best = engine::cpu::argmax(logits.data(), static_cast<std::int64_t>(logits.size()));
+  EXPECT_EQ(best, 1);
+
+  // Single element
+  std::vector<float> single = {42.0f};
+  EXPECT_EQ(engine::cpu::argmax(single.data(), 1), 0);
+}
+
+TEST(cpu_ref, argmax_fp16_finds_maximum_and_tiebreaks) {
+  std::vector<engine::half> logits = {
+    engine::float_to_half(-10.0f),
+    engine::float_to_half(4.25f),
+    engine::float_to_half(100.5f),
+    engine::float_to_half(100.5f),
+    engine::float_to_half(0.0f)
+  };
+  std::int32_t best = engine::cpu::argmax_fp16(logits.data(), static_cast<std::int64_t>(logits.size()));
+  EXPECT_EQ(best, 2);
+}
+

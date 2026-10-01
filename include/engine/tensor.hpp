@@ -38,6 +38,7 @@
 //===----------------------------------------------------------------------===//
 
 #include <engine/dtype.hpp>
+#include <engine/half.hpp>
 
 #include <cstdint>
 #include <memory>
@@ -169,6 +170,8 @@ class Tensor {
   /// kernel call site.
   template <typename T>
   T* ptr(Device expect);
+  template <typename T>
+  const T* ptr(Device expect) const;
 
   const std::shared_ptr<Storage>& storage() const { return storage_; }
   std::int64_t storage_offset() const { return offset_; }

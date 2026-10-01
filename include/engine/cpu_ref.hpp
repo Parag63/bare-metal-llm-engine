@@ -17,6 +17,7 @@
 //   of matmul bugs, so it is stated once here and never varied.
 //===----------------------------------------------------------------------===//
 
+#include <engine/half.hpp>
 #include <cstdint>
 
 namespace engine::cpu {
@@ -88,5 +89,25 @@ void residual_rmsnorm(const float* x, const float* residual,
 void rmsnorm_linear(const float* in, const float* rms_weight,
                     const float* W, float* out,
                     std::int64_t M, std::int64_t N, std::int64_t K, float eps);
+
+//===----------------------------------------------------------------------===//
+// Phase 3 — FP16 and missing inference kernels.
+//===----------------------------------------------------------------------===//
+
+/// Dense matrix-vector product in FP16: out[N] = x[K] * A[K x N], row-major.
+/// Accumulates in double for oracle precision, converts result to half.
+void gemv_fp16(const half* A, const half* x, half* out, std::int64_t N, std::int64_t K);
+
+/// Embedding lookup: gathers rows from `table` into `out` according to `input_ids`.
+/// table: [vocab_size, hidden_dim], input_ids: [num_tokens], out: [num_tokens, hidden_dim]
+void embedding(const float* table, const std::int32_t* input_ids, float* out,
+               std::int64_t num_tokens, std::int64_t hidden_dim, std::int64_t vocab_size);
+void embedding_fp16(const half* table, const std::int32_t* input_ids, half* out,
+                    std::int64_t num_tokens, std::int64_t hidden_dim, std::int64_t vocab_size);
+
+/// Argmax / Greedy sampling: returns the index of the maximum value in logits[0..vocab_size).
+/// Tie-breaking picks the lowest index.
+std::int32_t argmax(const float* logits, std::int64_t vocab_size);
+std::int32_t argmax_fp16(const half* logits, std::int64_t vocab_size);
 
 }  // namespace engine::cpu

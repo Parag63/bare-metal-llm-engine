@@ -22,4 +22,16 @@ void gemv(const float* A, const float* x, float* out, std::int64_t N, std::int64
   }
 }
 
+void gemv_fp16(const half* A, const half* x, half* out, std::int64_t N, std::int64_t K) {
+  for (std::int64_t j = 0; j < N; ++j) {
+    double acc = 0.0;
+    for (std::int64_t k = 0; k < K; ++k) {
+      double xk = static_cast<double>(half_to_float(x[k]));
+      double Akj = static_cast<double>(half_to_float(A[k * N + j]));
+      acc += xk * Akj;
+    }
+    out[j] = float_to_half(static_cast<float>(acc));
+  }
+}
+
 }  // namespace engine::cpu
