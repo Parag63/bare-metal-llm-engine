@@ -78,13 +78,13 @@ jobs:
           -DENGINE_WERROR=ON
 
       - name: Build
-        run: cmake --build build -j 4
+        run: cmake --build build --config RelWithDebInfo -j 4
 
       - name: Generate reference data
         run: python tools/gen_reference.py --backend numpy
 
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build -C RelWithDebInfo --output-on-failure
 
   cuda-compile:
     name: linux-cuda-compile
@@ -147,7 +147,7 @@ jobs:
           fi
 
       - name: Build
-        run: cmake --build build -j 4
+        run: cmake --build build --config RelWithDebInfo -j 4
 
       - name: Assert the kernel targets were built
         run: test -x build/bin/bench_kernels && test -x build/bin/engine_tests
@@ -159,7 +159,7 @@ jobs:
       # the launcher-contract tests (negative dimensions, null pointers, zero-size
       # no-ops) pass, because those reject their arguments before touching the device.
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build -C RelWithDebInfo --output-on-failure
 
   format:
     name: clang-format
