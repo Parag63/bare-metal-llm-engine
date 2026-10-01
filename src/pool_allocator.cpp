@@ -33,9 +33,7 @@ PoolAllocator::PoolAllocator(Device device, std::size_t initial_slab_size)
       initial_slab_size_(std::max(initial_slab_size, kMinAllocSize)),
       next_slab_size_(initial_slab_size_) {}
 
-PoolAllocator::~PoolAllocator() {
-  reset();
-}
+PoolAllocator::~PoolAllocator() { reset(); }
 
 std::size_t PoolAllocator::round_up_power_of_two(std::size_t bytes) {
   if (bytes <= kMinAllocSize) return kMinAllocSize;

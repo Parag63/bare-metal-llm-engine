@@ -60,8 +60,9 @@ Hardware performance counters were captured on an **NVIDIA GeForce RTX 4070 SUPE
 | **Difference (Residual Fusion)** | | **-8.39 MB (-8.0 MiB)** | **~0 MB** | **-8.31 MB** | **-6.68 MB** | **-13.6% (WIN)** |
 | | | | | | | |
 | **Separate:** `rmsnorm` + `matmul_tiled` | $512 \times 4096 \times 4096$ | 1.08 GB | 27.10 MB | 1.11 GB | 2.24 GB | 6.43 ms |
+| **Separate:** `rmsnorm` + `matmul_register_tiled` | $512 \times 4096 \times 4096$ | 0.82 GB | 8.39 MB | 0.83 GB | 1.15 GB | 0.99 ms |
 | **1D Fused:** `rmsnorm_linear_kernel` | $512 \times 4096 \times 4096$ | 3.37 GB | 153.07 MB | 3.52 GB | 33.61 GB | 13.48 ms |
-| **Difference (Prefill Fusion)** | | **+2.29 GB (+212%)** | **+125.9 MB** | **+2.41 GB** | **+31.37 GB** | **+109.6% (CATASTROPHIC LOSS)** |
+| **Difference vs register-tiled** | | **+2.55 GB (+311%)** | **+144.7 MB** | **+2.69 GB** | **+32.46 GB** | **+1260% (13.6× SLOWER)** |
 | | | | | | | |
 | **Separate:** `rmsnorm` + `matmul_tiled` | $1 \times 4096 \times 4096$ | 73.59 MB | 0.03 MB | 73.63 MB | 76.00 MB | 0.524 ms |
 | **1D Fused:** `rmsnorm_linear_kernel` | $1 \times 4096 \times 4096$ | 67.16 MB | 1.27 MB | 68.43 MB | 67.84 MB | 0.366 ms |
@@ -95,12 +96,12 @@ void rmsnorm_linear(...) {
     // Decode phase: 1D row-fused kernel (bypasses launch overhead and 2D tile waste)
     rmsnorm_linear_fused_direct(in, rms_weight, W, out, M, N, K, eps, stream);
   } else {
-    // Prefill phase (M > 1): 2D tiled GEMM reuses weight matrix across tokens
+    // Prefill phase (M > 1): High-throughput 2D register-tiled GEMM reuses weight matrix
     // Stream-ordered async buffer avoids host synchronization overhead
     float* temp = nullptr;
     cudaMallocAsync(&temp, M * K * sizeof(float), stream);
     rmsnorm(in, rms_weight, temp, M, K, eps, stream);
-    matmul_tiled(temp, W, out, M, N, K, stream);
+    matmul_register_tiled(temp, W, out, M, N, K, stream);
     cudaFreeAsync(temp, stream);
   }
 }
@@ -108,7 +109,10 @@ void rmsnorm_linear(...) {
 
 #### Measured Dispatch Validation (`bench_kernels`):
 - **$M=1, K=4096, N=4096$:** Dispatched executes fused path in **0.366 ms** (matches 1D fused; $+43\%$ faster than separate).
-- **$M=512, K=4096, N=4096$:** Dispatched executes tiled path in **7.08 ms** (vs 13.48 ms for 1D fused; completely avoids the $2\times$ regression).
+- **$M=512, K=4096, N=4096$:** Dispatched executes register-tiled path in **0.99 ms** (vs 13.48 ms for 1D fused; a **$13.6\times$ speedup** over 1D fused).
+
+#### Key Takeaway for Module 4 (Attention & FFN Path):
+In Module 4 (FlashAttention-2 and FFN sub-layers), prefill projections ($M \ge 128$) do not attempt 1D row-fused normalization + projection. Instead, they use separate RMSNorm into a scratch buffer followed by the 2D register-tiled GEMM core (or load-time weight folded matrices with row-scale epilogues), reserving fusion strictly for memory-bound sub-layer operations like `residual_rmsnorm` and `swiglu`.
 
 ---
 

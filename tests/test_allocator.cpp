@@ -54,8 +54,8 @@ TEST(allocator, pool_recycles_freed_memory_blocks) {
 TEST(allocator, tracks_exact_bytes_in_use_and_peak) {
   engine::PoolAllocator pool(engine::Device::CPU, 64 * 1024);
 
-  void* a = pool.allocate(1024);   // rounded to 1024
-  void* b = pool.allocate(2048);   // rounded to 2048
+  void* a = pool.allocate(1024);  // rounded to 1024
+  void* b = pool.allocate(2048);  // rounded to 2048
   auto s1 = pool.stats();
   EXPECT_EQ(s1.bytes_in_use, 3072u);
   EXPECT_EQ(s1.peak_bytes_in_use, 3072u);

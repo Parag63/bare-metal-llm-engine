@@ -81,8 +81,8 @@ void matmul_register_tiled(const float* A, const float* B, float* C, std::int64_
 
 /// GEMV: Matrix-vector multiply out[N] = x[K] * A[K x N], row-major.
 /// Specialized for M=1 decode-time token generation to bypass 2D tile waste.
-void gemv(const float* A, const float* x, float* out, std::int64_t N,
-          std::int64_t K, cudaStream_t stream = 0);
+void gemv(const float* A, const float* x, float* out, std::int64_t N, std::int64_t K,
+          cudaStream_t stream = 0);
 
 //===----------------------------------------------------------------------===//
 // Module 3 — Fused operations.
@@ -93,25 +93,22 @@ void gemv(const float* A, const float* x, float* out, std::int64_t N,
 /// Eliminates the intermediate M×K write/read between RMSNorm and matmul.
 /// `rms_weight` may be nullptr (no per-channel gain).
 /// Dynamically dispatches fused 1D kernel for M=1 (decode) and tiled matmul for M>1 (prefill).
-void rmsnorm_linear(const float* in, const float* rms_weight,
-                    const float* W, float* out,
-                    std::int64_t M, std::int64_t N, std::int64_t K,
-                    float eps, cudaStream_t stream = 0);
+void rmsnorm_linear(const float* in, const float* rms_weight, const float* W, float* out,
+                    std::int64_t M, std::int64_t N, std::int64_t K, float eps,
+                    cudaStream_t stream = 0);
 
 /// Direct execution of the 1D fused kernel regardless of M (used for benchmarking/profiling).
-void rmsnorm_linear_fused_direct(const float* in, const float* rms_weight,
-                                 const float* W, float* out,
-                                 std::int64_t M, std::int64_t N, std::int64_t K,
-                                 float eps, cudaStream_t stream = 0);
+void rmsnorm_linear_fused_direct(const float* in, const float* rms_weight, const float* W,
+                                 float* out, std::int64_t M, std::int64_t N,
+                                 std::int64_t K, float eps, cudaStream_t stream = 0);
 
 /// Exercise 8. Fused Residual-Add + RMSNorm.
 /// norm_out[r][c] = RMSNorm(x[r][c] + residual[r][c], weight, eps)
 /// sum_out[r][c]  = x[r][c] + residual[r][c]   (for the next residual connection)
 /// `weight` may be nullptr (no scaling).
-void residual_rmsnorm(const float* x, const float* residual,
-                      const float* weight, float* norm_out, float* sum_out,
-                      std::int64_t rows, std::int64_t cols,
-                      float eps, cudaStream_t stream = 0);
+void residual_rmsnorm(const float* x, const float* residual, const float* weight,
+                      float* norm_out, float* sum_out, std::int64_t rows,
+                      std::int64_t cols, float eps, cudaStream_t stream = 0);
 
 //===----------------------------------------------------------------------===//
 // Phase 3 — FP16 and missing inference kernels.
@@ -119,8 +116,8 @@ void residual_rmsnorm(const float* x, const float* residual,
 
 /// Dense matrix-vector product in FP16: out[N] = x[K] * A[K x N], row-major.
 /// Specialized for decode token generation using 128-bit vector memory instructions.
-void gemv_fp16(const half* A, const half* x, half* out,
-               std::int64_t N, std::int64_t K, cudaStream_t stream = 0);
+void gemv_fp16(const half* A, const half* x, half* out, std::int64_t N, std::int64_t K,
+               cudaStream_t stream = 0);
 
 /// Embedding lookup: gathers rows from `table` into `out` according to `input_ids`.
 /// table: [vocab_size, hidden_dim], input_ids: [num_tokens], out: [num_tokens, hidden_dim]
@@ -128,8 +125,8 @@ void embedding(const float* table, const std::int32_t* input_ids, float* out,
                std::int64_t num_tokens, std::int64_t hidden_dim, std::int64_t vocab_size,
                cudaStream_t stream = 0);
 void embedding_fp16(const half* table, const std::int32_t* input_ids, half* out,
-                    std::int64_t num_tokens, std::int64_t hidden_dim, std::int64_t vocab_size,
-                    cudaStream_t stream = 0);
+                    std::int64_t num_tokens, std::int64_t hidden_dim,
+                    std::int64_t vocab_size, cudaStream_t stream = 0);
 
 /// Argmax / Greedy sampling: finds the index of the maximum logit and writes to out_token.
 void argmax(const float* logits, std::int32_t* out_token, std::int64_t vocab_size,
@@ -138,8 +135,10 @@ void argmax_fp16(const half* logits, std::int32_t* out_token, std::int64_t vocab
                  cudaStream_t stream = 0);
 
 /// SwiGLU activation: out[i] = SiLU(gate[i]) * up[i] = (gate[i] / (1 + exp(-gate[i]))) * up[i].
-void swiglu(const float* gate, const float* up, float* out, std::int64_t n, cudaStream_t stream = 0);
-void swiglu_fp16(const half* gate, const half* up, half* out, std::int64_t n, cudaStream_t stream = 0);
+void swiglu(const float* gate, const float* up, float* out, std::int64_t n,
+            cudaStream_t stream = 0);
+void swiglu_fp16(const half* gate, const half* up, half* out, std::int64_t n,
+                 cudaStream_t stream = 0);
 
 }  // namespace engine::cuda
 

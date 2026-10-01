@@ -16,9 +16,9 @@
 
 namespace engine::cpu {
 
-void residual_rmsnorm(const float* x, const float* residual,
-                      const float* weight, float* norm_out, float* sum_out,
-                      std::int64_t rows, std::int64_t cols, float eps) {
+void residual_rmsnorm(const float* x, const float* residual, const float* weight,
+                      float* norm_out, float* sum_out, std::int64_t rows,
+                      std::int64_t cols, float eps) {
   for (std::int64_t r = 0; r < rows; ++r) {
     const float* src_x = x + r * cols;
     const float* src_res = residual ? (residual + r * cols) : nullptr;
@@ -36,11 +36,14 @@ void residual_rmsnorm(const float* x, const float* residual,
     }
 
     const double mean_sq = sumsq / static_cast<double>(cols);
-    const float scale = static_cast<float>(1.0 / std::sqrt(mean_sq + static_cast<double>(eps)));
+    const float scale =
+        static_cast<float>(1.0 / std::sqrt(mean_sq + static_cast<double>(eps)));
 
     // Pass 2: Scale and apply optional per-channel weight
     for (std::int64_t c = 0; c < cols; ++c) {
-      const float s = (dst_sum != nullptr) ? dst_sum[c] : (src_x[c] + (src_res != nullptr ? src_res[c] : 0.0f));
+      const float s = (dst_sum != nullptr)
+                          ? dst_sum[c]
+                          : (src_x[c] + (src_res != nullptr ? src_res[c] : 0.0f));
       const float w = (weight != nullptr) ? weight[c] : 1.0f;
       dst_norm[c] = s * scale * w;
     }

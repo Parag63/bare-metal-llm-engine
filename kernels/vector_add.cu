@@ -51,10 +51,9 @@ constexpr int kBlockSize = 256;
 // Version 1: one thread per element. The obvious approach.
 //===----------------------------------------------------------------------===//
 __global__ void vector_add_simple(const float* __restrict__ a,
-                                  const float* __restrict__ b,
-                                  float* __restrict__ out, std::int64_t n) {
-  const std::int64_t i =
-      static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+                                  const float* __restrict__ b, float* __restrict__ out,
+                                  std::int64_t n) {
+  const std::int64_t i = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
 
   // THE BOUNDS CHECK IS NOT OPTIONAL.
   // Blocks come in whole units, so for n = 1000 and blockDim = 256 you must launch
@@ -137,8 +136,8 @@ void vector_add(const float* a, const float* b, float* out, std::int64_t n,
 
   const std::int64_t blocks_needed = (n + kBlockSize - 1) / kBlockSize;
   const std::int64_t blocks_wanted = static_cast<std::int64_t>(num_sms) * 32;
-  const int grid = static_cast<int>(blocks_needed < blocks_wanted ? blocks_needed
-                                                                 : blocks_wanted);
+  const int grid =
+      static_cast<int>(blocks_needed < blocks_wanted ? blocks_needed : blocks_wanted);
 
   vector_add_grid_stride<<<grid, kBlockSize, 0, stream>>>(a, b, out, n);
 

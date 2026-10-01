@@ -77,9 +77,8 @@ __global__ void residual_rmsnorm_kernel(const float* __restrict__ x,
                                         const float* __restrict__ residual,
                                         const float* __restrict__ weight,
                                         float* __restrict__ norm_out,
-                                        float* __restrict__ sum_out,
-                                        std::int64_t rows, std::int64_t cols,
-                                        float eps) {
+                                        float* __restrict__ sum_out, std::int64_t rows,
+                                        std::int64_t cols, float eps) {
   __shared__ float sdata[kBlockSize];
   const int tid = threadIdx.x;
   const float inv_cols = 1.0f / static_cast<float>(cols);
@@ -122,13 +121,13 @@ __global__ void residual_rmsnorm_kernel(const float* __restrict__ x,
 
 }  // namespace
 
-void residual_rmsnorm(const float* x, const float* residual,
-                      const float* weight, float* norm_out, float* sum_out,
-                      std::int64_t rows, std::int64_t cols,
-                      float eps, cudaStream_t stream) {
+void residual_rmsnorm(const float* x, const float* residual, const float* weight,
+                      float* norm_out, float* sum_out, std::int64_t rows,
+                      std::int64_t cols, float eps, cudaStream_t stream) {
   ENGINE_CHECK(rows >= 0 && cols >= 0, "residual_rmsnorm: negative dimension");
-  ENGINE_CHECK(x != nullptr && residual != nullptr && norm_out != nullptr && sum_out != nullptr,
-               "residual_rmsnorm: null device pointer");
+  ENGINE_CHECK(
+      x != nullptr && residual != nullptr && norm_out != nullptr && sum_out != nullptr,
+      "residual_rmsnorm: null device pointer");
   ENGINE_CHECK(eps >= 0.0f, "residual_rmsnorm: eps must be non-negative");
   if (rows == 0 || cols == 0) return;
 
@@ -140,11 +139,11 @@ void residual_rmsnorm(const float* x, const float* residual,
   // Size grid to keep SMs busy without launching excessive blocks.
   const std::int64_t blocks_needed = rows;
   const std::int64_t blocks_wanted = static_cast<std::int64_t>(num_sms) * 32;
-  const int grid = static_cast<int>(blocks_needed < blocks_wanted ? blocks_needed
-                                                                  : blocks_wanted);
+  const int grid =
+      static_cast<int>(blocks_needed < blocks_wanted ? blocks_needed : blocks_wanted);
 
-  residual_rmsnorm_kernel<<<grid, kBlockSize, 0, stream>>>(
-      x, residual, weight, norm_out, sum_out, rows, cols, eps);
+  residual_rmsnorm_kernel<<<grid, kBlockSize, 0, stream>>>(x, residual, weight, norm_out,
+                                                           sum_out, rows, cols, eps);
   CUDA_CHECK_KERNEL();
 }
 

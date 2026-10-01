@@ -32,7 +32,8 @@ void rmsnorm(const float* in, const float* weight, float* out, std::int64_t rows
     // Note eps is INSIDE the sqrt. Some implementations put it outside; that
     // changes results for near-zero rows. Match this convention in the CUDA
     // kernel or the tests will disagree with you at eps-scale tolerances.
-    const float scale = static_cast<float>(1.0 / std::sqrt(mean_sq + static_cast<double>(eps)));
+    const float scale =
+        static_cast<float>(1.0 / std::sqrt(mean_sq + static_cast<double>(eps)));
 
     for (std::int64_t c = 0; c < cols; ++c) {
       const float w = (weight != nullptr) ? weight[c] : 1.0f;

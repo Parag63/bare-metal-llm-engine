@@ -96,11 +96,11 @@ std::string golden_missing_hint();
 // The distinction matters for CI: "you have not generated the reference data yet" is
 // not a broken kernel, and reporting it as one trains you to ignore red builds.
 //===----------------------------------------------------------------------===//
-#define LOAD_GOLDEN(var, stem)                                                     \
-  ::engtest::GoldenFile var;                                                       \
-  do {                                                                             \
-    std::string engtest_err;                                                       \
-    if (!::engtest::GoldenFile::try_load((stem), (var), engtest_err)) {              \
-      SKIP_TEST(engtest_err);                                                      \
-    }                                                                              \
+#define LOAD_GOLDEN(var, stem)                                          \
+  ::engtest::GoldenFile var;                                            \
+  do {                                                                  \
+    std::string engtest_err;                                            \
+    if (!::engtest::GoldenFile::try_load((stem), (var), engtest_err)) { \
+      SKIP_TEST(engtest_err);                                           \
+    }                                                                   \
   } while (0)

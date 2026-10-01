@@ -32,12 +32,12 @@ namespace engine {
 
 /// Allocation statistics, for the memory numbers in the benchmark report.
 struct AllocStats {
-  std::size_t bytes_in_use = 0;      ///< currently handed out to callers
-  std::size_t bytes_reserved = 0;    ///< total obtained from the driver
-  std::size_t peak_bytes_in_use = 0; ///< high-water mark; this is the number to report
-  std::size_t num_allocs = 0;        ///< allocate() calls served
-  std::size_t num_driver_allocs = 0; ///< times we actually called cudaMalloc.
-                                     ///< The pool works iff this stays tiny.
+  std::size_t bytes_in_use = 0;       ///< currently handed out to callers
+  std::size_t bytes_reserved = 0;     ///< total obtained from the driver
+  std::size_t peak_bytes_in_use = 0;  ///< high-water mark; this is the number to report
+  std::size_t num_allocs = 0;         ///< allocate() calls served
+  std::size_t num_driver_allocs = 0;  ///< times we actually called cudaMalloc.
+                                      ///< The pool works iff this stays tiny.
   std::string to_string() const;
 };
 

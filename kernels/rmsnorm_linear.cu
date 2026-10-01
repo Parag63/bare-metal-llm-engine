@@ -79,9 +79,8 @@ __device__ float block_reduce_sum(float* sdata, int tid) {
 __global__ void rmsnorm_linear_kernel(const float* __restrict__ in,
                                       const float* __restrict__ rms_weight,
                                       const float* __restrict__ W,
-                                      float* __restrict__ out,
-                                      std::int64_t M, std::int64_t N,
-                                      std::int64_t K, float eps) {
+                                      float* __restrict__ out, std::int64_t M,
+                                      std::int64_t N, std::int64_t K, float eps) {
   extern __shared__ float smem[];
   float* s_row = smem;
   float* s_reduce = smem + K;
@@ -142,40 +141,37 @@ __global__ void rmsnorm_linear_kernel(const float* __restrict__ in,
 
 }  // namespace
 
-void rmsnorm_linear_fused_direct(const float* in, const float* rms_weight,
-                                 const float* W, float* out,
-                                 std::int64_t M, std::int64_t N, std::int64_t K,
-                                 float eps, cudaStream_t stream) {
+void rmsnorm_linear_fused_direct(const float* in, const float* rms_weight, const float* W,
+                                 float* out, std::int64_t M, std::int64_t N,
+                                 std::int64_t K, float eps, cudaStream_t stream) {
   ENGINE_CHECK(M >= 0 && N >= 0 && K >= 0, "rmsnorm_linear: negative dimension");
   ENGINE_CHECK(in != nullptr && W != nullptr && out != nullptr,
                "rmsnorm_linear: null device pointer");
   ENGINE_CHECK(eps >= 0.0f, "rmsnorm_linear: eps must be non-negative");
   if (M == 0 || N == 0 || K == 0) return;
 
-  const std::size_t smem_bytes =
-      static_cast<std::size_t>(K + kBlockSize) * sizeof(float);
+  const std::size_t smem_bytes = static_cast<std::size_t>(K + kBlockSize) * sizeof(float);
 
   if (smem_bytes > 48 * 1024) {
-    CUDA_CHECK(cudaFuncSetAttribute(
-        reinterpret_cast<const void*>(rmsnorm_linear_kernel),
-        cudaFuncAttributeMaxDynamicSharedMemorySize,
-        static_cast<int>(smem_bytes)));
+    CUDA_CHECK(cudaFuncSetAttribute(reinterpret_cast<const void*>(rmsnorm_linear_kernel),
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                    static_cast<int>(smem_bytes)));
   }
 
   dim3 block(kBlockSize);
-  const unsigned int grid_x = static_cast<unsigned int>((N + kBlockSize - 1) / kBlockSize);
+  const unsigned int grid_x =
+      static_cast<unsigned int>((N + kBlockSize - 1) / kBlockSize);
   const unsigned int grid_y = static_cast<unsigned int>(M <= 65535 ? M : 65535);
   dim3 grid(grid_x, grid_y);
 
-  rmsnorm_linear_kernel<<<grid, block, smem_bytes, stream>>>(
-      in, rms_weight, W, out, M, N, K, eps);
+  rmsnorm_linear_kernel<<<grid, block, smem_bytes, stream>>>(in, rms_weight, W, out, M, N,
+                                                             K, eps);
   CUDA_CHECK_KERNEL();
 }
 
-void rmsnorm_linear(const float* in, const float* rms_weight,
-                    const float* W, float* out,
-                    std::int64_t M, std::int64_t N, std::int64_t K,
-                    float eps, cudaStream_t stream) {
+void rmsnorm_linear(const float* in, const float* rms_weight, const float* W, float* out,
+                    std::int64_t M, std::int64_t N, std::int64_t K, float eps,
+                    cudaStream_t stream) {
   ENGINE_CHECK(M >= 0 && N >= 0 && K >= 0, "rmsnorm_linear: negative dimension");
   ENGINE_CHECK(in != nullptr && W != nullptr && out != nullptr,
                "rmsnorm_linear: null device pointer");
@@ -197,7 +193,7 @@ void rmsnorm_linear(const float* in, const float* rms_weight,
     const std::size_t temp_bytes = static_cast<std::size_t>(M * K) * sizeof(float);
     CUDA_CHECK(cudaMallocAsync(&temp, temp_bytes, stream));
     rmsnorm(in, rms_weight, temp, M, K, eps, stream);
-    matmul_tiled(temp, W, out, M, N, K, stream);
+    matmul_register_tiled(temp, W, out, M, N, K, stream);
     CUDA_CHECK(cudaFreeAsync(temp, stream));
   }
 }

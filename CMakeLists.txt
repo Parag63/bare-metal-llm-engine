@@ -6,7 +6,7 @@
 #     Machine A -- the laptop. No NVIDIA GPU. Where the C++ is written, where the
 #                  CPU reference implementations and the tensor library are tested,
 #                  and where CI runs.
-#     Machine B -- a Windows box with an RTX 4090 (sm_89), exclusive access. Where
+#     Machine B -- a Windows box with an RTX 4070 SUPER (sm_89), exclusive access. Where
 #                  every CUDA kernel is compiled, verified and benchmarked.
 #   Git is the transport between them; see docs/01-dev-environment.md.
 #
@@ -80,7 +80,7 @@ option(ENGINE_WERROR         "Treat compiler warnings as errors"       OFF)
 option(ENGINE_SYNC_CHECK_KERNELS
        "Synchronise and check after every kernel launch, even in release builds" OFF)
 
-# 89 = GeForce RTX 4090 / RTX 4070 SUPER (Ada Lovelace).
+# 89 = GeForce RTX 4070 SUPER (Ada Lovelace).
 # On CMake >= 3.24 you may instead set this to "native" to auto-detect the GPU actually present.
 set(ENGINE_CUDA_ARCH "89" CACHE STRING "CUDA architecture to target (e.g. 89 for Ada Lovelace)")
 

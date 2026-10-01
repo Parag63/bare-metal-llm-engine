@@ -123,8 +123,7 @@ __device__ float block_reduce_sum(float* sdata, int tid) {
 // than 0/0 = NaN.
 //===----------------------------------------------------------------------===//
 __global__ void rmsnorm_kernel(const float* __restrict__ in,
-                               const float* __restrict__ weight,
-                               float* __restrict__ out,
+                               const float* __restrict__ weight, float* __restrict__ out,
                                std::int64_t rows, std::int64_t cols, float eps) {
   __shared__ float sdata[kBlockSize];
   const int tid = threadIdx.x;
@@ -185,8 +184,8 @@ void rmsnorm(const float* in, const float* weight, float* out, std::int64_t rows
   // One block per row when rows <= num_sms * 32; grid-stride handles larger rows.
   const std::int64_t blocks_needed = rows;
   const std::int64_t blocks_wanted = static_cast<std::int64_t>(num_sms) * 32;
-  const int grid = static_cast<int>(blocks_needed < blocks_wanted ? blocks_needed
-                                                                  : blocks_wanted);
+  const int grid =
+      static_cast<int>(blocks_needed < blocks_wanted ? blocks_needed : blocks_wanted);
 
   rmsnorm_kernel<<<grid, kBlockSize, 0, stream>>>(in, weight, out, rows, cols, eps);
   CUDA_CHECK_KERNEL();

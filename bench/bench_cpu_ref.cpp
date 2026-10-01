@@ -98,10 +98,10 @@ int main(int argc, char** argv) {
     const std::vector<float> a = random_host(un, 1u);
     const std::vector<float> b = random_host(un, 2u);
     std::vector<float> out(un);
-    t.measure_cpu("cpu::vector_add", mib(3 * un * sizeof(float)), d(n),
-                  3.0 * d(n) * sizeof(float),
-                  [&] { engine::cpu::vector_add(a.data(), b.data(), out.data(), n); },
-                  /*warmup=*/2, reps);
+    t.measure_cpu(
+        "cpu::vector_add", mib(3 * un * sizeof(float)), d(n), 3.0 * d(n) * sizeof(float),
+        [&] { engine::cpu::vector_add(a.data(), b.data(), out.data(), n); },
+        /*warmup=*/2, reps);
   }
 
   // --- reduce_sum -----------------------------------------------------------
@@ -114,10 +114,10 @@ int main(int argc, char** argv) {
     const std::int64_t n = std::int64_t{1} << 24;
     const std::vector<float> x = random_host(static_cast<std::size_t>(n));
     volatile double sink = 0.0;  // stops the optimiser deleting the whole call
-    t.measure_cpu("cpu::reduce_sum", mib(static_cast<std::size_t>(n) * sizeof(float)),
-                  d(n), d(n) * sizeof(float),
-                  [&] { sink = engine::cpu::reduce_sum(x.data(), n); },
-                  /*warmup=*/2, reps);
+    t.measure_cpu(
+        "cpu::reduce_sum", mib(static_cast<std::size_t>(n) * sizeof(float)), d(n),
+        d(n) * sizeof(float), [&] { sink = engine::cpu::reduce_sum(x.data(), n); },
+        /*warmup=*/2, reps);
     (void)sink;
   }
 
@@ -131,12 +131,11 @@ int main(int argc, char** argv) {
     const std::size_t n = static_cast<std::size_t>(rows * cols);
     const std::vector<float> in = random_host(n);
     std::vector<float> out(n);
-    t.measure_cpu("cpu::softmax_rows", "8 x 50257  (GPT-2 logits)",
-                  5.0 * d(rows * cols), 2.0 * d(rows * cols) * sizeof(float),
-                  [&] {
-                    engine::cpu::softmax_rows(in.data(), out.data(), rows, cols);
-                  },
-                  /*warmup=*/2, reps);
+    t.measure_cpu(
+        "cpu::softmax_rows", "8 x 50257  (GPT-2 logits)", 5.0 * d(rows * cols),
+        2.0 * d(rows * cols) * sizeof(float),
+        [&] { engine::cpu::softmax_rows(in.data(), out.data(), rows, cols); },
+        /*warmup=*/2, reps);
   }
 
   // --- rmsnorm --------------------------------------------------------------
@@ -146,13 +145,11 @@ int main(int argc, char** argv) {
     const std::vector<float> in = random_host(n);
     const std::vector<float> w = random_host(static_cast<std::size_t>(cols), 7u);
     std::vector<float> out(n);
-    t.measure_cpu("cpu::rmsnorm", "512 x 4096  (Llama-2-7B hidden)",
-                  4.0 * d(rows * cols), 2.0 * d(rows * cols) * sizeof(float),
-                  [&] {
-                    engine::cpu::rmsnorm(in.data(), w.data(), out.data(), rows, cols,
-                                         1e-5f);
-                  },
-                  /*warmup=*/2, reps);
+    t.measure_cpu(
+        "cpu::rmsnorm", "512 x 4096  (Llama-2-7B hidden)", 4.0 * d(rows * cols),
+        2.0 * d(rows * cols) * sizeof(float),
+        [&] { engine::cpu::rmsnorm(in.data(), w.data(), out.data(), rows, cols, 1e-5f); },
+        /*warmup=*/2, reps);
   }
 
   // --- matmul ---------------------------------------------------------------
@@ -177,12 +174,11 @@ int main(int argc, char** argv) {
       const std::vector<float> A = random_host(elems, 1u);
       const std::vector<float> B = random_host(elems, 2u);
       std::vector<float> C(elems);
-      t.measure_cpu("cpu::matmul", std::to_string(n) + "^3", 2.0 * d(n) * d(n) * d(n),
-                    (3.0 * d(n) * d(n)) * sizeof(float),
-                    [&] {
-                      engine::cpu::matmul(A.data(), B.data(), C.data(), n, n, n);
-                    },
-                    /*warmup=*/1, std::max(3, reps / 2));
+      t.measure_cpu(
+          "cpu::matmul", std::to_string(n) + "^3", 2.0 * d(n) * d(n) * d(n),
+          (3.0 * d(n) * d(n)) * sizeof(float),
+          [&] { engine::cpu::matmul(A.data(), B.data(), C.data(), n, n, n); },
+          /*warmup=*/1, std::max(3, reps / 2));
     }
   }
 

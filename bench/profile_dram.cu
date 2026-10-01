@@ -76,7 +76,8 @@ int main(int argc, char** argv) {
 
     // Single timed pass
     engine::cuda::vector_add(x.get(), res.get(), temp_sum.get(), rows * cols);
-    engine::cuda::rmsnorm(temp_sum.get(), weight.get(), norm_out.get(), rows, cols, 1e-5f);
+    engine::cuda::rmsnorm(temp_sum.get(), weight.get(), norm_out.get(), rows, cols,
+                          1e-5f);
     CUDA_CHECK(cudaDeviceSynchronize());
     std::printf("Executed residual_separate_512\n");
 
@@ -92,9 +93,8 @@ int main(int argc, char** argv) {
     flush_l2(l2_evict);
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    engine::cuda::residual_rmsnorm(x.get(), res.get(), weight.get(),
-                                   norm_out.get(), sum_out.get(),
-                                   rows, cols, 1e-5f);
+    engine::cuda::residual_rmsnorm(x.get(), res.get(), weight.get(), norm_out.get(),
+                                   sum_out.get(), rows, cols, 1e-5f);
     CUDA_CHECK(cudaDeviceSynchronize());
     std::printf("Executed residual_fused_512\n");
 
@@ -125,7 +125,7 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaDeviceSynchronize());
 
     engine::cuda::rmsnorm_linear_fused_direct(in.get(), weight.get(), W.get(), out.get(),
-                                        M, N, K, 1e-5f);
+                                              M, N, K, 1e-5f);
     CUDA_CHECK(cudaDeviceSynchronize());
     std::printf("Executed rmsnorm_linear_fused_512\n");
 
@@ -156,7 +156,7 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaDeviceSynchronize());
 
     engine::cuda::rmsnorm_linear_fused_direct(in.get(), weight.get(), W.get(), out.get(),
-                                        M, N, K, 1e-5f);
+                                              M, N, K, 1e-5f);
     CUDA_CHECK(cudaDeviceSynchronize());
     std::printf("Executed rmsnorm_linear_fused_1\n");
 

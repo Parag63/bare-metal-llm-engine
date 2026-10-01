@@ -107,9 +107,12 @@ TEST(dtype, storage_bytes_at_model_scale) {
   // nothing here overflows -- a 32-bit intermediate would wrap and produce a
   // plausible-looking small number.
   const std::size_t params = 7'000'000'000ull;
-  EXPECT_EQ(engine::dtype_storage_bytes(DType::F32, params), std::size_t{28'000'000'000ull});
-  EXPECT_EQ(engine::dtype_storage_bytes(DType::F16, params), std::size_t{14'000'000'000ull});
-  EXPECT_EQ(engine::dtype_storage_bytes(DType::I4, params), std::size_t{3'500'000'000ull});
+  EXPECT_EQ(engine::dtype_storage_bytes(DType::F32, params),
+            std::size_t{28'000'000'000ull});
+  EXPECT_EQ(engine::dtype_storage_bytes(DType::F16, params),
+            std::size_t{14'000'000'000ull});
+  EXPECT_EQ(engine::dtype_storage_bytes(DType::I4, params),
+            std::size_t{3'500'000'000ull});
 
   // And the reason this project needs quantisation at all: FP32 does not fit in the
   // 4090's 24 GiB, FP16 does with room for a KV cache, INT4 fits comfortably.

@@ -40,9 +40,12 @@ namespace engine {
 
 const char* device_name(Device d) {
   switch (d) {
-    case Device::CPU: return "cpu";
-    case Device::CUDA: return "cuda";
-    default: return "<invalid>";
+    case Device::CPU:
+      return "cpu";
+    case Device::CUDA:
+      return "cuda";
+    default:
+      return "<invalid>";
   }
 }
 
@@ -108,8 +111,7 @@ std::vector<std::int64_t> Tensor::contiguous_strides(
   strides.back() = 1;
   for (std::int64_t i = static_cast<std::int64_t>(shape.size()) - 2; i >= 0; --i) {
     strides[static_cast<std::size_t>(i)] =
-        strides[static_cast<std::size_t>(i + 1)] *
-        shape[static_cast<std::size_t>(i + 1)];
+        strides[static_cast<std::size_t>(i + 1)] * shape[static_cast<std::size_t>(i + 1)];
   }
   return strides;
 }
@@ -157,10 +159,8 @@ std::string Tensor::to_string() const {
     if (i > 0) oss << ",";
     oss << strides_[i];
   }
-  oss << "], dtype=" << dtype_name(dtype_)
-      << ", device=" << device_name(device_)
-      << ", " << (is_contiguous() ? "contiguous" : "non-contiguous")
-      << ")";
+  oss << "], dtype=" << dtype_name(dtype_) << ", device=" << device_name(device_) << ", "
+      << (is_contiguous() ? "contiguous" : "non-contiguous") << ")";
   return oss.str();
 }
 
@@ -170,20 +170,18 @@ Tensor::Tensor(std::vector<std::int64_t> shape, DType dtype, Device device)
     : shape_(std::move(shape)), dtype_(dtype), device_(device) {
   // Validate: every dimension must be >= 0.
   for (std::size_t i = 0; i < shape_.size(); ++i) {
-    ENGINE_CHECK(shape_[i] >= 0,
-                 "Tensor: dimension " + std::to_string(i) + " is " +
-                     std::to_string(shape_[i]) + ", must be >= 0");
+    ENGINE_CHECK(shape_[i] >= 0, "Tensor: dimension " + std::to_string(i) + " is " +
+                                     std::to_string(shape_[i]) + ", must be >= 0");
   }
 
   strides_ = contiguous_strides(shape_);
 
   // Compute byte size and allocate. The product of shape may be zero (e.g.
   // shape {4, 0, 8}), in which case we still create a storage of 0 bytes.
-  const std::int64_t n = std::accumulate(shape_.begin(), shape_.end(),
-                                         std::int64_t{1},
+  const std::int64_t n = std::accumulate(shape_.begin(), shape_.end(), std::int64_t{1},
                                          std::multiplies<std::int64_t>());
-  const std::size_t bytes = (n > 0) ? dtype_storage_bytes(dtype_, static_cast<std::size_t>(n))
-                                    : 0;
+  const std::size_t bytes =
+      (n > 0) ? dtype_storage_bytes(dtype_, static_cast<std::size_t>(n)) : 0;
   storage_ = std::make_shared<Storage>(bytes, device_);
   offset_ = 0;
 }
@@ -201,8 +199,7 @@ Tensor Tensor::zeros(std::vector<std::int64_t> shape, DType dtype, Device device
     // this is correct for floats. It would NOT work for filling with 1.0f.
     CUDA_CHECK(cudaMemset(t.storage_->data(), 0, bytes));
 #else
-    ENGINE_CHECK(false,
-                 "Tensor::zeros on Device::CUDA in a CPU-only build");
+    ENGINE_CHECK(false, "Tensor::zeros on Device::CUDA in a CPU-only build");
 #endif
   }
   return t;
@@ -271,13 +268,11 @@ Tensor Tensor::reshape(std::vector<std::int64_t> new_shape) const {
   std::int64_t known_product = 1;
   for (std::size_t i = 0; i < new_shape.size(); ++i) {
     if (new_shape[i] == -1) {
-      ENGINE_CHECK(infer_idx == -1,
-                   "Tensor::reshape: at most one dimension may be -1");
+      ENGINE_CHECK(infer_idx == -1, "Tensor::reshape: at most one dimension may be -1");
       infer_idx = static_cast<std::int64_t>(i);
     } else {
       ENGINE_CHECK(new_shape[i] >= 0,
-                   "Tensor::reshape: negative dimension " +
-                       std::to_string(new_shape[i]));
+                   "Tensor::reshape: negative dimension " + std::to_string(new_shape[i]));
       known_product *= new_shape[i];
     }
   }
@@ -289,12 +284,11 @@ Tensor Tensor::reshape(std::vector<std::int64_t> new_shape) const {
   }
 
   // Verify the element count matches.
-  const std::int64_t new_n = std::accumulate(
-      new_shape.begin(), new_shape.end(), std::int64_t{1},
-      std::multiplies<std::int64_t>());
-  ENGINE_CHECK(new_n == n,
-               "Tensor::reshape: cannot reshape " + std::to_string(n) +
-                   " elements into " + std::to_string(new_n));
+  const std::int64_t new_n =
+      std::accumulate(new_shape.begin(), new_shape.end(), std::int64_t{1},
+                      std::multiplies<std::int64_t>());
+  ENGINE_CHECK(new_n == n, "Tensor::reshape: cannot reshape " + std::to_string(n) +
+                               " elements into " + std::to_string(new_n));
 
   // Build the result: same storage, new shape, freshly computed contiguous strides.
   Tensor out;
@@ -321,9 +315,9 @@ Tensor Tensor::permute(std::vector<std::int64_t> perm) const {
     ENGINE_CHECK(perm[i] >= 0 && perm[i] < dim(),
                  "Tensor::permute: axis " + std::to_string(perm[i]) +
                      " out of range for dim=" + std::to_string(dim()));
-    ENGINE_CHECK(!seen[static_cast<std::size_t>(perm[i])],
-                 "Tensor::permute: axis " + std::to_string(perm[i]) +
-                     " appears more than once");
+    ENGINE_CHECK(
+        !seen[static_cast<std::size_t>(perm[i])],
+        "Tensor::permute: axis " + std::to_string(perm[i]) + " appears more than once");
     seen[static_cast<std::size_t>(perm[i])] = true;
   }
 
@@ -345,25 +339,21 @@ Tensor Tensor::transpose(std::int64_t a, std::int64_t b) const {
   // Normalise negative axes.
   if (a < 0) a += dim();
   if (b < 0) b += dim();
-  ENGINE_CHECK(a >= 0 && a < dim(),
-               "Tensor::transpose: axis " + std::to_string(a) +
-                   " out of range for dim=" + std::to_string(dim()));
-  ENGINE_CHECK(b >= 0 && b < dim(),
-               "Tensor::transpose: axis " + std::to_string(b) +
-                   " out of range for dim=" + std::to_string(dim()));
+  ENGINE_CHECK(a >= 0 && a < dim(), "Tensor::transpose: axis " + std::to_string(a) +
+                                        " out of range for dim=" + std::to_string(dim()));
+  ENGINE_CHECK(b >= 0 && b < dim(), "Tensor::transpose: axis " + std::to_string(b) +
+                                        " out of range for dim=" + std::to_string(dim()));
 
   // Build the identity permutation, then swap a and b.
   std::vector<std::int64_t> perm(static_cast<std::size_t>(dim()));
   std::iota(perm.begin(), perm.end(), std::int64_t{0});
-  std::swap(perm[static_cast<std::size_t>(a)],
-            perm[static_cast<std::size_t>(b)]);
+  std::swap(perm[static_cast<std::size_t>(a)], perm[static_cast<std::size_t>(b)]);
   return permute(perm);
 }
 
 // ---- Step 8: slice ---------------------------------------------------------
 
-Tensor Tensor::slice(std::int64_t axis, std::int64_t start,
-                     std::int64_t length) const {
+Tensor Tensor::slice(std::int64_t axis, std::int64_t start, std::int64_t length) const {
   ENGINE_CHECK(defined(), "Tensor::slice called on undefined tensor");
 
   // Normalise negative axis.
@@ -420,13 +410,12 @@ Tensor Tensor::contiguous() const {
     // Compute the source offset from the multi-dimensional index and strides.
     std::int64_t src_offset = 0;
     for (std::int64_t d = 0; d < rank; ++d) {
-      src_offset += idx[static_cast<std::size_t>(d)] *
-                    strides_[static_cast<std::size_t>(d)];
+      src_offset +=
+          idx[static_cast<std::size_t>(d)] * strides_[static_cast<std::size_t>(d)];
     }
 
     std::memcpy(dst + flat * static_cast<std::int64_t>(elem_size),
-                src_base + src_offset * static_cast<std::int64_t>(elem_size),
-                elem_size);
+                src_base + src_offset * static_cast<std::int64_t>(elem_size), elem_size);
 
     // Increment the odometer: carry from the last axis backwards.
     for (std::int64_t d = rank - 1; d >= 0; --d) {
@@ -455,8 +444,8 @@ Tensor Tensor::clone() const {
     std::memcpy(out.storage_->data(), src.data(), bytes);
   } else {
 #if ENGINE_HAS_CUDA
-    CUDA_CHECK(cudaMemcpy(out.storage_->data(), src.data(), bytes,
-                          cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(
+        cudaMemcpy(out.storage_->data(), src.data(), bytes, cudaMemcpyDeviceToDevice));
 #endif
   }
   return out;
@@ -505,16 +494,14 @@ Tensor Tensor::from_blob(void* data, std::vector<std::int64_t> shape, DType dtyp
 
   // Validate dimensions.
   for (std::size_t i = 0; i < shape.size(); ++i) {
-    ENGINE_CHECK(shape[i] >= 0,
-                 "Tensor::from_blob: dimension " + std::to_string(i) + " is " +
-                     std::to_string(shape[i]) + ", must be >= 0");
+    ENGINE_CHECK(shape[i] >= 0, "Tensor::from_blob: dimension " + std::to_string(i) +
+                                    " is " + std::to_string(shape[i]) + ", must be >= 0");
   }
 
-  const std::int64_t n = std::accumulate(
-      shape.begin(), shape.end(), std::int64_t{1},
-      std::multiplies<std::int64_t>());
-  const std::size_t bytes = (n > 0) ? dtype_storage_bytes(dtype, static_cast<std::size_t>(n))
-                                    : 0;
+  const std::int64_t n = std::accumulate(shape.begin(), shape.end(), std::int64_t{1},
+                                         std::multiplies<std::int64_t>());
+  const std::size_t bytes =
+      (n > 0) ? dtype_storage_bytes(dtype, static_cast<std::size_t>(n)) : 0;
 
   // Create a non-owning Storage via BorrowTag. The caller guarantees the pointer
   // outlives the tensor. This is what lets ~50 weight tensors alias one mmap'd

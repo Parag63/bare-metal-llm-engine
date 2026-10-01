@@ -17,31 +17,39 @@
 namespace engine {
 
 enum class DType : std::uint8_t {
-  F32 = 0,  ///< IEEE-754 single precision. The reference type; every kernel starts here.
-  F16 = 1,  ///< IEEE-754 half. Native + tensor-core accelerated on Ada (sm_89).
-  BF16 = 2, ///< bfloat16. Same 8 exponent bits as FP32 but only 7 mantissa bits, so it
-            ///< has FP32's dynamic range and cannot overflow where FP32 would not.
-            ///< Natively supported on the RTX 4090 (Ampere sm_80 and later). Generally
-            ///< the better default than F16 for transformer weights, since FP16's
-            ///< narrow exponent is what forces loss-scaling tricks.
-  I32 = 3,  ///< 32-bit signed integer (indices, token ids).
-  I8 = 4,   ///< 8-bit signed integer. Quantisation target, tensor-core capable.
-  U8 = 5,   ///< 8-bit unsigned, used as the storage unit for packed sub-byte data.
-  I4 = 6,   ///< 4-bit signed, PACKED two-per-byte. Never addressable directly.
+  F32 = 0,   ///< IEEE-754 single precision. The reference type; every kernel starts here.
+  F16 = 1,   ///< IEEE-754 half. Native + tensor-core accelerated on Ada (sm_89).
+  BF16 = 2,  ///< bfloat16. Same 8 exponent bits as FP32 but only 7 mantissa bits, so it
+             ///< has FP32's dynamic range and cannot overflow where FP32 would not.
+             ///< Natively supported on the RTX 4090 (Ampere sm_80 and later). Generally
+             ///< the better default than F16 for transformer weights, since FP16's
+             ///< narrow exponent is what forces loss-scaling tricks.
+  I32 = 3,   ///< 32-bit signed integer (indices, token ids).
+  I8 = 4,    ///< 8-bit signed integer. Quantisation target, tensor-core capable.
+  U8 = 5,    ///< 8-bit unsigned, used as the storage unit for packed sub-byte data.
+  I4 = 6,    ///< 4-bit signed, PACKED two-per-byte. Never addressable directly.
   COUNT = 7
 };
 
 /// Bits occupied by a single element. This is the honest primitive -- prefer it.
 constexpr int dtype_bits(DType dt) {
   switch (dt) {
-    case DType::F32: return 32;
-    case DType::F16: return 16;
-    case DType::BF16: return 16;
-    case DType::I32: return 32;
-    case DType::I8: return 8;
-    case DType::U8: return 8;
-    case DType::I4: return 4;
-    default: return 0;
+    case DType::F32:
+      return 32;
+    case DType::F16:
+      return 16;
+    case DType::BF16:
+      return 16;
+    case DType::I32:
+      return 32;
+    case DType::I8:
+      return 8;
+    case DType::U8:
+      return 8;
+    case DType::I4:
+      return 4;
+    default:
+      return 0;
   }
 }
 
@@ -52,9 +60,7 @@ constexpr bool dtype_is_float(DType dt) {
   return dt == DType::F32 || dt == DType::F16 || dt == DType::BF16;
 }
 
-constexpr bool dtype_is_quantised(DType dt) {
-  return dt == DType::I8 || dt == DType::I4;
-}
+constexpr bool dtype_is_quantised(DType dt) { return dt == DType::I8 || dt == DType::I4; }
 
 /// Bytes per element. Throws for sub-byte types -- by design, so that code which
 /// assumes byte-addressability cannot silently mis-size an INT4 buffer.

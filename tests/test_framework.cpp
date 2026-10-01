@@ -74,7 +74,10 @@ bool report_allclose(TestContext& ctx, const float* actual, const float* expecte
       if (a_nan && e_nan) continue;
       ++mismatches;
       ++nan_count;
-      if (!have_first) { first_bad = i; have_first = true; }
+      if (!have_first) {
+        first_bad = i;
+        have_first = true;
+      }
       continue;
     }
 
@@ -82,7 +85,10 @@ bool report_allclose(TestContext& ctx, const float* actual, const float* expecte
     const double tol = atol + rtol * std::abs(e);
     if (diff > tol) {
       ++mismatches;
-      if (!have_first) { first_bad = i; have_first = true; }
+      if (!have_first) {
+        first_bad = i;
+        have_first = true;
+      }
     }
 
     const double denom = std::abs(e) > 0.0 ? std::abs(e) : 1.0;
@@ -154,7 +160,8 @@ bool is_unimplemented_error(const char* what) {
 
 namespace {
 
-void print_usage() {  std::printf(
+void print_usage() {
+  std::printf(
       "usage: engine_tests [--filter=SUBSTR] [--list] [--verbose]\n"
       "  --filter=SUBSTR  run only tests whose \"suite.name\" contains SUBSTR\n"
       "  --list           list all registered tests and exit\n"

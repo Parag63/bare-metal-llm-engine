@@ -153,15 +153,12 @@ __device__ float block_reduce_sum(float* sdata, int tid) {
 // 4. Thread 0 writes that value to partial[blockIdx.x].
 //===----------------------------------------------------------------------===//
 __global__ void reduce_sum_partial(const float* __restrict__ x,
-                                   float* __restrict__ partial,
-                                   std::int64_t n) {
+                                   float* __restrict__ partial, std::int64_t n) {
   __shared__ float sdata[kBlockSize];
 
   const int tid = threadIdx.x;
-  const std::int64_t start =
-      static_cast<std::int64_t>(blockIdx.x) * blockDim.x + tid;
-  const std::int64_t stride =
-      static_cast<std::int64_t>(blockDim.x) * gridDim.x;
+  const std::int64_t start = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + tid;
+  const std::int64_t stride = static_cast<std::int64_t>(blockDim.x) * gridDim.x;
 
   // Grid-stride accumulation into a register. Every load is guarded: n is not
   // necessarily a multiple of the block size, and reading past the end is an
@@ -194,8 +191,7 @@ __global__ void reduce_sum_partial(const float* __restrict__ x,
 // small loop. The result goes directly into out[0].
 //===----------------------------------------------------------------------===//
 __global__ void reduce_sum_final(const float* __restrict__ partial,
-                                 float* __restrict__ out,
-                                 int num_partials) {
+                                 float* __restrict__ out, int num_partials) {
   __shared__ float sdata[kBlockSize];
 
   const int tid = threadIdx.x;
@@ -241,8 +237,8 @@ void reduce_sum(const float* x, float* out, std::int64_t n, cudaStream_t stream)
 
   const std::int64_t blocks_needed = (n + kBlockSize - 1) / kBlockSize;
   const std::int64_t blocks_wanted = static_cast<std::int64_t>(num_sms) * 32;
-  const int grid = static_cast<int>(blocks_needed < blocks_wanted ? blocks_needed
-                                                                  : blocks_wanted);
+  const int grid =
+      static_cast<int>(blocks_needed < blocks_wanted ? blocks_needed : blocks_wanted);
 
   // Allocate a small temporary buffer for the per-block partial sums. At most
   // `grid` floats -- a few KB on any current GPU. This is the only allocation

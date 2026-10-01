@@ -24,7 +24,9 @@
 #include <cstdio>
 int main() {
   std::printf("bench_kernels: built without CUDA -- nothing to measure.\n");
-  std::printf("Run this on the RTX 4090 machine. For CPU baselines use bench_cpu_ref.\n");
+  std::printf(
+      "Run this on the GPU machine (RTX 4070 SUPER). For CPU baselines use "
+      "bench_cpu_ref.\n");
   return 0;
 }
 
@@ -77,7 +79,8 @@ std::vector<engine::half> random_host_half(std::size_t n, unsigned seed = 202608
 
 std::string mib(std::size_t bytes) {
   char buf[64];
-  std::snprintf(buf, sizeof(buf), "%.1f MiB", static_cast<double>(bytes) / (1024.0 * 1024.0));
+  std::snprintf(buf, sizeof(buf), "%.1f MiB",
+                static_cast<double>(bytes) / (1024.0 * 1024.0));
   return buf;
 }
 
@@ -110,11 +113,12 @@ void bench_vector_add(Table& t, int reps) {
     const std::vector<float> h = random_host(un);
     DeviceBuffer<float> a(h), b(h), out(un);
 
-    t.measure_gpu("vector_add", mib(3 * un * sizeof(float)),
-                  /*flops=*/d(n),
-                  /*bytes=*/3.0 * d(n) * sizeof(float),
-                  [&] { engine::cuda::vector_add(a.get(), b.get(), out.get(), n); },
-                  /*warmup=*/5, reps);
+    t.measure_gpu(
+        "vector_add", mib(3 * un * sizeof(float)),
+        /*flops=*/d(n),
+        /*bytes=*/3.0 * d(n) * sizeof(float),
+        [&] { engine::cuda::vector_add(a.get(), b.get(), out.get(), n); },
+        /*warmup=*/5, reps);
   }
 }
 
@@ -140,11 +144,12 @@ void bench_reduce_sum(Table& t, int reps) {
     DeviceBuffer<float> x(random_host(un));
     DeviceBuffer<float> out(1);
 
-    t.measure_gpu("reduce_sum", mib(un * sizeof(float)),
-                  /*flops=*/d(n),
-                  /*bytes=*/d(n) * sizeof(float),
-                  [&] { engine::cuda::reduce_sum(x.get(), out.get(), n); },
-                  /*warmup=*/5, reps);
+    t.measure_gpu(
+        "reduce_sum", mib(un * sizeof(float)),
+        /*flops=*/d(n),
+        /*bytes=*/d(n) * sizeof(float),
+        [&] { engine::cuda::reduce_sum(x.get(), out.get(), n); },
+        /*warmup=*/5, reps);
   }
 }
 
@@ -183,13 +188,12 @@ void bench_softmax(Table& t, int reps) {
     DeviceBuffer<float> in(random_host(n));
     DeviceBuffer<float> out(n);
 
-    t.measure_gpu("softmax_rows", c.label,
-                  /*flops=*/5.0 * d(c.rows * c.cols),
-                  /*bytes=*/2.0 * d(c.rows * c.cols) * sizeof(float),
-                  [&] {
-                    engine::cuda::softmax_rows(in.get(), out.get(), c.rows, c.cols);
-                  },
-                  /*warmup=*/5, reps);
+    t.measure_gpu(
+        "softmax_rows", c.label,
+        /*flops=*/5.0 * d(c.rows * c.cols),
+        /*bytes=*/2.0 * d(c.rows * c.cols) * sizeof(float),
+        [&] { engine::cuda::softmax_rows(in.get(), out.get(), c.rows, c.cols); },
+        /*warmup=*/5, reps);
   }
 }
 
@@ -220,14 +224,14 @@ void bench_rmsnorm(Table& t, int reps) {
     DeviceBuffer<float> w(random_host(static_cast<std::size_t>(c.cols), 7u));
     DeviceBuffer<float> out(n);
 
-    t.measure_gpu("rmsnorm", c.label,
-                  /*flops=*/4.0 * d(c.rows * c.cols),
-                  /*bytes=*/2.0 * d(c.rows * c.cols) * sizeof(float),
-                  [&] {
-                    engine::cuda::rmsnorm(in.get(), w.get(), out.get(), c.rows, c.cols,
-                                          1e-5f);
-                  },
-                  /*warmup=*/5, reps);
+    t.measure_gpu(
+        "rmsnorm", c.label,
+        /*flops=*/4.0 * d(c.rows * c.cols),
+        /*bytes=*/2.0 * d(c.rows * c.cols) * sizeof(float),
+        [&] {
+          engine::cuda::rmsnorm(in.get(), w.get(), out.get(), c.rows, c.cols, 1e-5f);
+        },
+        /*warmup=*/5, reps);
   }
 }
 
@@ -282,23 +286,20 @@ void bench_matmul(Table& t, int reps, bool include_large) {
     // of it would take minutes for no extra confidence.
     const int r = (n >= 2048) ? std::max(3, reps / 10) : reps;
 
-    t.measure_gpu("matmul_naive", label, flops, bytes,
-                  [&] {
-                    engine::cuda::matmul_naive(A.get(), B.get(), C.get(), M, N, K);
-                  },
-                  /*warmup=*/3, r);
+    t.measure_gpu(
+        "matmul_naive", label, flops, bytes,
+        [&] { engine::cuda::matmul_naive(A.get(), B.get(), C.get(), M, N, K); },
+        /*warmup=*/3, r);
 
-    t.measure_gpu("matmul_tiled", label, flops, bytes,
-                  [&] {
-                    engine::cuda::matmul_tiled(A.get(), B.get(), C.get(), M, N, K);
-                  },
-                  /*warmup=*/3, r);
+    t.measure_gpu(
+        "matmul_tiled", label, flops, bytes,
+        [&] { engine::cuda::matmul_tiled(A.get(), B.get(), C.get(), M, N, K); },
+        /*warmup=*/3, r);
 
-    t.measure_gpu("matmul_register_tiled", label, flops, bytes,
-                  [&] {
-                    engine::cuda::matmul_register_tiled(A.get(), B.get(), C.get(), M, N, K);
-                  },
-                  /*warmup=*/3, r);
+    t.measure_gpu(
+        "matmul_register_tiled", label, flops, bytes,
+        [&] { engine::cuda::matmul_register_tiled(A.get(), B.get(), C.get(), M, N, K); },
+        /*warmup=*/3, r);
 
 #if ENGINE_BENCH_CUBLAS
     // CUBLAS IS COLUMN-MAJOR. This trips up everyone once.
@@ -325,17 +326,17 @@ void bench_matmul(Table& t, int reps, bool include_large) {
     if (handle != nullptr) {
       const float alpha = 1.0f, beta = 0.0f;
       const int in = static_cast<int>(n);
-      t.measure_gpu("cublasSgemm (baseline)", label, flops, bytes,
-                    [&] {
-                      const cublasStatus_t st =
-                          cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
-                                      /*m=*/in, /*n=*/in, /*k=*/in, &alpha,
-                                      /*A=*/B.get(), /*lda=*/in,
-                                      /*B=*/A.get(), /*ldb=*/in, &beta,
-                                      /*C=*/C.get(), /*ldc=*/in);
-                      ENGINE_CHECK(st == CUBLAS_STATUS_SUCCESS, "cublasSgemm failed");
-                    },
-                    /*warmup=*/3, r);
+      t.measure_gpu(
+          "cublasSgemm (baseline)", label, flops, bytes,
+          [&] {
+            const cublasStatus_t st = cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                                                  /*m=*/in, /*n=*/in, /*k=*/in, &alpha,
+                                                  /*A=*/B.get(), /*lda=*/in,
+                                                  /*B=*/A.get(), /*ldb=*/in, &beta,
+                                                  /*C=*/C.get(), /*ldc=*/in);
+            ENGINE_CHECK(st == CUBLAS_STATUS_SUCCESS, "cublasSgemm failed");
+          },
+          /*warmup=*/3, r);
     }
 #endif
   }
@@ -359,16 +360,19 @@ void bench_matmul(Table& t, int reps, bool include_large) {
 void bench_launch_overhead(Table& t, int reps) {
   DeviceBuffer<float> d1(1);
   d1.zero();
-  t.measure_gpu("vector_add (launch floor)", "n=1", /*flops=*/0.0, /*bytes=*/0.0,
-                [&] { engine::cuda::vector_add(d1.get(), d1.get(), d1.get(), 1); },
-                /*warmup=*/20, std::max(reps, 200));
+  t.measure_gpu(
+      "vector_add (launch floor)", "n=1", /*flops=*/0.0, /*bytes=*/0.0,
+      [&] { engine::cuda::vector_add(d1.get(), d1.get(), d1.get(), 1); },
+      /*warmup=*/20, std::max(reps, 200));
 }
 
 //===----------------------------------------------------------------------===//
 // 7. Module 3 -- Fused kernels: measuring the value of eliminating DRAM traffic.
 //===----------------------------------------------------------------------===//
 void bench_residual_rmsnorm(Table& t, int reps) {
-  const struct { std::int64_t rows, cols; } shapes[] = {
+  const struct {
+    std::int64_t rows, cols;
+  } shapes[] = {
       {1, 4096},
       {512, 4096},
   };
@@ -390,35 +394,40 @@ void bench_residual_rmsnorm(Table& t, int reps) {
     const double separate_bytes = (5.0 * d(n) + d(cols)) * sizeof(float);
     const double fused_bytes = (4.0 * d(n) + d(cols)) * sizeof(float);
 
-    t.measure_gpu("residual+rmsnorm (separate)", label, flops, separate_bytes,
-                  [&] {
-                    engine::cuda::vector_add(x.get(), res.get(), temp_sum.get(), rows * cols);
-                    engine::cuda::rmsnorm(temp_sum.get(), weight.get(), norm_out.get(), rows, cols, 1e-5f);
-                  },
-                  /*warmup=*/5, reps);
+    t.measure_gpu(
+        "residual+rmsnorm (separate)", label, flops, separate_bytes,
+        [&] {
+          engine::cuda::vector_add(x.get(), res.get(), temp_sum.get(), rows * cols);
+          engine::cuda::rmsnorm(temp_sum.get(), weight.get(), norm_out.get(), rows, cols,
+                                1e-5f);
+        },
+        /*warmup=*/5, reps);
 
-    t.measure_gpu("residual_rmsnorm (fused)", label, flops, fused_bytes,
-                  [&] {
-                    engine::cuda::residual_rmsnorm(x.get(), res.get(), weight.get(),
-                                                   norm_out.get(), sum_out.get(),
-                                                   rows, cols, 1e-5f);
-                  },
-                  /*warmup=*/5, reps);
+    t.measure_gpu(
+        "residual_rmsnorm (fused)", label, flops, fused_bytes,
+        [&] {
+          engine::cuda::residual_rmsnorm(x.get(), res.get(), weight.get(), norm_out.get(),
+                                         sum_out.get(), rows, cols, 1e-5f);
+        },
+        /*warmup=*/5, reps);
   }
 }
 
 void bench_rmsnorm_linear(Table& t, int reps) {
-  const struct { std::int64_t M, N, K; } shapes[] = {
-      {1, 4096, 4096},     // single-token decode
-      {512, 4096, 4096},   // prefill batch
-      {1, 12288, 4096},    // QKV projection
+  const struct {
+    std::int64_t M, N, K;
+  } shapes[] = {
+      {1, 4096, 4096},    // single-token decode
+      {512, 4096, 4096},  // prefill batch
+      {1, 12288, 4096},   // QKV projection
   };
 
   for (const auto& s : shapes) {
     const std::int64_t M = s.M;
     const std::int64_t N = s.N;
     const std::int64_t K = s.K;
-    const std::string label = std::to_string(M) + "x" + std::to_string(N) + "x" + std::to_string(K);
+    const std::string label =
+        std::to_string(M) + "x" + std::to_string(N) + "x" + std::to_string(K);
 
     DeviceBuffer<float> in(random_host(static_cast<std::size_t>(M * K), 1u));
     DeviceBuffer<float> weight(random_host(static_cast<std::size_t>(K), 2u));
@@ -427,29 +436,42 @@ void bench_rmsnorm_linear(Table& t, int reps) {
     DeviceBuffer<float> temp(static_cast<std::size_t>(M * K));
 
     const double flops = 4.0 * d(M) * d(K) + 2.0 * d(M) * d(N) * d(K);
-    const double separate_bytes = (d(M) * d(K) * 2.0 + d(K) + d(K) * d(N) + d(M) * d(N)) * sizeof(float);
-    const double fused_bytes = (d(M) * d(K) + d(K) + d(K) * d(N) + d(M) * d(N)) * sizeof(float);
+    const double separate_bytes =
+        (d(M) * d(K) * 2.0 + d(K) + d(K) * d(N) + d(M) * d(N)) * sizeof(float);
+    const double fused_bytes =
+        (d(M) * d(K) + d(K) + d(K) * d(N) + d(M) * d(N)) * sizeof(float);
 
-    t.measure_gpu("rmsnorm+matmul (separate)", label, flops, separate_bytes,
-                  [&] {
-                    engine::cuda::rmsnorm(in.get(), weight.get(), temp.get(), M, K, 1e-5f);
-                    engine::cuda::matmul_tiled(temp.get(), W.get(), out.get(), M, N, K);
-                  },
-                  /*warmup=*/3, reps);
+    t.measure_gpu(
+        "rmsnorm+matmul_register_tiled (unfused)", label, flops, separate_bytes,
+        [&] {
+          engine::cuda::rmsnorm(in.get(), weight.get(), temp.get(), M, K, 1e-5f);
+          engine::cuda::matmul_register_tiled(temp.get(), W.get(), out.get(), M, N, K);
+        },
+        /*warmup=*/3, reps);
 
-    t.measure_gpu("rmsnorm_linear (1D fused)", label, flops, fused_bytes,
-                  [&] {
-                    engine::cuda::rmsnorm_linear_fused_direct(in.get(), weight.get(), W.get(), out.get(),
-                                                              M, N, K, 1e-5f);
-                  },
-                  /*warmup=*/3, reps);
+    t.measure_gpu(
+        "rmsnorm+matmul (separate)", label, flops, separate_bytes,
+        [&] {
+          engine::cuda::rmsnorm(in.get(), weight.get(), temp.get(), M, K, 1e-5f);
+          engine::cuda::matmul_tiled(temp.get(), W.get(), out.get(), M, N, K);
+        },
+        /*warmup=*/3, reps);
 
-    t.measure_gpu("rmsnorm_linear (dispatched)", label, flops, fused_bytes,
-                  [&] {
-                    engine::cuda::rmsnorm_linear(in.get(), weight.get(), W.get(), out.get(),
-                                                 M, N, K, 1e-5f);
-                  },
-                  /*warmup=*/3, reps);
+    t.measure_gpu(
+        "rmsnorm_linear (1D fused)", label, flops, fused_bytes,
+        [&] {
+          engine::cuda::rmsnorm_linear_fused_direct(in.get(), weight.get(), W.get(),
+                                                    out.get(), M, N, K, 1e-5f);
+        },
+        /*warmup=*/3, reps);
+
+    t.measure_gpu(
+        "rmsnorm_linear (dispatched)", label, flops, fused_bytes,
+        [&] {
+          engine::cuda::rmsnorm_linear(in.get(), weight.get(), W.get(), out.get(), M, N,
+                                       K, 1e-5f);
+        },
+        /*warmup=*/3, reps);
   }
 }
 
@@ -489,64 +511,71 @@ void bench_gemv(Table& t, int reps) {
 
     // Warm-cache measurement for 4096^2 (for comparison against cold DRAM)
     if (N == 4096 && K == 4096) {
-      t.measure_gpu("gemv (warm L2)", c.label, flops, bytes,
-                    [&] {
-                      engine::cuda::gemv(A_pool[0].get(), x.get(), out.get(), N, K);
-                    },
-                    /*warmup=*/5, reps);
+      t.measure_gpu(
+          "gemv (warm L2)", c.label, flops, bytes,
+          [&] { engine::cuda::gemv(A_pool[0].get(), x.get(), out.get(), N, K); },
+          /*warmup=*/5, reps);
     }
 
     // Cold-cache measurements: rotating across the weight pool guarantees that each
     // iteration accesses a matrix evicted from L2 cache, measuring pure off-chip DRAM streaming.
     std::size_t iter_tiled = 0;
-    t.measure_gpu("matmul_tiled (M=1)", c.label, flops, bytes,
-                  [&] {
-                    const auto& A_cur = A_pool[iter_tiled % num_buffers];
-                    iter_tiled++;
-                    engine::cuda::matmul_tiled(x.get(), A_cur.get(), out.get(), 1, N, K);
-                  },
-                  /*warmup=*/5, reps);
+    t.measure_gpu(
+        "matmul_tiled (M=1)", c.label, flops, bytes,
+        [&] {
+          const auto& A_cur = A_pool[iter_tiled % num_buffers];
+          iter_tiled++;
+          engine::cuda::matmul_tiled(x.get(), A_cur.get(), out.get(), 1, N, K);
+        },
+        /*warmup=*/5, reps);
 
     std::size_t iter_gemv = 0;
-    t.measure_gpu("gemv", c.label, flops, bytes,
-                  [&] {
-                    const auto& A_cur = A_pool[iter_gemv % num_buffers];
-                    iter_gemv++;
-                    engine::cuda::gemv(A_cur.get(), x.get(), out.get(), N, K);
-                  },
-                  /*warmup=*/5, reps);
+    t.measure_gpu(
+        "gemv", c.label, flops, bytes,
+        [&] {
+          const auto& A_cur = A_pool[iter_gemv % num_buffers];
+          iter_gemv++;
+          engine::cuda::gemv(A_cur.get(), x.get(), out.get(), N, K);
+        },
+        /*warmup=*/5, reps);
 
     // FP16 GEMV (Cold DRAM streaming)
     {
       const std::size_t matrix_bytes_fp16 = matrix_elems * sizeof(engine::half);
-      const std::size_t num_buffers_fp16 = (matrix_bytes_fp16 >= 128 * 1024 * 1024) ? 2 : 4;
+      const std::size_t num_buffers_fp16 =
+          (matrix_bytes_fp16 >= 128 * 1024 * 1024) ? 2 : 4;
       std::vector<DeviceBuffer<engine::half>> A_pool_fp16;
       A_pool_fp16.reserve(num_buffers_fp16);
       for (std::size_t b = 0; b < num_buffers_fp16; ++b) {
-        A_pool_fp16.emplace_back(random_host_half(matrix_elems, static_cast<unsigned>(b + 100)));
+        A_pool_fp16.emplace_back(
+            random_host_half(matrix_elems, static_cast<unsigned>(b + 100)));
       }
-      DeviceBuffer<engine::half> x_fp16(random_host_half(static_cast<std::size_t>(K), 2026u));
+      DeviceBuffer<engine::half> x_fp16(
+          random_host_half(static_cast<std::size_t>(K), 2026u));
       DeviceBuffer<engine::half> out_fp16(static_cast<std::size_t>(N));
 
       const double bytes_fp16 = (d(K) * d(N) + d(K) + d(N)) * sizeof(engine::half);
 
       // Warm L2 measurement for 4096^2
       if (N == 4096 && K == 4096) {
-        t.measure_gpu("gemv_fp16 (warm L2)", c.label, flops, bytes_fp16,
-                      [&] {
-                        engine::cuda::gemv_fp16(A_pool_fp16[0].get(), x_fp16.get(), out_fp16.get(), N, K);
-                      },
-                      /*warmup=*/5, reps);
+        t.measure_gpu(
+            "gemv_fp16 (warm L2)", c.label, flops, bytes_fp16,
+            [&] {
+              engine::cuda::gemv_fp16(A_pool_fp16[0].get(), x_fp16.get(), out_fp16.get(),
+                                      N, K);
+            },
+            /*warmup=*/5, reps);
       }
 
       std::size_t iter_gemv_fp16 = 0;
-      t.measure_gpu("gemv_fp16", c.label, flops, bytes_fp16,
-                    [&] {
-                      const auto& A_cur = A_pool_fp16[iter_gemv_fp16 % num_buffers_fp16];
-                      iter_gemv_fp16++;
-                      engine::cuda::gemv_fp16(A_cur.get(), x_fp16.get(), out_fp16.get(), N, K);
-                    },
-                    /*warmup=*/5, reps);
+      t.measure_gpu(
+          "gemv_fp16", c.label, flops, bytes_fp16,
+          [&] {
+            const auto& A_cur = A_pool_fp16[iter_gemv_fp16 % num_buffers_fp16];
+            iter_gemv_fp16++;
+            engine::cuda::gemv_fp16(A_cur.get(), x_fp16.get(), out_fp16.get(), N, K);
+          },
+          /*warmup=*/5, reps);
     }
 
 #if ENGINE_BENCH_CUBLAS
@@ -556,17 +585,17 @@ void bench_gemv(Table& t, int reps) {
       const float alpha = 1.0f;
       const float beta = 0.0f;
       std::size_t iter_cublas = 0;
-      t.measure_gpu("cublasSgemm (M=1)", c.label, flops, bytes,
-                    [&] {
-                      const auto& A_cur = A_pool[iter_cublas % num_buffers];
-                      iter_cublas++;
-                      cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
-                                  static_cast<int>(N), 1, static_cast<int>(K),
-                                  &alpha, A_cur.get(), static_cast<int>(N),
-                                  x.get(), static_cast<int>(K),
-                                  &beta, out.get(), static_cast<int>(N));
-                    },
-                    /*warmup=*/5, reps);
+      t.measure_gpu(
+          "cublasSgemm (M=1)", c.label, flops, bytes,
+          [&] {
+            const auto& A_cur = A_pool[iter_cublas % num_buffers];
+            iter_cublas++;
+            cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, static_cast<int>(N), 1,
+                        static_cast<int>(K), &alpha, A_cur.get(), static_cast<int>(N),
+                        x.get(), static_cast<int>(K), &beta, out.get(),
+                        static_cast<int>(N));
+          },
+          /*warmup=*/5, reps);
       cublasDestroy(handle);
     }
 #endif
@@ -575,72 +604,87 @@ void bench_gemv(Table& t, int reps) {
 
 void bench_missing_kernels(Table& t, int reps) {
   // 1. Embedding lookup
+  // Rotating across a pool of 16 random token ID buffers ensures iterations
+  // do not artificially hit cached rows from preceding iterations.
+  // Latency is reported rather than bandwidth.
   {
     const std::int64_t vocab = 32000;
     const std::int64_t hidden = 4096;
+    const std::int64_t T = 512;
+    const std::size_t num_token_pools = 16;
 
-    // Prefill: T = 512
-    {
-      const std::int64_t T = 512;
-      std::vector<float> h_table = random_host(static_cast<std::size_t>(vocab * hidden));
+    std::vector<DeviceBuffer<std::int32_t>> d_ids_pool;
+    d_ids_pool.reserve(num_token_pools);
+    for (std::size_t b = 0; b < num_token_pools; ++b) {
       std::vector<std::int32_t> h_ids(static_cast<std::size_t>(T));
-      for (std::size_t i = 0; i < h_ids.size(); ++i) h_ids[i] = static_cast<std::int32_t>(i % vocab);
+      std::mt19937 rng(static_cast<unsigned int>(42 + b));
+      std::uniform_int_distribution<std::int32_t> dist(
+          0, static_cast<std::int32_t>(vocab - 1));
+      for (std::size_t i = 0; i < h_ids.size(); ++i) {
+        h_ids[i] = dist(rng);
+      }
+      d_ids_pool.emplace_back(h_ids);
+    }
 
+    // Prefill: T = 512 (FP32)
+    {
+      std::vector<float> h_table = random_host(static_cast<std::size_t>(vocab * hidden));
       DeviceBuffer<float> d_table(h_table);
-      DeviceBuffer<std::int32_t> d_ids(h_ids);
       DeviceBuffer<float> d_out(static_cast<std::size_t>(T * hidden));
 
-      const double bytes = d(T * hidden) * sizeof(float) * 2.0;
-      t.measure_gpu("embedding (FP32)", "512 tokens (prefill)", /*flops=*/0.0, bytes,
-                    [&] {
-                      engine::cuda::embedding(d_table.get(), d_ids.get(), d_out.get(), T, hidden, vocab);
-                    },
-                    /*warmup=*/5, reps);
+      std::size_t iter_emb = 0;
+      t.measure_gpu(
+          "embedding (FP32)", "512 tokens (prefill)", /*flops=*/0.0, /*bytes=*/0.0,
+          [&] {
+            const auto& cur_ids = d_ids_pool[iter_emb % num_token_pools];
+            iter_emb++;
+            engine::cuda::embedding(d_table.get(), cur_ids.get(), d_out.get(), T, hidden,
+                                    vocab);
+          },
+          /*warmup=*/5, reps);
     }
 
     // FP16 Prefill: T = 512
     {
-      const std::int64_t T = 512;
-      std::vector<engine::half> h_table = random_host_half(static_cast<std::size_t>(vocab * hidden));
-      std::vector<std::int32_t> h_ids(static_cast<std::size_t>(T));
-      for (std::size_t i = 0; i < h_ids.size(); ++i) h_ids[i] = static_cast<std::int32_t>(i % vocab);
-
+      std::vector<engine::half> h_table =
+          random_host_half(static_cast<std::size_t>(vocab * hidden));
       DeviceBuffer<engine::half> d_table(h_table);
-      DeviceBuffer<std::int32_t> d_ids(h_ids);
       DeviceBuffer<engine::half> d_out(static_cast<std::size_t>(T * hidden));
 
-      const double bytes = d(T * hidden) * sizeof(engine::half) * 2.0;
-      t.measure_gpu("embedding_fp16", "512 tokens (prefill)", /*flops=*/0.0, bytes,
-                    [&] {
-                      engine::cuda::embedding_fp16(d_table.get(), d_ids.get(), d_out.get(), T, hidden, vocab);
-                    },
-                    /*warmup=*/5, reps);
+      std::size_t iter_emb_fp16 = 0;
+      t.measure_gpu(
+          "embedding_fp16", "512 tokens (prefill)", /*flops=*/0.0, /*bytes=*/0.0,
+          [&] {
+            const auto& cur_ids = d_ids_pool[iter_emb_fp16 % num_token_pools];
+            iter_emb_fp16++;
+            engine::cuda::embedding_fp16(d_table.get(), cur_ids.get(), d_out.get(), T,
+                                         hidden, vocab);
+          },
+          /*warmup=*/5, reps);
     }
   }
 
   // 2. Argmax / greedy sampling
+  // Latency is reported rather than bandwidth.
   {
     const std::int64_t vocab = 32000;
     std::vector<float> h_logits = random_host(static_cast<std::size_t>(vocab));
     DeviceBuffer<float> d_logits(h_logits);
     DeviceBuffer<std::int32_t> d_out(1);
 
-    const double bytes_f32 = d(vocab) * sizeof(float) + sizeof(std::int32_t);
-    t.measure_gpu("argmax (FP32)", "V=32000 (greedy sample)", /*flops=*/d(vocab), bytes_f32,
-                  [&] {
-                    engine::cuda::argmax(d_logits.get(), d_out.get(), vocab);
-                  },
-                  /*warmup=*/5, reps);
+    t.measure_gpu(
+        "argmax (FP32)", "V=32000 (greedy sample)", /*flops=*/0.0, /*bytes=*/0.0,
+        [&] { engine::cuda::argmax(d_logits.get(), d_out.get(), vocab); },
+        /*warmup=*/5, reps);
 
-    std::vector<engine::half> h_logits_fp16 = random_host_half(static_cast<std::size_t>(vocab));
+    std::vector<engine::half> h_logits_fp16 =
+        random_host_half(static_cast<std::size_t>(vocab));
     DeviceBuffer<engine::half> d_logits_fp16(h_logits_fp16);
 
-    const double bytes_fp16 = d(vocab) * sizeof(engine::half) + sizeof(std::int32_t);
-    t.measure_gpu("argmax_fp16", "V=32000 (greedy sample)", /*flops=*/d(vocab), bytes_fp16,
-                  [&] {
-                    engine::cuda::argmax_fp16(d_logits_fp16.get(), d_out.get(), vocab);
-                  },
-                  /*warmup=*/5, reps);
+    t.measure_gpu(
+        "argmax_fp16", "V=32000 (greedy sample)", /*flops=*/0.0, /*bytes=*/0.0,
+        [&] { engine::cuda::argmax_fp16(d_logits_fp16.get(), d_out.get(), vocab); },
+        /*warmup=*/5, reps);
   }
 }
 
@@ -656,7 +700,8 @@ __global__ void silu_unfused_kernel(const float* in, float* out, int64_t n) {
   }
 }
 
-__global__ void mul_unfused_kernel(const float* a, const float* b, float* out, int64_t n) {
+__global__ void mul_unfused_kernel(const float* a, const float* b, float* out,
+                                   int64_t n) {
   int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (i < n) {
     out[i] = a[i] * b[i];
@@ -687,31 +732,36 @@ void bench_swiglu(Table& t, int reps) {
     const int threads = 256;
     const int blocks = static_cast<int>((n + threads - 1) / threads);
 
-    t.measure_gpu("swiglu (unfused: silu+mul)", c.label, flops, unfused_bytes,
-                  [&] {
-                    silu_unfused_kernel<<<blocks, threads>>>(gate.get(), temp_silu.get(), n);
-                    mul_unfused_kernel<<<blocks, threads>>>(temp_silu.get(), up.get(), out.get(), n);
-                  },
-                  /*warmup=*/5, reps);
+    t.measure_gpu(
+        "swiglu (unfused: silu+mul)", c.label, flops, unfused_bytes,
+        [&] {
+          silu_unfused_kernel<<<blocks, threads>>>(gate.get(), temp_silu.get(), n);
+          mul_unfused_kernel<<<blocks, threads>>>(temp_silu.get(), up.get(), out.get(),
+                                                  n);
+        },
+        /*warmup=*/5, reps);
 
-    t.measure_gpu("swiglu (fused FP32)", c.label, flops, fused_bytes,
-                  [&] {
-                    engine::cuda::swiglu(gate.get(), up.get(), out.get(), n);
-                  },
-                  /*warmup=*/5, reps);
+    t.measure_gpu(
+        "swiglu (fused FP32)", c.label, flops, fused_bytes,
+        [&] { engine::cuda::swiglu(gate.get(), up.get(), out.get(), n); },
+        /*warmup=*/5, reps);
 
-    std::vector<engine::half> h_gate_half = random_host_half(static_cast<std::size_t>(n), 1u);
-    std::vector<engine::half> h_up_half = random_host_half(static_cast<std::size_t>(n), 2u);
+    std::vector<engine::half> h_gate_half =
+        random_host_half(static_cast<std::size_t>(n), 1u);
+    std::vector<engine::half> h_up_half =
+        random_host_half(static_cast<std::size_t>(n), 2u);
     DeviceBuffer<engine::half> d_gate_half(h_gate_half);
     DeviceBuffer<engine::half> d_up_half(h_up_half);
     DeviceBuffer<engine::half> d_out_half(static_cast<std::size_t>(n));
 
     const double fused_bytes_fp16 = 3.0 * d(n) * sizeof(engine::half);
-    t.measure_gpu("swiglu_fp16 (fused FP16)", c.label, flops, fused_bytes_fp16,
-                  [&] {
-                    engine::cuda::swiglu_fp16(d_gate_half.get(), d_up_half.get(), d_out_half.get(), n);
-                  },
-                  /*warmup=*/5, reps);
+    t.measure_gpu(
+        "swiglu_fp16 (fused FP16)", c.label, flops, fused_bytes_fp16,
+        [&] {
+          engine::cuda::swiglu_fp16(d_gate_half.get(), d_up_half.get(), d_out_half.get(),
+                                    n);
+        },
+        /*warmup=*/5, reps);
   }
 }
 

@@ -128,7 +128,8 @@ GoldenFile GoldenFile::load(const std::string& stem) {
     // The redundancy check. dims and n_bytes are written independently by the
     // generator, so a mismatch means the file is corrupt or the writer and reader
     // have drifted apart -- exactly the bug this catches cheaply.
-    const std::int64_t implied = expected_elems * static_cast<std::int64_t>(sizeof(float));
+    const std::int64_t implied =
+        expected_elems * static_cast<std::int64_t>(sizeof(float));
     if (n_bytes != implied) {
       fail(path, "tensor '" + name + "': header says " + std::to_string(n_bytes) +
                      " bytes but its shape implies " + std::to_string(implied));

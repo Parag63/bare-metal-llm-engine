@@ -161,12 +161,11 @@ bool is_unimplemented_error(const char* what);
 //===----------------------------------------------------------------------===//
 // Registration macros
 //===----------------------------------------------------------------------===//
-#define ENGTEST_REGISTER(suite, name, pending)                                     \
-  static void engtest_##suite##_##name(::engtest::TestContext&);                   \
-  static ::engtest::Registrar engtest_reg_##suite##_##name(                        \
-      #suite, #name, &engtest_##suite##_##name, (pending), __FILE__);              \
-  static void engtest_##suite##_##name(                                            \
-      [[maybe_unused]] ::engtest::TestContext& ctx)
+#define ENGTEST_REGISTER(suite, name, pending)                        \
+  static void engtest_##suite##_##name(::engtest::TestContext&);      \
+  static ::engtest::Registrar engtest_reg_##suite##_##name(           \
+      #suite, #name, &engtest_##suite##_##name, (pending), __FILE__); \
+  static void engtest_##suite##_##name([[maybe_unused]] ::engtest::TestContext& ctx)
 
 /// A normal test. Must pass.
 #define TEST(suite, name) ENGTEST_REGISTER(suite, name, false)
@@ -191,13 +190,13 @@ bool is_unimplemented_error(const char* what);
 
 #define EXPECT_EQ(a, b) ::engtest::report_eq(ctx, (a), (b), #a, #b, __FILE__, __LINE__)
 
-#define EXPECT_NEAR(a, b, tol)                                                     \
-  ::engtest::report_near(ctx, static_cast<double>(a), static_cast<double>(b),       \
+#define EXPECT_NEAR(a, b, tol)                                                \
+  ::engtest::report_near(ctx, static_cast<double>(a), static_cast<double>(b), \
                          static_cast<double>(tol), #a, #b, __FILE__, __LINE__)
 
 /// The workhorse for kernel verification.
-#define EXPECT_ALLCLOSE(actual, expected, n, rtol, atol)                           \
-  ::engtest::report_allclose(ctx, (actual), (expected), (n), (rtol), (atol),        \
+#define EXPECT_ALLCLOSE(actual, expected, n, rtol, atol)                     \
+  ::engtest::report_allclose(ctx, (actual), (expected), (n), (rtol), (atol), \
                              #actual " vs " #expected, __FILE__, __LINE__)
 
 /// EXPECT_ALLCLOSE inside a loop over test cases, plus the name of the case that
@@ -208,101 +207,99 @@ bool is_unimplemented_error(const char* what);
 /// difference between "matmul is broken" and "matmul is broken only at M=17, K=23"
 /// is the difference between an afternoon and five minutes. The second line is
 /// appended as a separate failure so it appears directly beneath the numbers.
-#define CHECK_CASE(stem, actual, expected, n, rtol, atol)                          \
-  do {                                                                             \
-    if (!EXPECT_ALLCLOSE((actual), (expected), (n), (rtol), (atol))) {              \
-      ctx.add_failure(__FILE__, __LINE__,                                          \
-                      "  ^^ failing case: " + std::string(stem));                  \
-    }                                                                              \
+#define CHECK_CASE(stem, actual, expected, n, rtol, atol)                             \
+  do {                                                                                \
+    if (!EXPECT_ALLCLOSE((actual), (expected), (n), (rtol), (atol))) {                \
+      ctx.add_failure(__FILE__, __LINE__, "  ^^ failing case: " + std::string(stem)); \
+    }                                                                                 \
   } while (0)
 
-#define ASSERT_TRUE(cond)                                                          \
-  do {                                                                             \
-    if (!static_cast<bool>(cond)) {                                                \
-      ctx.add_failure(__FILE__, __LINE__, "ASSERT_TRUE failed: " #cond);           \
-      return;                                                                      \
-    }                                                                              \
+#define ASSERT_TRUE(cond)                                                \
+  do {                                                                   \
+    if (!static_cast<bool>(cond)) {                                      \
+      ctx.add_failure(__FILE__, __LINE__, "ASSERT_TRUE failed: " #cond); \
+      return;                                                            \
+    }                                                                    \
   } while (0)
 
-#define ASSERT_EQ(a, b)                                                            \
-  do {                                                                             \
-    if (!((a) == (b))) {                                                           \
-      ctx.add_failure(__FILE__, __LINE__,                                          \
-                      std::string("ASSERT_EQ failed: " #a " == " #b "\n") +        \
-                          "    actual:   " + ::engtest::describe(a) + "\n" +       \
-                          "    expected: " + ::engtest::describe(b));              \
-      return;                                                                      \
-    }                                                                              \
+#define ASSERT_EQ(a, b)                                                      \
+  do {                                                                       \
+    if (!((a) == (b))) {                                                     \
+      ctx.add_failure(__FILE__, __LINE__,                                    \
+                      std::string("ASSERT_EQ failed: " #a " == " #b "\n") +  \
+                          "    actual:   " + ::engtest::describe(a) + "\n" + \
+                          "    expected: " + ::engtest::describe(b));        \
+      return;                                                                \
+    }                                                                        \
   } while (0)
 
 /// Asserts that `stmt` throws SOMETHING OTHER than a "not implemented" stub error.
 /// Used heavily on the Tensor API, where rejecting bad input with a clear error IS
 /// the specified behaviour. See is_unimplemented_error() for why the exclusion
 /// matters: without it these tests pass before a single line is written.
-#define EXPECT_THROWS(stmt)                                                        \
-  do {                                                                             \
-    bool engtest_threw = false;                                                    \
-    bool engtest_stub = false;                                                     \
-    try {                                                                          \
-      stmt;                                                                        \
-    } catch (const std::exception& engtest_e) {                                    \
-      engtest_threw = true;                                                        \
-      engtest_stub = ::engtest::is_unimplemented_error(engtest_e.what());          \
-    } catch (...) {                                                                \
-      engtest_threw = true;                                                        \
-    }                                                                              \
-    if (!engtest_threw) {                                                          \
-      ctx.add_failure(__FILE__, __LINE__, "expected an exception from: " #stmt);   \
-    } else if (engtest_stub) {                                                     \
-      ctx.add_failure(__FILE__, __LINE__,                                          \
-                      "still a stub, so this proves nothing yet: " #stmt);         \
-    }                                                                              \
+#define EXPECT_THROWS(stmt)                                                      \
+  do {                                                                           \
+    bool engtest_threw = false;                                                  \
+    bool engtest_stub = false;                                                   \
+    try {                                                                        \
+      stmt;                                                                      \
+    } catch (const std::exception& engtest_e) {                                  \
+      engtest_threw = true;                                                      \
+      engtest_stub = ::engtest::is_unimplemented_error(engtest_e.what());        \
+    } catch (...) {                                                              \
+      engtest_threw = true;                                                      \
+    }                                                                            \
+    if (!engtest_threw) {                                                        \
+      ctx.add_failure(__FILE__, __LINE__, "expected an exception from: " #stmt); \
+    } else if (engtest_stub) {                                                   \
+      ctx.add_failure(__FILE__, __LINE__,                                        \
+                      "still a stub, so this proves nothing yet: " #stmt);       \
+    }                                                                            \
   } while (0)
 
 /// Like EXPECT_THROWS, but also requires the message to contain `substr`. Use it
 /// when the wording of the error is part of the contract -- "insert .contiguous()"
 /// is advice the caller needs, not decoration.
-#define EXPECT_THROWS_MSG(stmt, substr)                                            \
-  do {                                                                             \
-    bool engtest_threw = false;                                                    \
-    std::string engtest_msg;                                                       \
-    try {                                                                          \
-      stmt;                                                                        \
-    } catch (const std::exception& engtest_e) {                                    \
-      engtest_threw = true;                                                        \
-      engtest_msg = engtest_e.what();                                              \
-    } catch (...) {                                                                \
-      engtest_threw = true;                                                        \
-      engtest_msg = "<non-std exception>";                                         \
-    }                                                                              \
-    if (!engtest_threw) {                                                          \
-      ctx.add_failure(__FILE__, __LINE__, "expected an exception from: " #stmt);   \
-    } else if (::engtest::is_unimplemented_error(engtest_msg.c_str())) {           \
-      ctx.add_failure(__FILE__, __LINE__,                                          \
-                      "still a stub, so this proves nothing yet: " #stmt);         \
-    } else if (engtest_msg.find(substr) == std::string::npos) {                    \
-      ctx.add_failure(__FILE__, __LINE__,                                          \
-                      std::string("exception from " #stmt                          \
-                                  " should mention \"" substr "\"\n    got: ") +  \
-                          engtest_msg);                                            \
-    }                                                                              \
+#define EXPECT_THROWS_MSG(stmt, substr)                                               \
+  do {                                                                                \
+    bool engtest_threw = false;                                                       \
+    std::string engtest_msg;                                                          \
+    try {                                                                             \
+      stmt;                                                                           \
+    } catch (const std::exception& engtest_e) {                                       \
+      engtest_threw = true;                                                           \
+      engtest_msg = engtest_e.what();                                                 \
+    } catch (...) {                                                                   \
+      engtest_threw = true;                                                           \
+      engtest_msg = "<non-std exception>";                                            \
+    }                                                                                 \
+    if (!engtest_threw) {                                                             \
+      ctx.add_failure(__FILE__, __LINE__, "expected an exception from: " #stmt);      \
+    } else if (::engtest::is_unimplemented_error(engtest_msg.c_str())) {              \
+      ctx.add_failure(__FILE__, __LINE__,                                             \
+                      "still a stub, so this proves nothing yet: " #stmt);            \
+    } else if (engtest_msg.find(substr) == std::string::npos) {                       \
+      ctx.add_failure(__FILE__, __LINE__,                                             \
+                      std::string("exception from " #stmt " should mention \"" substr \
+                                  "\"\n    got: ") +                                  \
+                          engtest_msg);                                               \
+    }                                                                                 \
   } while (0)
 
-#define EXPECT_NO_THROW(stmt)                                                      \
-  do {                                                                             \
-    try {                                                                          \
-      stmt;                                                                        \
-    } catch (const std::exception& e) {                                            \
-      ctx.add_failure(__FILE__, __LINE__,                                          \
-                      std::string("unexpected exception from " #stmt ": ") +       \
-                          e.what());                                               \
-    }                                                                              \
+#define EXPECT_NO_THROW(stmt)                                                           \
+  do {                                                                                  \
+    try {                                                                               \
+      stmt;                                                                             \
+    } catch (const std::exception& e) {                                                 \
+      ctx.add_failure(__FILE__, __LINE__,                                               \
+                      std::string("unexpected exception from " #stmt ": ") + e.what()); \
+    }                                                                                   \
   } while (0)
 
 /// Abandons the test as not-applicable. Use for missing prerequisites only --
 /// never to dodge a real failure.
-#define SKIP_TEST(reason)   \
-  do {                      \
-    ctx.skip(reason);       \
-    return;                 \
+#define SKIP_TEST(reason) \
+  do {                    \
+    ctx.skip(reason);     \
+    return;               \
   } while (0)

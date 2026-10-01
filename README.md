@@ -7,12 +7,12 @@ inference path.
 
 B.Tech CSE major project · Parag Das (2303344) · Jul 2026 – Jun 2027
 
-> **Status: Modules 1, 2 & 3 complete. Moving to FlashAttention (Module 4).**
-> The tensor library, all nine CUDA kernels (7 ladder kernels including dedicated decode GEMV + 2 fused kernels), and the full
-> verification/benchmark infrastructure are implemented and verified. `passed 97  failed 0  pending 0` on
-> the CUDA-enabled build (RTX 4070 SUPER, nvcc 12.6, 2026-10-01). Memory-bound
+> **Status: Modules 1, 2 & 3 complete + Phase 4 Foundational Kernels. Moving to FlashAttention (Module 4).**
+> The tensor library, 14 hand-written CUDA kernels (including FP16 GEMV, fused SwiGLU, 2D register-tiled GEMM, embedding gather, and argmax), and the full
+> verification/benchmark infrastructure are implemented and verified. `passed 118  failed 0  pending 0` across
+> 8 test suites on the CUDA-enabled build (RTX 4070 SUPER, nvcc 12.6). Memory-bound
 > kernels achieve 85–94% of peak bandwidth (GEMV reaches 473.5 GB/s / 94.0% peak BW, beating cuBLAS by +13.7%);
-> the tiled matmul reaches 2,563 GFLOP/s at 4096³ (+38% over naive).
+> 2D register-tiled matmul reaches 16,173 GFLOP/s at 4096³ (73.0% of cuBLAS).
 
 ## What "from scratch" means here
 
@@ -28,8 +28,7 @@ measured against. Neither is linked into the engine
 
 ## Hardware target & development setup
 
-- **Development Box (Machine B):** NVIDIA GeForce RTX 4070 SUPER (Ada Lovelace, `sm_89`, 56 SMs, 12 GB GDDR6X, 504.0 GB/s peak bandwidth, locked at 2475 MHz). All empirical measurements reported here were obtained on this device inside WSL2 Ubuntu 24.04 with CUDA 12.6.
-- **Headline Target:** NVIDIA GeForce RTX 4090 (24 GB, 128 SMs, 1008 GB/s peak bandwidth, `sm_89`). The codebase explicitly targets `sm_89` and scales grid dimensions automatically to both 56 SM and 128 SM configurations.
+- **Target Hardware (Machine B):** NVIDIA GeForce RTX 4070 SUPER (Ada Lovelace, `sm_89`, 56 SMs, 12 GB GDDR6X, 504.0 GB/s peak bandwidth, locked at 2475 MHz). All empirical measurements reported here were obtained on this device inside WSL2 Ubuntu 24.04 with CUDA 12.6.
 - **Host / Laptop (Machine A):** CPU-only development environment running full Tier 1 & Tier 2 test suites with graceful CUDA degradation ([ADR 0001](docs/adr/0001-cuda-optional-build.md)).
 
 ## Quick start
@@ -49,7 +48,7 @@ test suite and:
 build/bin/bench_kernels
 ```
 
-Full setup for both machines, including the Windows + RTX 4090/4070S toolchain and the
+Full setup for both machines, including the Windows + RTX 4070 SUPER toolchain and the
 clock-locking recipe: **[docs/01-dev-environment.md](docs/01-dev-environment.md)**.
 
 ## Layout
@@ -127,7 +126,7 @@ the GPU than that baseline is.
 
 ## The kernel ladder (complete)
 
-Twelve foundational and inference kernels, each introducing one idea and reusing everything before it. All
+Fourteen foundational and inference kernels, each introducing one idea and reusing everything before it. All
 implemented, verified against float64 reference data, and benchmarked on the RTX 4070
 SUPER (504.0 GB/s peak, sm_89) with locked GPU clocks (2475 MHz):
 
@@ -160,7 +159,7 @@ Fusing memory-bound operations between transformer sub-layers to eliminate DRAM 
 Design details in **[docs/02-cuda-exercises.md](docs/02-cuda-exercises.md)** and **[ADR 0006](docs/adr/0006-kernel-fusion-strategy.md)**. Complete reference diagrams in **[docs/llm-inference-flowchart.md](docs/llm-inference-flowchart.md)**.
 Empirical analysis of non-optimizations and bottlenecks is recorded in **[docs/negative-results.md](docs/negative-results.md)**, and full hardware roofline curves are visualized in **[docs/roofline.png](docs/roofline.png)**.
 
-Arithmetic intensity, against the RTX 4070 SUPER's ~70 FLOP/byte balance point (and the RTX 4090's ~82 FLOP/byte), tells you which
+Arithmetic intensity, against the RTX 4070 SUPER's ~70 FLOP/byte balance point, tells you which
 resource limits each one: `vector_add` is 0.08 (memory-bound by a factor of nearly a thousand),
 `gemv` is 0.25–0.50, `rmsnorm` 0.5, `softmax` 0.6, and matmul at 4096³ is ~170 — the first compute-bound
 kernel in the project, and the only one where being clever about arithmetic wins anything.
@@ -190,13 +189,14 @@ kernel in the project, and the only one where being clever about arithmetic wins
 | [0007](docs/adr/0007-gemv-decode-specialization.md) | Dedicated GEMV kernel — 1D column tiling and warp reduction over $K$ eliminates 2D GEMM idle threads at $M=1$ |
 | [0008](docs/adr/0008-benchmark-harness-provenance.md) | Benchmark harness JSON logging & git provenance — structured JSON output with baked git hash, driver, and clocks |
 | [0009](docs/adr/0009-negative-results-reporting.md) | Negative results reporting — empirical documentation of non-optimizations and microarchitectural boundaries |
+| [0010](docs/adr/0010-multi-architecture-cuda-compilation.md) | Multi-architecture CUDA compilation — flexible architecture lists in `ENGINE_CUDA_ARCH` with native SASS generation |
 
 ## Build options
 
 | Option | Default | Effect |
 |---|---|---|
 | `ENGINE_WITH_CUDA` | `ON` | Build CUDA kernels if `nvcc` is found. Never fatal when absent |
-| `ENGINE_CUDA_ARCH` | `89` | Target architecture. 89 = RTX 4090 / RTX 4070 SUPER (Ada Lovelace). A binary built for 89 runs on nothing else |
+| `ENGINE_CUDA_ARCH` | `89` | Target architecture. 89 = RTX 4070 SUPER (Ada Lovelace). A binary built for 89 runs on nothing else |
 | `ENGINE_BUILD_TESTS` | `ON` | The `engine_tests` binary and its ctest entries |
 | `ENGINE_BUILD_BENCH` | `ON` | `bench_cpu_ref`, and `bench_kernels` when CUDA is on |
 | `ENGINE_BENCH_CUBLAS` | `ON` | Measure `cublasSgemm` as a matmul baseline. Degrades to a warning if cuBLAS is absent |
@@ -217,6 +217,9 @@ files; `--target bench` runs the benchmark binaries.
 - [x] **Module 3 — Kernel Fusion** (complete). Fused RMSNorm + Linear projection (exercise 8)
   and Fused Residual Add + RMSNorm (exercise 9). Eliminates intermediate DRAM roundtrips
   and kernel launch overhead. Verified against golden reference data.
+- [x] **Phase 4 Deliverables — Foundational Kernels & Infrastructure** (complete). FP16 GEMV, Fused SwiGLU (>80% peak BW),
+  2D Register-Tiled GEMM (16.2 TFLOP/s), Embedding Lookup, Argmax Greedy Sampling, Stream-ordered Pool Allocator,
+  RAII CUDA Streams & Events, and Multi-Arch Compilation (ADR 0010). 118 / 118 unit tests passing across 8 suites.
 - [ ] **Module 4 — FlashAttention-2** — tiled online softmax + GEMM fusion, avoiding materialisation
   of the full S = QK^T attention-score matrix; causal masking + GQA support; RoPE and SwiGLU.
 - [ ] **Module 5 — Quantization** — packed INT4 / INT8 weights with fused dequantisation GEMV kernels.

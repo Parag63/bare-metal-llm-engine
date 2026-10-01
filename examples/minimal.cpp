@@ -25,11 +25,13 @@ int main() {
   std::cout << "=====================================================\n";
 
   std::cout << "Engine version       : 0.1.0\n";
-  std::cout << "CUDA support enabled : " << (ENGINE_HAS_CUDA ? "YES" : "NO (CPU reference path)") << "\n";
+  std::cout << "CUDA support enabled : "
+            << (ENGINE_HAS_CUDA ? "YES" : "NO (CPU reference path)") << "\n";
 
   // 1. Verify CPU Tensor creation and DType system
   engine::Tensor x({2, 4}, engine::DType::F32, engine::Device::CPU);
-  std::cout << "Created Tensor shape : [" << x.shape()[0] << ", " << x.shape()[1] << "]\n";
+  std::cout << "Created Tensor shape : [" << x.shape()[0] << ", " << x.shape()[1]
+            << "]\n";
   std::cout << "Tensor dtype         : " << engine::dtype_name(x.dtype()) << " ("
             << engine::dtype_storage_bytes(x.dtype(), 1) << " bytes/elem)\n";
 
@@ -39,14 +41,17 @@ int main() {
   std::vector<float> c(4, 0.0f);
 
   engine::cpu::vector_add(a.data(), b.data(), c.data(), 4);
-  std::cout << "CPU vector_add result: [" << c[0] << ", " << c[1] << ", " << c[2] << ", " << c[3] << "]\n";
+  std::cout << "CPU vector_add result: [" << c[0] << ", " << c[1] << ", " << c[2] << ", "
+            << c[3] << "]\n";
 
 #if ENGINE_HAS_CUDA
   // 3. Verify CUDA device summary and peak bandwidth query
   if (engine::cuda_device_count() > 0) {
     std::cout << "Active CUDA Device   : " << engine::cuda_device_summary() << "\n";
-    std::cout << "Theoretical Peak BW  : " << engine::cuda_peak_bandwidth_gbs() << " GB/s\n";
-    std::cout << "Live SM Clock (NVML) : " << engine::cuda_live_sm_clock_mhz() << " MHz\n";
+    std::cout << "Theoretical Peak BW  : " << engine::cuda_peak_bandwidth_gbs()
+              << " GB/s\n";
+    std::cout << "Live SM Clock (NVML) : " << engine::cuda_live_sm_clock_mhz()
+              << " MHz\n";
   }
 #endif
 

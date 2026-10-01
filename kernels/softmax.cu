@@ -173,8 +173,7 @@ __device__ float block_reduce_sum(float* sdata, int tid) {
 //   maximum element has x - max == 0.0f, its contribution is exp(0) == 1.0f, ensuring
 //   the sum is >= 1.0f and preventing division by zero.
 //===----------------------------------------------------------------------===//
-__global__ void softmax_rows_kernel(const float* __restrict__ in,
-                                    float* __restrict__ out,
+__global__ void softmax_rows_kernel(const float* __restrict__ in, float* __restrict__ out,
                                     std::int64_t rows, std::int64_t cols) {
   __shared__ float sdata[kBlockSize];
   const int tid = threadIdx.x;
@@ -244,8 +243,8 @@ void softmax_rows(const float* in, float* out, std::int64_t rows, std::int64_t c
   // One block per row when rows <= num_sms * 32; grid-stride handles larger rows.
   const std::int64_t blocks_needed = rows;
   const std::int64_t blocks_wanted = static_cast<std::int64_t>(num_sms) * 32;
-  const int grid = static_cast<int>(blocks_needed < blocks_wanted ? blocks_needed
-                                                                  : blocks_wanted);
+  const int grid =
+      static_cast<int>(blocks_needed < blocks_wanted ? blocks_needed : blocks_wanted);
 
   softmax_rows_kernel<<<grid, kBlockSize, 0, stream>>>(in, out, rows, cols);
   CUDA_CHECK_KERNEL();

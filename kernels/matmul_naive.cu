@@ -111,10 +111,8 @@ constexpr int kTileDim = 16;
 //   (e.g., the 17x23x31 test case) do not cause out-of-bounds access.
 //===----------------------------------------------------------------------===//
 __global__ void matmul_naive_kernel(const float* __restrict__ A,
-                                    const float* __restrict__ B,
-                                    float* __restrict__ C,
-                                    std::int64_t M, std::int64_t N,
-                                    std::int64_t K) {
+                                    const float* __restrict__ B, float* __restrict__ C,
+                                    std::int64_t M, std::int64_t N, std::int64_t K) {
   const std::int64_t row =
       static_cast<std::int64_t>(blockIdx.y) * blockDim.y + threadIdx.y;
   const std::int64_t col =
@@ -140,7 +138,8 @@ void matmul_naive(const float* A, const float* B, float* C, std::int64_t M,
 
   // An Mx0 times 0xN product is the MxN zero matrix.
   if (K == 0) {
-    CUDA_CHECK(cudaMemsetAsync(C, 0, static_cast<std::size_t>(M * N) * sizeof(float), stream));
+    CUDA_CHECK(
+        cudaMemsetAsync(C, 0, static_cast<std::size_t>(M * N) * sizeof(float), stream));
     return;
   }
 
@@ -153,4 +152,3 @@ void matmul_naive(const float* A, const float* B, float* C, std::int64_t M,
 }
 
 }  // namespace engine::cuda
-

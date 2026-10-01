@@ -19,7 +19,8 @@
 namespace engine::cpu {
 
 void embedding(const float* table, const std::int32_t* input_ids, float* out,
-               std::int64_t num_tokens, std::int64_t hidden_dim, std::int64_t vocab_size) {
+               std::int64_t num_tokens, std::int64_t hidden_dim,
+               std::int64_t vocab_size) {
   ENGINE_CHECK(table != nullptr, "embedding: table is null");
   ENGINE_CHECK(input_ids != nullptr, "embedding: input_ids is null");
   ENGINE_CHECK(out != nullptr, "embedding: out is null");
@@ -29,16 +30,17 @@ void embedding(const float* table, const std::int32_t* input_ids, float* out,
 
   for (std::int64_t t = 0; t < num_tokens; ++t) {
     const std::int32_t id = input_ids[t];
-    ENGINE_CHECK(id >= 0 && id < vocab_size,
-                 "embedding: input_id " + std::to_string(id) + " out of bounds [0, " +
-                     std::to_string(vocab_size) + ")");
+    ENGINE_CHECK(id >= 0 && id < vocab_size, "embedding: input_id " + std::to_string(id) +
+                                                 " out of bounds [0, " +
+                                                 std::to_string(vocab_size) + ")");
     std::memcpy(out + t * hidden_dim, table + static_cast<std::int64_t>(id) * hidden_dim,
                 static_cast<std::size_t>(hidden_dim) * sizeof(float));
   }
 }
 
 void embedding_fp16(const half* table, const std::int32_t* input_ids, half* out,
-                    std::int64_t num_tokens, std::int64_t hidden_dim, std::int64_t vocab_size) {
+                    std::int64_t num_tokens, std::int64_t hidden_dim,
+                    std::int64_t vocab_size) {
   ENGINE_CHECK(table != nullptr, "embedding_fp16: table is null");
   ENGINE_CHECK(input_ids != nullptr, "embedding_fp16: input_ids is null");
   ENGINE_CHECK(out != nullptr, "embedding_fp16: out is null");
@@ -49,8 +51,8 @@ void embedding_fp16(const half* table, const std::int32_t* input_ids, half* out,
   for (std::int64_t t = 0; t < num_tokens; ++t) {
     const std::int32_t id = input_ids[t];
     ENGINE_CHECK(id >= 0 && id < vocab_size,
-                 "embedding_fp16: input_id " + std::to_string(id) + " out of bounds [0, " +
-                     std::to_string(vocab_size) + ")");
+                 "embedding_fp16: input_id " + std::to_string(id) +
+                     " out of bounds [0, " + std::to_string(vocab_size) + ")");
     std::memcpy(out + t * hidden_dim, table + static_cast<std::int64_t>(id) * hidden_dim,
                 static_cast<std::size_t>(hidden_dim) * sizeof(half));
   }

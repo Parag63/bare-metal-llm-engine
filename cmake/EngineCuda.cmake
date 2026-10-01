@@ -3,8 +3,8 @@
 # Detects CUDA without ever failing the configure step. This is the single most
 # important piece of build logic in the project: the laptop where most of the code is
 # written has no NVIDIA toolchain, so a hard `find_package(CUDA REQUIRED)` would make
-# the project unbuildable exactly where most of the work happens. The GPU lives on a
-# second machine (RTX 4090) that this same tree is cloned onto.
+# the project unbuildable exactly where most of the work happens. The GPU lives on
+# Machine B (RTX 4070 SUPER) that this same tree is cloned onto.
 
 macro(engine_setup_cuda)
   set(ENGINE_CUDA_ENABLED OFF)
@@ -20,7 +20,7 @@ macro(engine_setup_cuda)
       message(STATUS "      This is normal on the laptop: the tensor library, the CPU")
       message(STATUS "      reference implementations and their tests all build here.")
       message(STATUS "      To compile and verify the kernels: commit, push, and run")
-      message(STATUS "      scripts/gpu-run.sh on the RTX 4090 machine.")
+      message(STATUS "      scripts/gpu-run.sh on the GPU machine (RTX 4070 SUPER).")
     else()
       enable_language(CUDA)
 
@@ -57,7 +57,7 @@ macro(engine_setup_cuda)
             message(WARNING
               "Requested CUDA arch ${_a} is NOT supported by this nvcc.\n"
               "  nvcc can emit: ${_archs}\n"
-              "  sm_89 (RTX 4090) requires CUDA 11.8 or newer -- check `nvcc --version`.\n"
+              "  sm_89 (RTX 4070 SUPER) requires CUDA 11.8 or newer -- check `nvcc --version`.\n"
               "  Either upgrade the toolkit or pass -DENGINE_CUDA_ARCH=<supported arch>.")
           endif()
         endforeach()

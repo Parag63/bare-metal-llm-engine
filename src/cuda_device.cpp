@@ -102,16 +102,21 @@ int cuda_live_sm_clock_mhz() {
   HMODULE lib = LoadLibraryA("nvml.dll");
   if (!lib) return cuda_clock_rate_khz() / 1000;
   auto fn_init = reinterpret_cast<pfn_nvmlInit_v2>(GetProcAddress(lib, "nvmlInit_v2"));
-  auto fn_get_handle = reinterpret_cast<pfn_nvmlDeviceGetHandleByIndex_v2>(GetProcAddress(lib, "nvmlDeviceGetHandleByIndex_v2"));
-  auto fn_get_clock = reinterpret_cast<pfn_nvmlDeviceGetClockInfo>(GetProcAddress(lib, "nvmlDeviceGetClockInfo"));
-  auto fn_shutdown = reinterpret_cast<pfn_nvmlShutdown>(GetProcAddress(lib, "nvmlShutdown"));
+  auto fn_get_handle = reinterpret_cast<pfn_nvmlDeviceGetHandleByIndex_v2>(
+      GetProcAddress(lib, "nvmlDeviceGetHandleByIndex_v2"));
+  auto fn_get_clock = reinterpret_cast<pfn_nvmlDeviceGetClockInfo>(
+      GetProcAddress(lib, "nvmlDeviceGetClockInfo"));
+  auto fn_shutdown =
+      reinterpret_cast<pfn_nvmlShutdown>(GetProcAddress(lib, "nvmlShutdown"));
 #else
   void* lib = dlopen("libnvidia-ml.so.1", RTLD_LAZY);
   if (!lib) lib = dlopen("libnvidia-ml.so", RTLD_LAZY);
   if (!lib) return cuda_clock_rate_khz() / 1000;
   auto fn_init = reinterpret_cast<pfn_nvmlInit_v2>(dlsym(lib, "nvmlInit_v2"));
-  auto fn_get_handle = reinterpret_cast<pfn_nvmlDeviceGetHandleByIndex_v2>(dlsym(lib, "nvmlDeviceGetHandleByIndex_v2"));
-  auto fn_get_clock = reinterpret_cast<pfn_nvmlDeviceGetClockInfo>(dlsym(lib, "nvmlDeviceGetClockInfo"));
+  auto fn_get_handle = reinterpret_cast<pfn_nvmlDeviceGetHandleByIndex_v2>(
+      dlsym(lib, "nvmlDeviceGetHandleByIndex_v2"));
+  auto fn_get_clock =
+      reinterpret_cast<pfn_nvmlDeviceGetClockInfo>(dlsym(lib, "nvmlDeviceGetClockInfo"));
   auto fn_shutdown = reinterpret_cast<pfn_nvmlShutdown>(dlsym(lib, "nvmlShutdown"));
 #endif
 
@@ -149,13 +154,11 @@ std::string cuda_device_summary() {
   std::ostringstream oss;
   oss.setf(std::ios::fixed);
   oss.precision(1);
-  oss << prop.name
-      << " | sm_" << prop.major << prop.minor
-      << " | " << (static_cast<double>(prop.totalGlobalMem) / (1024.0 * 1024.0 * 1024.0))
-      << " GiB"
-      << " | " << prop.multiProcessorCount << " SMs"
-      << " | " << (prop.sharedMemPerBlockOptin / 1024) << " KiB shared/block"
-      << " | " << cuda_peak_bandwidth_gbs() << " GB/s";
+  oss << prop.name << " | sm_" << prop.major << prop.minor << " | "
+      << (static_cast<double>(prop.totalGlobalMem) / (1024.0 * 1024.0 * 1024.0)) << " GiB"
+      << " | " << prop.multiProcessorCount << " SMs" << " | "
+      << (prop.sharedMemPerBlockOptin / 1024) << " KiB shared/block" << " | "
+      << cuda_peak_bandwidth_gbs() << " GB/s";
   return oss.str();
 }
 
@@ -188,19 +191,22 @@ void print_cuda_device_info() {
   std::printf("  Max threads / block       : %d\n", prop.maxThreadsPerBlock);
   std::printf("  Max threads / SM          : %d\n", prop.maxThreadsPerMultiProcessor);
   std::printf("  Shared mem / block        : %zu B\n", prop.sharedMemPerBlock);
-  std::printf("  Shared mem / block optin  : %zu B\n", static_cast<size_t>(prop.sharedMemPerBlockOptin));
+  std::printf("  Shared mem / block optin  : %zu B\n",
+              static_cast<size_t>(prop.sharedMemPerBlockOptin));
   std::printf("  Shared mem / SM           : %zu B\n", prop.sharedMemPerMultiprocessor);
   std::printf("  Registers / block         : %d\n", prop.regsPerBlock);
   std::printf("  L2 cache                  : %d KiB\n", prop.l2CacheSize / 1024);
   const int live_clk = cuda_live_sm_clock_mhz();
   if (live_clk > 0) {
-    std::printf("  Clock rate                : %d MHz (live SM via NVML; nominal %.0f MHz)\n",
-                live_clk, prop.clockRate / 1000.0);
+    std::printf(
+        "  Clock rate                : %d MHz (live SM via NVML; nominal %.0f MHz)\n",
+        live_clk, prop.clockRate / 1000.0);
   } else {
     std::printf("  Clock rate                : %.0f MHz\n", prop.clockRate / 1000.0);
   }
   std::printf("  Async engines             : %d\n", prop.asyncEngineCount);
-  std::printf("  Concurrent kernels        : %s\n", prop.concurrentKernels ? "yes" : "no");
+  std::printf("  Concurrent kernels        : %s\n",
+              prop.concurrentKernels ? "yes" : "no");
   std::printf("===================================================================\n");
 
   // Loud, actionable mismatch warning. Building for the wrong architecture either

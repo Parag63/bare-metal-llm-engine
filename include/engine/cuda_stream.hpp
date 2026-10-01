@@ -71,9 +71,7 @@ class CudaEvent {
   CudaEvent(const CudaEvent&) = delete;
   CudaEvent& operator=(const CudaEvent&) = delete;
 
-  CudaEvent(CudaEvent&& other) noexcept : event_(other.event_) {
-    other.event_ = nullptr;
-  }
+  CudaEvent(CudaEvent&& other) noexcept : event_(other.event_) { other.event_ = nullptr; }
 
   CudaEvent& operator=(CudaEvent&& other) noexcept {
     if (this != &other) {

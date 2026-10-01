@@ -74,9 +74,9 @@ void gemv(const float* A, const float* x, float* out, std::int64_t N, std::int64
 ///
 /// Both outputs are written.  sum_out is needed by the next residual connection;
 /// norm_out feeds into the next sub-layer.  `weight` may be nullptr (no scaling).
-void residual_rmsnorm(const float* x, const float* residual,
-                      const float* weight, float* norm_out, float* sum_out,
-                      std::int64_t rows, std::int64_t cols, float eps);
+void residual_rmsnorm(const float* x, const float* residual, const float* weight,
+                      float* norm_out, float* sum_out, std::int64_t rows,
+                      std::int64_t cols, float eps);
 
 /// Fused RMSNorm + linear projection (Exercise 7).
 ///
@@ -86,8 +86,7 @@ void residual_rmsnorm(const float* x, const float* residual,
 ///
 /// The intermediate `temp` is never materialised in global memory.
 /// `rms_weight` may be nullptr (no per-channel gain).
-void rmsnorm_linear(const float* in, const float* rms_weight,
-                    const float* W, float* out,
+void rmsnorm_linear(const float* in, const float* rms_weight, const float* W, float* out,
                     std::int64_t M, std::int64_t N, std::int64_t K, float eps);
 
 //===----------------------------------------------------------------------===//
@@ -103,7 +102,8 @@ void gemv_fp16(const half* A, const half* x, half* out, std::int64_t N, std::int
 void embedding(const float* table, const std::int32_t* input_ids, float* out,
                std::int64_t num_tokens, std::int64_t hidden_dim, std::int64_t vocab_size);
 void embedding_fp16(const half* table, const std::int32_t* input_ids, half* out,
-                    std::int64_t num_tokens, std::int64_t hidden_dim, std::int64_t vocab_size);
+                    std::int64_t num_tokens, std::int64_t hidden_dim,
+                    std::int64_t vocab_size);
 
 /// Argmax / Greedy sampling: returns the index of the maximum value in logits[0..vocab_size).
 /// Tie-breaking picks the lowest index.

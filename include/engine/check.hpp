@@ -57,11 +57,11 @@ namespace detail {
 
 /// Unconditional runtime check. Stays enabled in release builds -- use it for
 /// preconditions on public API boundaries, where the cost is irrelevant.
-#define ENGINE_CHECK(cond, msg)                                              \
-  do {                                                                       \
-    if (!(cond)) {                                                           \
-      ::engine::detail::throw_error(__FILE__, __LINE__, #cond, (msg));       \
-    }                                                                        \
+#define ENGINE_CHECK(cond, msg)                                        \
+  do {                                                                 \
+    if (!(cond)) {                                                     \
+      ::engine::detail::throw_error(__FILE__, __LINE__, #cond, (msg)); \
+    }                                                                  \
   } while (0)
 
 /// Debug-only check. Compiled out with NDEBUG -- use it inside hot loops.
@@ -91,17 +91,16 @@ inline void check_cuda(cudaError_t err, const char* file, int line, const char* 
 }  // namespace engine
 
 /// Wrap EVERY cudaXxx() call in this.
-#define CUDA_CHECK(call)                                                     \
-  ::engine::detail::check_cuda((call), __FILE__, __LINE__, #call)
+#define CUDA_CHECK(call) ::engine::detail::check_cuda((call), __FILE__, __LINE__, #call)
 
 /// Place immediately after a kernel launch. Synchronises and reports both launch
 /// errors and in-kernel faults, attributing them to the correct source line.
 /// Compiled to a cheap async-only check in release builds.
 #if !defined(NDEBUG) || defined(ENGINE_ALWAYS_SYNC_CHECK)
-#define CUDA_CHECK_KERNEL()                                                  \
-  do {                                                                       \
-    CUDA_CHECK(cudaGetLastError());       /* launch-time errors */           \
-    CUDA_CHECK(cudaDeviceSynchronize());  /* execution-time faults */        \
+#define CUDA_CHECK_KERNEL()                                          \
+  do {                                                               \
+    CUDA_CHECK(cudaGetLastError());      /* launch-time errors */    \
+    CUDA_CHECK(cudaDeviceSynchronize()); /* execution-time faults */ \
   } while (0)
 #else
 #define CUDA_CHECK_KERNEL() CUDA_CHECK(cudaGetLastError())

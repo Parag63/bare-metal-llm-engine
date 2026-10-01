@@ -119,12 +119,11 @@ struct RmsnormLinearShape {
   std::int64_t m, n, k;
   bool with_weight;
 };
-const RmsnormLinearShape kRmsnormLinearShapes[] = {
-    {1, 4096, 4096, true},
-    {32, 4096, 4096, true},
-    {1, 12288, 4096, true},
-    {17, 127, 31, true},
-    {32, 4096, 4096, false}};
+const RmsnormLinearShape kRmsnormLinearShapes[] = {{1, 4096, 4096, true},
+                                                   {32, 4096, 4096, true},
+                                                   {1, 12288, 4096, true},
+                                                   {17, 127, 31, true},
+                                                   {32, 4096, 4096, false}};
 
 /// The eps the generator used. Must match, or rmsnorm disagrees at eps scale on
 /// near-zero rows (which is exactly what the rmsnorm__zeros case tests).
@@ -167,8 +166,8 @@ TEST(golden, every_file_in_the_directory_parses) {
       continue;
     }
 
-    EXPECT_TRUE(g.size() >= 2);          // at least one input and one expected
-    EXPECT_TRUE(g.has("expected"));      // the naming convention, enforced
+    EXPECT_TRUE(g.size() >= 2);      // at least one input and one expected
+    EXPECT_TRUE(g.has("expected"));  // the naming convention, enforced
 
     // No golden file may contain a NaN or an infinity. If one does, the generator
     // produced garbage and every test that consumes it is meaningless.
@@ -206,9 +205,8 @@ TEST(golden, softmax_reference_is_a_probability_distribution) {
         const float v = exp.data[static_cast<std::size_t>(r * s.cols + c)];
         if (v < 0.0f || v > 1.0f) {
           ctx.add_failure(__FILE__, __LINE__,
-                          stem + ": probability out of [0,1] at (" +
-                              std::to_string(r) + "," + std::to_string(c) +
-                              ") = " + std::to_string(v));
+                          stem + ": probability out of [0,1] at (" + std::to_string(r) +
+                              "," + std::to_string(c) + ") = " + std::to_string(v));
           break;
         }
         sum += static_cast<double>(v);
@@ -346,8 +344,7 @@ TEST(cpu_ref, softmax_rows_matches_reference) {
     std::vector<float> out(static_cast<std::size_t>(s.rows * s.cols), 0.0f);
     engine::cpu::softmax_rows(in.data.data(), out.data(), s.rows, s.cols);
 
-    CHECK_CASE(stem, out.data(), exp.data.data(), out.size(), kSoftmaxRtol,
-               kSoftmaxAtol);
+    CHECK_CASE(stem, out.data(), exp.data.data(), out.size(), kSoftmaxRtol, kSoftmaxAtol);
   }
 }
 
@@ -359,8 +356,8 @@ TEST(cpu_ref, softmax_rows_survives_the_edge_cases) {
   std::vector<float> out(static_cast<std::size_t>(4 * 512), 0.0f);
   engine::cpu::softmax_rows(in.data.data(), out.data(), 4, 512);
 
-  CHECK_CASE("softmax_rows__edge", out.data(), exp.data.data(), out.size(),
-             kSoftmaxRtol, kSoftmaxAtol);
+  CHECK_CASE("softmax_rows__edge", out.data(), exp.data.data(), out.size(), kSoftmaxRtol,
+             kSoftmaxAtol);
 
   // Independently of the reference: the output must be finite everywhere. The +300
   // row is precisely the input that turns a naive softmax into NaN.
@@ -505,8 +502,8 @@ TEST(cpu_ref, residual_rmsnorm_matches_reference) {
 
     std::vector<float> norm_out(static_cast<std::size_t>(s.rows * s.cols), 0.0f);
     std::vector<float> sum_out(static_cast<std::size_t>(s.rows * s.cols), 0.0f);
-    engine::cpu::residual_rmsnorm(x.data.data(), res.data.data(), weight,
-                                  norm_out.data(), sum_out.data(), s.rows, s.cols, kEps);
+    engine::cpu::residual_rmsnorm(x.data.data(), res.data.data(), weight, norm_out.data(),
+                                  sum_out.data(), s.rows, s.cols, kEps);
 
     CHECK_CASE(stem + " (norm)", norm_out.data(), exp_norm.data.data(), norm_out.size(),
                kFloatRtol, kFloatAtol);
@@ -524,8 +521,8 @@ TEST(cpu_ref, residual_rmsnorm_of_zeros_is_zeros) {
 
   std::vector<float> norm_out(static_cast<std::size_t>(2 * 256), 1.0f);
   std::vector<float> sum_out(static_cast<std::size_t>(2 * 256), 1.0f);
-  engine::cpu::residual_rmsnorm(x.data.data(), res.data.data(), nullptr,
-                                norm_out.data(), sum_out.data(), 2, 256, kEps);
+  engine::cpu::residual_rmsnorm(x.data.data(), res.data.data(), nullptr, norm_out.data(),
+                                sum_out.data(), 2, 256, kEps);
 
   CHECK_CASE("residual_rmsnorm__zeros (norm)", norm_out.data(), exp_norm.data.data(),
              norm_out.size(), kFloatRtol, kFloatAtol);
@@ -548,8 +545,8 @@ TEST(cpu_ref, residual_rmsnorm_null_weight_equals_unit_weight) {
   std::vector<float> norm_b(static_cast<std::size_t>(rows * cols), 0.0f);
   std::vector<float> sum_b(static_cast<std::size_t>(rows * cols), 0.0f);
 
-  engine::cpu::residual_rmsnorm(x.data.data(), res.data.data(), nullptr,
-                                norm_a.data(), sum_a.data(), rows, cols, kEps);
+  engine::cpu::residual_rmsnorm(x.data.data(), res.data.data(), nullptr, norm_a.data(),
+                                sum_a.data(), rows, cols, kEps);
   engine::cpu::residual_rmsnorm(x.data.data(), res.data.data(), ones.data(),
                                 norm_b.data(), sum_b.data(), rows, cols, kEps);
 
@@ -583,8 +580,8 @@ TEST(cpu_ref, rmsnorm_linear_matches_reference) {
     }
 
     std::vector<float> out(static_cast<std::size_t>(s.m * s.n), 0.0f);
-    engine::cpu::rmsnorm_linear(in.data.data(), weight, W.data.data(), out.data(),
-                                s.m, s.n, s.k, kEps);
+    engine::cpu::rmsnorm_linear(in.data.data(), weight, W.data.data(), out.data(), s.m,
+                                s.n, s.k, kEps);
 
     CHECK_CASE(stem, out.data(), exp.data.data(), out.size(), kMatmulRtol, kMatmulAtol);
   }
@@ -600,10 +597,10 @@ TEST(cpu_ref, rmsnorm_linear_null_weight_equals_unit_weight) {
   std::vector<float> out_a(static_cast<std::size_t>(M * N), 0.0f);
   std::vector<float> out_b(static_cast<std::size_t>(M * N), 0.0f);
 
-  engine::cpu::rmsnorm_linear(in.data.data(), nullptr, W.data.data(), out_a.data(),
-                              M, N, K, kEps);
-  engine::cpu::rmsnorm_linear(in.data.data(), ones.data(), W.data.data(), out_b.data(),
-                              M, N, K, kEps);
+  engine::cpu::rmsnorm_linear(in.data.data(), nullptr, W.data.data(), out_a.data(), M, N,
+                              K, kEps);
+  engine::cpu::rmsnorm_linear(in.data.data(), ones.data(), W.data.data(), out_b.data(), M,
+                              N, K, kEps);
 
   CHECK_CASE("rmsnorm_linear null vs ones", out_a.data(), out_b.data(), out_a.size(),
              kExactRtol, kExactAtol);
@@ -710,7 +707,8 @@ TEST(cpu_ref, gemv_fp16_matches_scalar_reference) {
     double acc = 0.0;
     for (std::int64_t k = 0; k < K; ++k) {
       acc += static_cast<double>(engine::half_to_float(x[static_cast<std::size_t>(k)])) *
-             static_cast<double>(engine::half_to_float(A[static_cast<std::size_t>(k * N + j)]));
+             static_cast<double>(
+                 engine::half_to_float(A[static_cast<std::size_t>(k * N + j)]));
     }
     float expected = static_cast<float>(acc);
     float actual = engine::half_to_float(out[static_cast<std::size_t>(j)]);
@@ -731,7 +729,8 @@ TEST(cpu_ref, embedding_lookup_matches_expected) {
   std::vector<std::int32_t> input_ids = {0, 7, 49, 12};
   std::vector<float> out(static_cast<std::size_t>(num_tokens * hidden_dim), -1.0f);
 
-  engine::cpu::embedding(table.data(), input_ids.data(), out.data(), num_tokens, hidden_dim, vocab_size);
+  engine::cpu::embedding(table.data(), input_ids.data(), out.data(), num_tokens,
+                         hidden_dim, vocab_size);
 
   for (std::int64_t t = 0; t < num_tokens; ++t) {
     std::int32_t id = input_ids[static_cast<std::size_t>(t)];
@@ -743,9 +742,11 @@ TEST(cpu_ref, embedding_lookup_matches_expected) {
 
   // Bounds checks throw
   std::vector<std::int32_t> bad_ids = {50};
-  EXPECT_THROWS(engine::cpu::embedding(table.data(), bad_ids.data(), out.data(), 1, hidden_dim, vocab_size));
+  EXPECT_THROWS(engine::cpu::embedding(table.data(), bad_ids.data(), out.data(), 1,
+                                       hidden_dim, vocab_size));
   bad_ids = {-1};
-  EXPECT_THROWS(engine::cpu::embedding(table.data(), bad_ids.data(), out.data(), 1, hidden_dim, vocab_size));
+  EXPECT_THROWS(engine::cpu::embedding(table.data(), bad_ids.data(), out.data(), 1,
+                                       hidden_dim, vocab_size));
 }
 
 TEST(cpu_ref, embedding_fp16_lookup_matches_expected) {
@@ -761,13 +762,15 @@ TEST(cpu_ref, embedding_fp16_lookup_matches_expected) {
   std::vector<std::int32_t> input_ids = {2, 31, 0};
   std::vector<engine::half> out(static_cast<std::size_t>(num_tokens * hidden_dim));
 
-  engine::cpu::embedding_fp16(table.data(), input_ids.data(), out.data(), num_tokens, hidden_dim, vocab_size);
+  engine::cpu::embedding_fp16(table.data(), input_ids.data(), out.data(), num_tokens,
+                              hidden_dim, vocab_size);
 
   for (std::int64_t t = 0; t < num_tokens; ++t) {
     std::int32_t id = input_ids[static_cast<std::size_t>(t)];
     for (std::int64_t d = 0; d < hidden_dim; ++d) {
-      EXPECT_EQ(engine::half_to_float(out[static_cast<std::size_t>(t * hidden_dim + d)]),
-                engine::half_to_float(table[static_cast<std::size_t>(id * hidden_dim + d)]));
+      EXPECT_EQ(
+          engine::half_to_float(out[static_cast<std::size_t>(t * hidden_dim + d)]),
+          engine::half_to_float(table[static_cast<std::size_t>(id * hidden_dim + d)]));
     }
   }
 }
@@ -775,7 +778,8 @@ TEST(cpu_ref, embedding_fp16_lookup_matches_expected) {
 TEST(cpu_ref, argmax_finds_maximum_and_tiebreaks) {
   std::vector<float> logits = {1.0f, 5.5f, 3.2f, 5.5f, 2.0f};
   // Max is 5.5f, occurring at index 1 and index 3. Lowest index is 1.
-  std::int32_t best = engine::cpu::argmax(logits.data(), static_cast<std::int64_t>(logits.size()));
+  std::int32_t best =
+      engine::cpu::argmax(logits.data(), static_cast<std::int64_t>(logits.size()));
   EXPECT_EQ(best, 1);
 
   // Single element
@@ -785,22 +789,21 @@ TEST(cpu_ref, argmax_finds_maximum_and_tiebreaks) {
 
 TEST(cpu_ref, argmax_fp16_finds_maximum_and_tiebreaks) {
   std::vector<engine::half> logits = {
-    engine::float_to_half(-10.0f),
-    engine::float_to_half(4.25f),
-    engine::float_to_half(100.5f),
-    engine::float_to_half(100.5f),
-    engine::float_to_half(0.0f)
-  };
-  std::int32_t best = engine::cpu::argmax_fp16(logits.data(), static_cast<std::int64_t>(logits.size()));
+      engine::float_to_half(-10.0f), engine::float_to_half(4.25f),
+      engine::float_to_half(100.5f), engine::float_to_half(100.5f),
+      engine::float_to_half(0.0f)};
+  std::int32_t best =
+      engine::cpu::argmax_fp16(logits.data(), static_cast<std::int64_t>(logits.size()));
   EXPECT_EQ(best, 2);
 }
 
 TEST(cpu_ref, swiglu_matches_mathematical_definition) {
   const std::vector<float> gate = {0.0f, 1.0f, -1.0f, 2.0f, -2.0f, 10.0f, -10.0f};
-  const std::vector<float> up   = {2.0f, 3.0f,  4.0f, -1.5f, 0.5f,  1.0f,   1.0f};
+  const std::vector<float> up = {2.0f, 3.0f, 4.0f, -1.5f, 0.5f, 1.0f, 1.0f};
   std::vector<float> out(gate.size(), 0.0f);
 
-  engine::cpu::swiglu(gate.data(), up.data(), out.data(), static_cast<std::int64_t>(gate.size()));
+  engine::cpu::swiglu(gate.data(), up.data(), out.data(),
+                      static_cast<std::int64_t>(gate.size()));
 
   for (std::size_t i = 0; i < gate.size(); ++i) {
     const double g = static_cast<double>(gate[i]);
@@ -819,7 +822,7 @@ TEST(cpu_ref, swiglu_matches_mathematical_definition) {
 
 TEST(cpu_ref, swiglu_fp16_matches_mathematical_definition) {
   const std::vector<float> gate_f = {0.0f, 1.5f, -1.5f, 3.0f, -3.0f};
-  const std::vector<float> up_f   = {1.0f, 2.0f,  0.5f, -2.0f, 4.0f};
+  const std::vector<float> up_f = {1.0f, 2.0f, 0.5f, -2.0f, 4.0f};
   std::vector<engine::half> gate(gate_f.size());
   std::vector<engine::half> up(up_f.size());
   std::vector<engine::half> out(gate_f.size());
@@ -829,7 +832,8 @@ TEST(cpu_ref, swiglu_fp16_matches_mathematical_definition) {
     up[i] = engine::float_to_half(up_f[i]);
   }
 
-  engine::cpu::swiglu_fp16(gate.data(), up.data(), out.data(), static_cast<std::int64_t>(gate.size()));
+  engine::cpu::swiglu_fp16(gate.data(), up.data(), out.data(),
+                           static_cast<std::int64_t>(gate.size()));
 
   for (std::size_t i = 0; i < gate_f.size(); ++i) {
     const double g = static_cast<double>(gate_f[i]);
@@ -838,4 +842,3 @@ TEST(cpu_ref, swiglu_fp16_matches_mathematical_definition) {
     EXPECT_NEAR(engine::half_to_float(out[i]), static_cast<float>(expected), 2e-3f);
   }
 }
-

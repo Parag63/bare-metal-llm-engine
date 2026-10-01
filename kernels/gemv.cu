@@ -37,10 +37,8 @@ namespace {
 // Each block computes 64 output columns.
 // Each thread handles 2 columns using float2 vector memory instructions.
 // 8 warps cooperatively reduce over the K dimension via shared memory.
-__global__ void gemv_fast_k8_n64(const float* __restrict__ A,
-                                 const float* __restrict__ x,
-                                 float* __restrict__ out,
-                                 int64_t N, int64_t K) {
+__global__ void gemv_fast_k8_n64(const float* __restrict__ A, const float* __restrict__ x,
+                                 float* __restrict__ out, int64_t N, int64_t K) {
   constexpr int WARPS = 8;
   constexpr int COLS_PER_BLOCK = 64;
 
@@ -72,7 +70,7 @@ __global__ void gemv_fast_k8_n64(const float* __restrict__ A,
     }
   }
 
-  s_red[warp_id][lane_id * 2]     = acc0;
+  s_red[warp_id][lane_id * 2] = acc0;
   s_red[warp_id][lane_id * 2 + 1] = acc1;
 
   __syncthreads();
@@ -82,7 +80,7 @@ __global__ void gemv_fast_k8_n64(const float* __restrict__ A,
     float sum0 = 0.0f;
     float sum1 = 0.0f;
 
-    #pragma unroll
+#pragma unroll
     for (int w = 0; w < WARPS; ++w) {
       sum0 += s_red[w][lane_id * 2];
       sum1 += s_red[w][lane_id * 2 + 1];
@@ -98,8 +96,7 @@ __global__ void gemv_fast_k8_n64(const float* __restrict__ A,
 
 // Fallback kernel for arbitrary N and K
 __global__ void gemv_scalar_fallback(const float* __restrict__ A,
-                                     const float* __restrict__ x,
-                                     float* __restrict__ out,
+                                     const float* __restrict__ x, float* __restrict__ out,
                                      int64_t N, int64_t K) {
   const int64_t col = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (col >= N) return;
@@ -113,8 +110,8 @@ __global__ void gemv_scalar_fallback(const float* __restrict__ A,
 
 }  // namespace
 
-void gemv(const float* A, const float* x, float* out, std::int64_t N,
-          std::int64_t K, cudaStream_t stream) {
+void gemv(const float* A, const float* x, float* out, std::int64_t N, std::int64_t K,
+          cudaStream_t stream) {
   ENGINE_CHECK(A != nullptr, "gemv: A is null");
   ENGINE_CHECK(x != nullptr, "gemv: x is null");
   ENGINE_CHECK(out != nullptr, "gemv: out is null");

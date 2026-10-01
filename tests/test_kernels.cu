@@ -212,12 +212,11 @@ struct RmsnormLinearShape {
   std::int64_t m, n, k;
   bool with_weight;
 };
-const RmsnormLinearShape kRmsnormLinearShapes[] = {
-    {1, 4096, 4096, true},
-    {32, 4096, 4096, true},
-    {1, 12288, 4096, true},
-    {17, 127, 31, true},
-    {32, 4096, 4096, false}};
+const RmsnormLinearShape kRmsnormLinearShapes[] = {{1, 4096, 4096, true},
+                                                   {32, 4096, 4096, true},
+                                                   {1, 12288, 4096, true},
+                                                   {17, 127, 31, true},
+                                                   {32, 4096, 4096, false}};
 
 std::string dims2(std::int64_t a, std::int64_t b) {
   return std::to_string(a) + "x" + std::to_string(b);
@@ -265,11 +264,11 @@ double tree_reduction_atol(const std::vector<float>& x) {
 /// Every test in this file needs a GPU. On the laptop there isn't one, and that is
 /// not a failure -- it is the CPU-only build doing exactly what it is designed to
 /// do. The suite stays green and the summary lists what was skipped and why.
-#define REQUIRE_CUDA_DEVICE()                                                      \
-  do {                                                                             \
-    if (::engine::cuda_device_count() == 0) {                                      \
-      SKIP_TEST("no CUDA device visible -- check `nvidia-smi`");                    \
-    }                                                                              \
+#define REQUIRE_CUDA_DEVICE()                                    \
+  do {                                                           \
+    if (::engine::cuda_device_count() == 0) {                    \
+      SKIP_TEST("no CUDA device visible -- check `nvidia-smi`"); \
+    }                                                            \
   } while (0)
 
 //===----------------------------------------------------------------------===//
@@ -411,8 +410,7 @@ TEST(kernels, softmax_rows_matches_reference) {
     CUDA_CHECK(cudaDeviceSynchronize());
 
     const std::vector<float> host = d_out.download();
-    CHECK_CASE(stem, host.data(), expected.data(), in.size(), kSoftmaxRtol,
-               kSoftmaxAtol);
+    CHECK_CASE(stem, host.data(), expected.data(), in.size(), kSoftmaxRtol, kSoftmaxAtol);
 
     // An independent invariant, checked per row: probabilities sum to 1. This
     // catches a class of bug the element-wise compare can miss -- if the kernel
@@ -456,8 +454,8 @@ TEST(kernels, softmax_rows_survives_the_edge_cases) {
   CUDA_CHECK(cudaDeviceSynchronize());
 
   const std::vector<float> host = d_out.download();
-  CHECK_CASE("softmax_rows__edge", host.data(), expected.data(), in.size(),
-             kSoftmaxRtol, kSoftmaxAtol);
+  CHECK_CASE("softmax_rows__edge", host.data(), expected.data(), in.size(), kSoftmaxRtol,
+             kSoftmaxAtol);
 
   // Said explicitly, because "allclose passed" is easy to skim past and NaN is the
   // failure mode this file is about.
@@ -593,8 +591,8 @@ TEST(kernels, matmul_tiled_matches_reference) {
     CUDA_CHECK(cudaDeviceSynchronize());
 
     const std::vector<float> host = d_c.download();
-    CHECK_CASE(stem, host.data(), g.at("expected").data.data(), host.size(),
-               kMatmulRtol, kMatmulAtol);
+    CHECK_CASE(stem, host.data(), g.at("expected").data.data(), host.size(), kMatmulRtol,
+               kMatmulAtol);
   }
 }
 
@@ -654,8 +652,8 @@ TEST(kernels, matmul_register_tiled_matches_reference) {
     CUDA_CHECK(cudaDeviceSynchronize());
 
     const std::vector<float> host = d_c.download();
-    CHECK_CASE(stem, host.data(), g.at("expected").data.data(), host.size(),
-               kMatmulRtol, kMatmulAtol);
+    CHECK_CASE(stem, host.data(), g.at("expected").data.data(), host.size(), kMatmulRtol,
+               kMatmulAtol);
   }
 }
 
@@ -706,9 +704,9 @@ TEST(kernels, matmul_with_k_zero_is_the_zero_matrix) {
   const std::vector<float> host = d_c.download();
   for (float v : host) {
     if (v != 0.0f) {
-      ctx.add_failure(__FILE__, __LINE__,
-                      "K == 0 must produce an all-zero MxN result, found " +
-                          std::to_string(v));
+      ctx.add_failure(
+          __FILE__, __LINE__,
+          "K == 0 must produce an all-zero MxN result, found " + std::to_string(v));
       break;
     }
   }
@@ -745,17 +743,16 @@ TEST(kernels, residual_rmsnorm_matches_reference) {
       d_weight_ptr = d_weight.get();
     }
 
-    engine::cuda::residual_rmsnorm(d_x.get(), d_res.get(), d_weight_ptr,
-                                   d_norm_out.get(), d_sum_out.get(),
-                                   s.rows, s.cols, kEps);
+    engine::cuda::residual_rmsnorm(d_x.get(), d_res.get(), d_weight_ptr, d_norm_out.get(),
+                                   d_sum_out.get(), s.rows, s.cols, kEps);
     CUDA_CHECK(cudaDeviceSynchronize());
 
     const std::vector<float> host_norm = d_norm_out.download();
     const std::vector<float> host_sum = d_sum_out.download();
-    CHECK_CASE(stem + " (norm)", host_norm.data(), exp_norm.data.data(),
-               host_norm.size(), kRmsRtol, kRmsAtol);
-    CHECK_CASE(stem + " (sum)", host_sum.data(), exp_sum.data.data(),
-               host_sum.size(), kRmsRtol, kRmsAtol);
+    CHECK_CASE(stem + " (norm)", host_norm.data(), exp_norm.data.data(), host_norm.size(),
+               kRmsRtol, kRmsAtol);
+    CHECK_CASE(stem + " (sum)", host_sum.data(), exp_sum.data.data(), host_sum.size(),
+               kRmsRtol, kRmsAtol);
   }
 }
 
@@ -772,13 +769,13 @@ TEST(kernels, residual_rmsnorm_of_zeros_is_zeros_not_nan) {
   DeviceBuffer<float> d_norm_out(usize(rows * cols));
   DeviceBuffer<float> d_sum_out(usize(rows * cols));
 
-  const std::vector<float> nans(usize(rows * cols), std::numeric_limits<float>::quiet_NaN());
+  const std::vector<float> nans(usize(rows * cols),
+                                std::numeric_limits<float>::quiet_NaN());
   d_norm_out.upload(nans);
   d_sum_out.upload(nans);
 
-  engine::cuda::residual_rmsnorm(d_x.get(), d_res.get(), nullptr,
-                                 d_norm_out.get(), d_sum_out.get(),
-                                 rows, cols, kEps);
+  engine::cuda::residual_rmsnorm(d_x.get(), d_res.get(), nullptr, d_norm_out.get(),
+                                 d_sum_out.get(), rows, cols, kEps);
   CUDA_CHECK(cudaDeviceSynchronize());
 
   const std::vector<float> host_norm = d_norm_out.download();
@@ -817,12 +814,10 @@ TEST(kernels, residual_rmsnorm_null_weight_equals_unit_weight) {
   DeviceBuffer<float> d_norm_ones(usize(rows * cols));
   DeviceBuffer<float> d_sum_ones(usize(rows * cols));
 
-  engine::cuda::residual_rmsnorm(d_x.get(), d_res.get(), nullptr,
-                                 d_norm_null.get(), d_sum_null.get(),
-                                 rows, cols, kEps);
-  engine::cuda::residual_rmsnorm(d_x.get(), d_res.get(), d_ones.get(),
-                                 d_norm_ones.get(), d_sum_ones.get(),
-                                 rows, cols, kEps);
+  engine::cuda::residual_rmsnorm(d_x.get(), d_res.get(), nullptr, d_norm_null.get(),
+                                 d_sum_null.get(), rows, cols, kEps);
+  engine::cuda::residual_rmsnorm(d_x.get(), d_res.get(), d_ones.get(), d_norm_ones.get(),
+                                 d_sum_ones.get(), rows, cols, kEps);
   CUDA_CHECK(cudaDeviceSynchronize());
 
   const std::vector<float> norm_null = d_norm_null.download();
@@ -861,13 +856,12 @@ TEST(kernels, rmsnorm_linear_matches_reference) {
       d_weight_ptr = d_weight.get();
     }
 
-    engine::cuda::rmsnorm_linear(d_in.get(), d_weight_ptr, d_w.get(), d_out.get(),
-                                 s.m, s.n, s.k, kEps);
+    engine::cuda::rmsnorm_linear(d_in.get(), d_weight_ptr, d_w.get(), d_out.get(), s.m,
+                                 s.n, s.k, kEps);
     CUDA_CHECK(cudaDeviceSynchronize());
 
     const std::vector<float> host = d_out.download();
-    CHECK_CASE(stem, host.data(), exp.data.data(), host.size(),
-               kMatmulRtol, kMatmulAtol);
+    CHECK_CASE(stem, host.data(), exp.data.data(), host.size(), kMatmulRtol, kMatmulAtol);
   }
 }
 
@@ -889,10 +883,10 @@ TEST(kernels, rmsnorm_linear_null_weight_equals_unit_weight) {
   d_out_null.zero();
   d_out_ones.zero();
 
-  engine::cuda::rmsnorm_linear(d_in.get(), nullptr, d_w.get(), d_out_null.get(),
-                               M, N, K, kEps);
-  engine::cuda::rmsnorm_linear(d_in.get(), d_ones.get(), d_w.get(), d_out_ones.get(),
-                               M, N, K, kEps);
+  engine::cuda::rmsnorm_linear(d_in.get(), nullptr, d_w.get(), d_out_null.get(), M, N, K,
+                               kEps);
+  engine::cuda::rmsnorm_linear(d_in.get(), d_ones.get(), d_w.get(), d_out_ones.get(), M,
+                               N, K, kEps);
   CUDA_CHECK(cudaDeviceSynchronize());
 
   const std::vector<float> host_null = d_out_null.download();
@@ -942,8 +936,8 @@ TEST(kernels, rmsnorm_linear_agrees_with_separate_rmsnorm_and_matmul) {
     const std::vector<float> fused = d_fused_out.download();
     const std::vector<float> separate = d_sep_out.download();
 
-    CHECK_CASE(stem + " (fused vs separate)", fused.data(), separate.data(),
-               fused.size(), /*rtol=*/1e-4, /*atol=*/5e-5);
+    CHECK_CASE(stem + " (fused vs separate)", fused.data(), separate.data(), fused.size(),
+               /*rtol=*/1e-4, /*atol=*/5e-5);
   }
 }
 
@@ -1047,12 +1041,11 @@ TEST(kernels, gemv_of_zero_input) {
 TEST(kernels, gemv_fp16_matches_cpu_ref) {
   REQUIRE_CUDA_DEVICE();
 
-  struct Shape { std::int64_t n, k; };
+  struct Shape {
+    std::int64_t n, k;
+  };
   const Shape shapes[] = {
-    {64, 64},
-    {128, 256},
-    {4096, 4096},
-    {73, 125},  // unaligned fallback
+      {64, 64}, {128, 256}, {4096, 4096}, {73, 125},  // unaligned fallback
   };
 
   for (const auto& s : shapes) {
@@ -1061,10 +1054,12 @@ TEST(kernels, gemv_fp16_matches_cpu_ref) {
     std::vector<engine::half> exp(static_cast<std::size_t>(s.n));
 
     for (std::size_t i = 0; i < h_A.size(); ++i) {
-      h_A[i] = engine::float_to_half(static_cast<float>(static_cast<int>(i % 19) - 9) * 0.05f);
+      h_A[i] =
+          engine::float_to_half(static_cast<float>(static_cast<int>(i % 19) - 9) * 0.05f);
     }
     for (std::size_t i = 0; i < h_x.size(); ++i) {
-      h_x[i] = engine::float_to_half(static_cast<float>(static_cast<int>(i % 13) - 6) * 0.05f);
+      h_x[i] =
+          engine::float_to_half(static_cast<float>(static_cast<int>(i % 13) - 6) * 0.05f);
     }
 
     engine::cpu::gemv_fp16(h_A.data(), h_x.data(), exp.data(), s.n, s.k);
@@ -1093,10 +1088,11 @@ TEST(kernels, gemv_fp16_matches_cpu_ref) {
 TEST(kernels, embedding_f32_matches_cpu_ref) {
   REQUIRE_CUDA_DEVICE();
 
-  struct Case { std::int64_t v, d, t; };
+  struct Case {
+    std::int64_t v, d, t;
+  };
   const Case cases[] = {
-    {1000, 256, 5},
-    {100, 65, 3},  // unaligned fallback
+      {1000, 256, 5}, {100, 65, 3},  // unaligned fallback
   };
 
   for (const auto& c : cases) {
@@ -1129,10 +1125,12 @@ TEST(kernels, embedding_f32_matches_cpu_ref) {
 TEST(kernels, embedding_fp16_matches_cpu_ref) {
   REQUIRE_CUDA_DEVICE();
 
-  struct Case { std::int64_t v, d, t; };
+  struct Case {
+    std::int64_t v, d, t;
+  };
   const Case cases[] = {
-    {500, 128, 4},
-    {50, 65, 2},
+      {500, 128, 4},
+      {50, 65, 2},
   };
 
   for (const auto& c : cases) {
@@ -1232,7 +1230,7 @@ TEST(kernels, swiglu_f32_matches_cpu_ref) {
 
     for (std::size_t i = 0; i < gate.size(); ++i) {
       gate[i] = static_cast<float>(static_cast<int>(i % 23) - 11) * 0.2f;
-      up[i]   = static_cast<float>(static_cast<int>(i % 17) - 8) * 0.2f;
+      up[i] = static_cast<float>(static_cast<int>(i % 17) - 8) * 0.2f;
     }
 
     engine::cpu::swiglu(gate.data(), up.data(), exp.data(), n);
@@ -1246,7 +1244,8 @@ TEST(kernels, swiglu_f32_matches_cpu_ref) {
     CUDA_CHECK(cudaDeviceSynchronize());
 
     const std::vector<float> host = d_out.download();
-    CHECK_CASE("swiglu_f32__n" + std::to_string(n), host.data(), exp.data(), host.size(), 1e-5, 1e-5);
+    CHECK_CASE("swiglu_f32__n" + std::to_string(n), host.data(), exp.data(), host.size(),
+               1e-5, 1e-5);
   }
 }
 
@@ -1260,8 +1259,10 @@ TEST(kernels, swiglu_fp16_matches_cpu_ref) {
     std::vector<engine::half> exp(static_cast<std::size_t>(n));
 
     for (std::size_t i = 0; i < gate.size(); ++i) {
-      gate[i] = engine::float_to_half(static_cast<float>(static_cast<int>(i % 23) - 11) * 0.2f);
-      up[i]   = engine::float_to_half(static_cast<float>(static_cast<int>(i % 17) - 8) * 0.2f);
+      gate[i] =
+          engine::float_to_half(static_cast<float>(static_cast<int>(i % 23) - 11) * 0.2f);
+      up[i] =
+          engine::float_to_half(static_cast<float>(static_cast<int>(i % 17) - 8) * 0.2f);
     }
 
     engine::cpu::swiglu_fp16(gate.data(), up.data(), exp.data(), n);
@@ -1285,7 +1286,6 @@ TEST(kernels, swiglu_fp16_matches_cpu_ref) {
 // PART 3 -- the launch CONTRACT.
 //===----------------------------------------------------------------------===//
 
-
 TEST(kernels, launchers_reject_negative_dimensions) {
   REQUIRE_CUDA_DEVICE();
 
@@ -1308,11 +1308,16 @@ TEST(kernels, launchers_reject_negative_dimensions) {
   EXPECT_THROWS_MSG(engine::cuda::rmsnorm(p, p, p, -1, 4, 1e-5f), "negative");
   EXPECT_THROWS_MSG(engine::cuda::matmul_naive(p, p, p, -1, 4, 4), "negative");
   EXPECT_THROWS_MSG(engine::cuda::matmul_tiled(p, p, p, 4, 4, -1), "negative");
-  EXPECT_THROWS_MSG(engine::cuda::residual_rmsnorm(p, p, p, p, p, -1, 4, 1e-5f), "negative");
-  EXPECT_THROWS_MSG(engine::cuda::residual_rmsnorm(p, p, p, p, p, 4, -1, 1e-5f), "negative");
-  EXPECT_THROWS_MSG(engine::cuda::rmsnorm_linear(p, p, p, p, -1, 4, 4, 1e-5f), "negative");
-  EXPECT_THROWS_MSG(engine::cuda::rmsnorm_linear(p, p, p, p, 4, -1, 4, 1e-5f), "negative");
-  EXPECT_THROWS_MSG(engine::cuda::rmsnorm_linear(p, p, p, p, 4, 4, -1, 1e-5f), "negative");
+  EXPECT_THROWS_MSG(engine::cuda::residual_rmsnorm(p, p, p, p, p, -1, 4, 1e-5f),
+                    "negative");
+  EXPECT_THROWS_MSG(engine::cuda::residual_rmsnorm(p, p, p, p, p, 4, -1, 1e-5f),
+                    "negative");
+  EXPECT_THROWS_MSG(engine::cuda::rmsnorm_linear(p, p, p, p, -1, 4, 4, 1e-5f),
+                    "negative");
+  EXPECT_THROWS_MSG(engine::cuda::rmsnorm_linear(p, p, p, p, 4, -1, 4, 1e-5f),
+                    "negative");
+  EXPECT_THROWS_MSG(engine::cuda::rmsnorm_linear(p, p, p, p, 4, 4, -1, 1e-5f),
+                    "negative");
   EXPECT_THROWS_MSG(engine::cuda::gemv(p, p, p, -1, 4), "non-negative");
   EXPECT_THROWS_MSG(engine::cuda::gemv(p, p, p, 4, -1), "non-negative");
   EXPECT_THROWS_MSG(engine::cuda::gemv_fp16(p_h, p_h, p_h, -1, 4), "non-negative");
@@ -1320,16 +1325,21 @@ TEST(kernels, launchers_reject_negative_dimensions) {
   EXPECT_THROWS_MSG(engine::cuda::embedding(p, p_i, p, -1, 4, 10), "non-negative");
   EXPECT_THROWS_MSG(engine::cuda::embedding(p, p_i, p, 4, -1, 10), "non-negative");
   EXPECT_THROWS_MSG(engine::cuda::embedding(p, p_i, p, 4, 4, 0), "positive");
-  EXPECT_THROWS_MSG(engine::cuda::embedding_fp16(p_h, p_i, p_h, -1, 4, 10), "non-negative");
-  EXPECT_THROWS_MSG(engine::cuda::embedding_fp16(p_h, p_i, p_h, 4, -1, 10), "non-negative");
+  EXPECT_THROWS_MSG(engine::cuda::embedding_fp16(p_h, p_i, p_h, -1, 4, 10),
+                    "non-negative");
+  EXPECT_THROWS_MSG(engine::cuda::embedding_fp16(p_h, p_i, p_h, 4, -1, 10),
+                    "non-negative");
   EXPECT_THROWS_MSG(engine::cuda::embedding_fp16(p_h, p_i, p_h, 4, 4, 0), "positive");
   EXPECT_THROWS_MSG(engine::cuda::argmax(p, p_i, 0), "positive");
   EXPECT_THROWS_MSG(engine::cuda::argmax(p, p_i, -1), "positive");
   EXPECT_THROWS_MSG(engine::cuda::argmax_fp16(p_h, p_i, 0), "positive");
   EXPECT_THROWS_MSG(engine::cuda::argmax_fp16(p_h, p_i, -1), "positive");
-  EXPECT_THROWS_MSG(engine::cuda::matmul_register_tiled(p, p, p, -1, 4, 4), "non-negative");
-  EXPECT_THROWS_MSG(engine::cuda::matmul_register_tiled(p, p, p, 4, -1, 4), "non-negative");
-  EXPECT_THROWS_MSG(engine::cuda::matmul_register_tiled(p, p, p, 4, 4, -1), "non-negative");
+  EXPECT_THROWS_MSG(engine::cuda::matmul_register_tiled(p, p, p, -1, 4, 4),
+                    "non-negative");
+  EXPECT_THROWS_MSG(engine::cuda::matmul_register_tiled(p, p, p, 4, -1, 4),
+                    "non-negative");
+  EXPECT_THROWS_MSG(engine::cuda::matmul_register_tiled(p, p, p, 4, 4, -1),
+                    "non-negative");
   EXPECT_THROWS_MSG(engine::cuda::swiglu(p, p, p, -1), "non-negative");
   EXPECT_THROWS_MSG(engine::cuda::swiglu_fp16(p_h, p_h, p_h, -1), "non-negative");
 
@@ -1364,13 +1374,20 @@ TEST(kernels, launchers_reject_null_pointers) {
   EXPECT_THROWS_MSG(engine::cuda::rmsnorm(p, p, nullptr, 2, 2, 1e-5f), "null");
   EXPECT_THROWS_MSG(engine::cuda::matmul_naive(nullptr, p, p, 2, 2, 2), "null");
   EXPECT_THROWS_MSG(engine::cuda::matmul_tiled(p, p, nullptr, 2, 2, 2), "null");
-  EXPECT_THROWS_MSG(engine::cuda::residual_rmsnorm(nullptr, p, p, p, p, 2, 2, 1e-5f), "null");
-  EXPECT_THROWS_MSG(engine::cuda::residual_rmsnorm(p, nullptr, p, p, p, 2, 2, 1e-5f), "null");
-  EXPECT_THROWS_MSG(engine::cuda::residual_rmsnorm(p, p, p, nullptr, p, 2, 2, 1e-5f), "null");
-  EXPECT_THROWS_MSG(engine::cuda::residual_rmsnorm(p, p, p, p, nullptr, 2, 2, 1e-5f), "null");
-  EXPECT_THROWS_MSG(engine::cuda::rmsnorm_linear(nullptr, p, p, p, 2, 2, 2, 1e-5f), "null");
-  EXPECT_THROWS_MSG(engine::cuda::rmsnorm_linear(p, p, nullptr, p, 2, 2, 2, 1e-5f), "null");
-  EXPECT_THROWS_MSG(engine::cuda::rmsnorm_linear(p, p, p, nullptr, 2, 2, 2, 1e-5f), "null");
+  EXPECT_THROWS_MSG(engine::cuda::residual_rmsnorm(nullptr, p, p, p, p, 2, 2, 1e-5f),
+                    "null");
+  EXPECT_THROWS_MSG(engine::cuda::residual_rmsnorm(p, nullptr, p, p, p, 2, 2, 1e-5f),
+                    "null");
+  EXPECT_THROWS_MSG(engine::cuda::residual_rmsnorm(p, p, p, nullptr, p, 2, 2, 1e-5f),
+                    "null");
+  EXPECT_THROWS_MSG(engine::cuda::residual_rmsnorm(p, p, p, p, nullptr, 2, 2, 1e-5f),
+                    "null");
+  EXPECT_THROWS_MSG(engine::cuda::rmsnorm_linear(nullptr, p, p, p, 2, 2, 2, 1e-5f),
+                    "null");
+  EXPECT_THROWS_MSG(engine::cuda::rmsnorm_linear(p, p, nullptr, p, 2, 2, 2, 1e-5f),
+                    "null");
+  EXPECT_THROWS_MSG(engine::cuda::rmsnorm_linear(p, p, p, nullptr, 2, 2, 2, 1e-5f),
+                    "null");
   EXPECT_THROWS_MSG(engine::cuda::gemv(nullptr, p, p, 4, 4), "null");
   EXPECT_THROWS_MSG(engine::cuda::gemv(p, nullptr, p, 4, 4), "null");
   EXPECT_THROWS_MSG(engine::cuda::gemv(p, p, nullptr, 4, 4), "null");

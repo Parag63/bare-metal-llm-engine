@@ -46,8 +46,8 @@ constexpr int TN = 8;
 
 __global__ void matmul_reg_tiled_128x128_k8(const float* __restrict__ A,
                                             const float* __restrict__ B,
-                                            float* __restrict__ C,
-                                            int64_t M, int64_t N, int64_t K) {
+                                            float* __restrict__ C, int64_t M, int64_t N,
+                                            int64_t K) {
   // Transposed s_A[BK][BM] avoids bank conflicts during column-vector loads
   __shared__ float s_A[BK][BM];
   __shared__ float s_B[BK][BN];
@@ -61,12 +61,12 @@ __global__ void matmul_reg_tiled_128x128_k8(const float* __restrict__ A,
   const int thread_n = threadIdx.x * TN;
 
   // Global load mapping for Matrix A: 256 threads load 128 x 8 = 1024 floats (4 floats / thread)
-  const int load_a_row = tid / 2;          // 0 .. 127
-  const int load_a_col = (tid % 2) * 4;     // 0 or 4
+  const int load_a_row = tid / 2;        // 0 .. 127
+  const int load_a_col = (tid % 2) * 4;  // 0 or 4
 
   // Global load mapping for Matrix B: 256 threads load 8 x 128 = 1024 floats (4 floats / thread)
-  const int load_b_row = tid / 32;         // 0 .. 7
-  const int load_b_col = (tid % 32) * 4;    // 0, 4, 8, ... 124
+  const int load_b_row = tid / 32;        // 0 .. 7
+  const int load_b_col = (tid % 32) * 4;  // 0, 4, 8, ... 124
 
   // Register accumulator tile: 8x8 = 64 floats stored directly in registers
   float reg_accum[TM][TN] = {0.0f};
@@ -78,7 +78,8 @@ __global__ void matmul_reg_tiled_128x128_k8(const float* __restrict__ A,
       const int64_t ga_row = block_m + load_a_row;
       const int64_t ga_col = k_offset + load_a_col;
       float4 a_val = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-      if (ga_row < M && ga_col + 3 < K && (K % 4 == 0) && (reinterpret_cast<uintptr_t>(A) % 16 == 0)) {
+      if (ga_row < M && ga_col + 3 < K && (K % 4 == 0) &&
+          (reinterpret_cast<uintptr_t>(A) % 16 == 0)) {
         a_val = *reinterpret_cast<const float4*>(&A[ga_row * K + ga_col]);
       } else if (ga_row < M) {
         if (ga_col + 0 < K) a_val.x = A[ga_row * K + ga_col + 0];
@@ -97,7 +98,8 @@ __global__ void matmul_reg_tiled_128x128_k8(const float* __restrict__ A,
       const int64_t gb_row = k_offset + load_b_row;
       const int64_t gb_col = block_n + load_b_col;
       float4 b_val = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-      if (gb_row < K && gb_col + 3 < N && (N % 4 == 0) && (reinterpret_cast<uintptr_t>(B) % 16 == 0)) {
+      if (gb_row < K && gb_col + 3 < N && (N % 4 == 0) &&
+          (reinterpret_cast<uintptr_t>(B) % 16 == 0)) {
         b_val = *reinterpret_cast<const float4*>(&B[gb_row * N + gb_col]);
       } else if (gb_row < K) {
         if (gb_col + 0 < N) b_val.x = B[gb_row * N + gb_col + 0];
@@ -110,28 +112,28 @@ __global__ void matmul_reg_tiled_128x128_k8(const float* __restrict__ A,
 
     __syncthreads();
 
-    // 3. Register tile outer products over BK
-    #pragma unroll
+// 3. Register tile outer products over BK
+#pragma unroll
     for (int k = 0; k < BK; ++k) {
       float reg_a[TM];
       float reg_b[TN];
 
-      // Load 8 elements from s_A (bank-conflict free)
-      #pragma unroll
+// Load 8 elements from s_A (bank-conflict free)
+#pragma unroll
       for (int m = 0; m < TM; ++m) {
         reg_a[m] = s_A[k][thread_m + m];
       }
 
-      // Load 8 elements from s_B
-      #pragma unroll
+// Load 8 elements from s_B
+#pragma unroll
       for (int n = 0; n < TN; ++n) {
         reg_b[n] = s_B[k][thread_n + n];
       }
 
-      // Outer product accumulation in registers
-      #pragma unroll
+// Outer product accumulation in registers
+#pragma unroll
       for (int m = 0; m < TM; ++m) {
-        #pragma unroll
+#pragma unroll
         for (int n = 0; n < TN; ++n) {
           reg_accum[m][n] = fmaf(reg_a[m], reg_b[n], reg_accum[m][n]);
         }
@@ -141,8 +143,8 @@ __global__ void matmul_reg_tiled_128x128_k8(const float* __restrict__ A,
     __syncthreads();
   }
 
-  // 4. Write back register accumulators to C
-  #pragma unroll
+// 4. Write back register accumulators to C
+#pragma unroll
   for (int m = 0; m < TM; ++m) {
     const int64_t row = block_m + thread_m + m;
     const int64_t col = block_n + thread_n;
@@ -150,8 +152,10 @@ __global__ void matmul_reg_tiled_128x128_k8(const float* __restrict__ A,
     if (row < M) {
       if (col + 7 < N && (N % 4 == 0) && (reinterpret_cast<uintptr_t>(C) % 16 == 0)) {
         // Fast path: two 128-bit stores
-        float4 c0 = make_float4(reg_accum[m][0], reg_accum[m][1], reg_accum[m][2], reg_accum[m][3]);
-        float4 c1 = make_float4(reg_accum[m][4], reg_accum[m][5], reg_accum[m][6], reg_accum[m][7]);
+        float4 c0 = make_float4(reg_accum[m][0], reg_accum[m][1], reg_accum[m][2],
+                                reg_accum[m][3]);
+        float4 c1 = make_float4(reg_accum[m][4], reg_accum[m][5], reg_accum[m][6],
+                                reg_accum[m][7]);
         *reinterpret_cast<float4*>(&C[row * N + col + 0]) = c0;
         *reinterpret_cast<float4*>(&C[row * N + col + 4]) = c1;
       } else {
@@ -168,9 +172,8 @@ __global__ void matmul_reg_tiled_128x128_k8(const float* __restrict__ A,
 
 }  // namespace
 
-void matmul_register_tiled(const float* A, const float* B, float* C,
-                           std::int64_t M, std::int64_t N, std::int64_t K,
-                           cudaStream_t stream) {
+void matmul_register_tiled(const float* A, const float* B, float* C, std::int64_t M,
+                           std::int64_t N, std::int64_t K, cudaStream_t stream) {
   ENGINE_CHECK(A != nullptr, "matmul_register_tiled: A is null");
   ENGINE_CHECK(B != nullptr, "matmul_register_tiled: B is null");
   ENGINE_CHECK(C != nullptr, "matmul_register_tiled: C is null");

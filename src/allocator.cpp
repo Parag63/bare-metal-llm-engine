@@ -30,11 +30,9 @@ std::string AllocStats::to_string() const {
   std::ostringstream oss;
   oss.setf(std::ios::fixed);
   oss.precision(2);
-  oss << "in_use=" << mib(bytes_in_use) << " MiB"
-      << ", reserved=" << mib(bytes_reserved) << " MiB"
-      << ", peak=" << mib(peak_bytes_in_use) << " MiB"
-      << ", allocs=" << num_allocs
-      << ", driver_allocs=" << num_driver_allocs;
+  oss << "in_use=" << mib(bytes_in_use) << " MiB" << ", reserved=" << mib(bytes_reserved)
+      << " MiB" << ", peak=" << mib(peak_bytes_in_use) << " MiB"
+      << ", allocs=" << num_allocs << ", driver_allocs=" << num_driver_allocs;
   return oss.str();
 }
 
@@ -69,9 +67,9 @@ class PassthroughAllocator final : public Allocator {
 
     stats_.bytes_in_use += bytes;
     stats_.bytes_reserved += bytes;
-    stats_.peak_bytes_in_use =
-        (stats_.bytes_in_use > stats_.peak_bytes_in_use) ? stats_.bytes_in_use
-                                                         : stats_.peak_bytes_in_use;
+    stats_.peak_bytes_in_use = (stats_.bytes_in_use > stats_.peak_bytes_in_use)
+                                   ? stats_.bytes_in_use
+                                   : stats_.peak_bytes_in_use;
     ++stats_.num_allocs;
     ++stats_.num_driver_allocs;  // every request hits the driver -- the whole problem
     return p;

@@ -53,8 +53,7 @@ class DeviceBuffer {
   DeviceBuffer(const DeviceBuffer&) = delete;
   DeviceBuffer& operator=(const DeviceBuffer&) = delete;
 
-  DeviceBuffer(DeviceBuffer&& other) noexcept
-      : ptr_(other.ptr_), count_(other.count_) {
+  DeviceBuffer(DeviceBuffer&& other) noexcept : ptr_(other.ptr_), count_(other.count_) {
     other.ptr_ = nullptr;
     other.count_ = 0;
   }
@@ -73,14 +72,16 @@ class DeviceBuffer {
   void upload(const std::vector<T>& host) {
     ENGINE_CHECK(host.size() == count_, "upload(): host/device element count mismatch");
     if (count_ > 0) {
-      CUDA_CHECK(cudaMemcpy(ptr_, host.data(), count_ * sizeof(T), cudaMemcpyHostToDevice));
+      CUDA_CHECK(
+          cudaMemcpy(ptr_, host.data(), count_ * sizeof(T), cudaMemcpyHostToDevice));
     }
   }
 
   std::vector<T> download() const {
     std::vector<T> host(count_);
     if (count_ > 0) {
-      CUDA_CHECK(cudaMemcpy(host.data(), ptr_, count_ * sizeof(T), cudaMemcpyDeviceToHost));
+      CUDA_CHECK(
+          cudaMemcpy(host.data(), ptr_, count_ * sizeof(T), cudaMemcpyDeviceToHost));
     }
     return host;
   }

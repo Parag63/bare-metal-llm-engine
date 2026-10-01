@@ -164,20 +164,10 @@ jobs:
   format:
     name: clang-format
     runs-on: ubuntu-24.04
-    # Advisory until the tree has been formatted once:
-    #
-    #     clang-format -i $(git ls-files '*.cpp' '*.hpp' '*.cu')
-    #     git commit -am "apply clang-format"
-    #
-    # then delete this line so the job blocks. Left non-blocking for now on purpose --
-    # a check that is red from its first run teaches you to ignore red checks, which is
-    # a worse habit than an unformatted file.
-    continue-on-error: true
 
     steps:
       - uses: actions/checkout@v4
       - name: Check formatting
-        continue-on-error: true
         run: |
           clang-format --version
           clang-format --dry-run --Werror $(git ls-files '*.cpp' '*.hpp' '*.cu')

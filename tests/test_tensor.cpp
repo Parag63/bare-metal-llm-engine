@@ -113,7 +113,7 @@ TEST(tensor, default_constructed_is_undefined) {
   Tensor t;
   EXPECT_FALSE(t.defined());
   EXPECT_EQ(t.dim(), I64{0});
-  EXPECT_EQ(t.numel(), I64{0});   // undefined, so zero -- see the conventions above
+  EXPECT_EQ(t.numel(), I64{0});  // undefined, so zero -- see the conventions above
   EXPECT_EQ(t.nbytes(), std::size_t{0});
   EXPECT_TRUE(t.shape().empty());
   EXPECT_TRUE(t.strides().empty());
@@ -441,10 +441,10 @@ TEST(tensor, slice_supports_the_empty_kv_cache_case) {
 
 TEST(tensor, slice_bounds_are_checked) {
   Tensor t(Shape{4, 5}, DType::F32, Device::CPU);
-  EXPECT_THROWS(t.slice(0, 3, 2));   // 3 + 2 > 4
-  EXPECT_THROWS(t.slice(0, -1, 2));  // negative start
-  EXPECT_THROWS(t.slice(0, 0, -1));  // negative length
-  EXPECT_THROWS(t.slice(2, 0, 1));   // no such axis
+  EXPECT_THROWS(t.slice(0, 3, 2));     // 3 + 2 > 4
+  EXPECT_THROWS(t.slice(0, -1, 2));    // negative start
+  EXPECT_THROWS(t.slice(0, 0, -1));    // negative length
+  EXPECT_THROWS(t.slice(2, 0, 1));     // no such axis
   EXPECT_NO_THROW(t.slice(-1, 0, 5));  // negative AXIS is fine: -1 is the last one
 }
 

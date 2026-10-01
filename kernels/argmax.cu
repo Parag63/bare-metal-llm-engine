@@ -25,8 +25,7 @@ constexpr int ARGMAX_THREADS = 512;
 constexpr int ARGMAX_WARPS = ARGMAX_THREADS / 32;  // 16 warps
 
 __global__ void argmax_f32_kernel(const float* __restrict__ logits,
-                                  int32_t* __restrict__ out_token,
-                                  int64_t vocab_size) {
+                                  int32_t* __restrict__ out_token, int64_t vocab_size) {
   __shared__ float s_val[ARGMAX_WARPS];
   __shared__ int32_t s_idx[ARGMAX_WARPS];
 
@@ -45,8 +44,8 @@ __global__ void argmax_f32_kernel(const float* __restrict__ logits,
     }
   }
 
-  // Intra-warp reduction using register shuffles
-  #pragma unroll
+// Intra-warp reduction using register shuffles
+#pragma unroll
   for (int offset = 16; offset > 0; offset /= 2) {
     const float other_val = __shfl_down_sync(0xffffffff, best_val, offset);
     const int32_t other_idx = __shfl_down_sync(0xffffffff, best_idx, offset);
@@ -68,7 +67,7 @@ __global__ void argmax_f32_kernel(const float* __restrict__ logits,
     float warp_val = (lane < ARGMAX_WARPS) ? s_val[lane] : -1e38f;
     int32_t warp_idx = (lane < ARGMAX_WARPS) ? s_idx[lane] : 0x7fffffff;
 
-    #pragma unroll
+#pragma unroll
     for (int offset = 8; offset > 0; offset /= 2) {
       const float other_val = __shfl_down_sync(0xffffffff, warp_val, offset);
       const int32_t other_idx = __shfl_down_sync(0xffffffff, warp_idx, offset);
@@ -85,8 +84,7 @@ __global__ void argmax_f32_kernel(const float* __restrict__ logits,
 }
 
 __global__ void argmax_fp16_kernel(const half* __restrict__ logits,
-                                   int32_t* __restrict__ out_token,
-                                   int64_t vocab_size) {
+                                   int32_t* __restrict__ out_token, int64_t vocab_size) {
   __shared__ float s_val[ARGMAX_WARPS];
   __shared__ int32_t s_idx[ARGMAX_WARPS];
 
@@ -105,8 +103,8 @@ __global__ void argmax_fp16_kernel(const half* __restrict__ logits,
     }
   }
 
-  // Intra-warp reduction using register shuffles
-  #pragma unroll
+// Intra-warp reduction using register shuffles
+#pragma unroll
   for (int offset = 16; offset > 0; offset /= 2) {
     const float other_val = __shfl_down_sync(0xffffffff, best_val, offset);
     const int32_t other_idx = __shfl_down_sync(0xffffffff, best_idx, offset);
@@ -128,7 +126,7 @@ __global__ void argmax_fp16_kernel(const half* __restrict__ logits,
     float warp_val = (lane < ARGMAX_WARPS) ? s_val[lane] : -1e38f;
     int32_t warp_idx = (lane < ARGMAX_WARPS) ? s_idx[lane] : 0x7fffffff;
 
-    #pragma unroll
+#pragma unroll
     for (int offset = 8; offset > 0; offset /= 2) {
       const float other_val = __shfl_down_sync(0xffffffff, warp_val, offset);
       const int32_t other_idx = __shfl_down_sync(0xffffffff, warp_idx, offset);

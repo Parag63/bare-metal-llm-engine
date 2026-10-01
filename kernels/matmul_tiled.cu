@@ -145,17 +145,13 @@ constexpr int kTile = 32;
 //   Only threads with row < M && col < N write their result to global memory.
 //===----------------------------------------------------------------------===//
 __global__ void matmul_tiled_kernel(const float* __restrict__ A,
-                                    const float* __restrict__ B,
-                                    float* __restrict__ C,
-                                    std::int64_t M, std::int64_t N,
-                                    std::int64_t K) {
+                                    const float* __restrict__ B, float* __restrict__ C,
+                                    std::int64_t M, std::int64_t N, std::int64_t K) {
   __shared__ float As[kTile][kTile];
   __shared__ float Bs[kTile][kTile];
 
-  const std::int64_t row =
-      static_cast<std::int64_t>(blockIdx.y) * kTile + threadIdx.y;
-  const std::int64_t col =
-      static_cast<std::int64_t>(blockIdx.x) * kTile + threadIdx.x;
+  const std::int64_t row = static_cast<std::int64_t>(blockIdx.y) * kTile + threadIdx.y;
+  const std::int64_t col = static_cast<std::int64_t>(blockIdx.x) * kTile + threadIdx.x;
 
   float acc = 0.0f;
   const std::int64_t num_tiles = (K + kTile - 1) / kTile;
@@ -207,7 +203,8 @@ void matmul_tiled(const float* A, const float* B, float* C, std::int64_t M,
 
   // An Mx0 times 0xN product is the MxN zero matrix.
   if (K == 0) {
-    CUDA_CHECK(cudaMemsetAsync(C, 0, static_cast<std::size_t>(M * N) * sizeof(float), stream));
+    CUDA_CHECK(
+        cudaMemsetAsync(C, 0, static_cast<std::size_t>(M * N) * sizeof(float), stream));
     return;
   }
 

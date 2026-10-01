@@ -83,7 +83,7 @@ class Storage {
 
   Storage(const Storage&) = delete;
   Storage& operator=(const Storage&) = delete;
-  Storage(Storage&&) = delete;             // shared via shared_ptr; never moved
+  Storage(Storage&&) = delete;  // shared via shared_ptr; never moved
   Storage& operator=(Storage&&) = delete;
 
   void* data() { return ptr_; }
@@ -123,9 +123,9 @@ class Tensor {
   const std::vector<std::int64_t>& shape() const { return shape_; }
   const std::vector<std::int64_t>& strides() const { return strides_; }
   std::int64_t dim() const { return static_cast<std::int64_t>(shape_.size()); }
-  std::int64_t size(std::int64_t axis) const;   ///< negative axis counts from the end
-  std::int64_t numel() const;                   ///< product of shape, 0 for empty
-  std::size_t nbytes() const;                   ///< storage footprint of the elements
+  std::int64_t size(std::int64_t axis) const;  ///< negative axis counts from the end
+  std::int64_t numel() const;                  ///< product of shape, 0 for empty
+  std::size_t nbytes() const;                  ///< storage footprint of the elements
 
   DType dtype() const { return dtype_; }
   Device device() const { return device_; }
@@ -183,7 +183,8 @@ class Tensor {
 
  private:
   /// Row-major strides for a given shape.
-  static std::vector<std::int64_t> contiguous_strides(const std::vector<std::int64_t>& shape);
+  static std::vector<std::int64_t> contiguous_strides(
+      const std::vector<std::int64_t>& shape);
 
   std::shared_ptr<Storage> storage_;
   std::vector<std::int64_t> shape_;

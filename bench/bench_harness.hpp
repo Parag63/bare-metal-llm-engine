@@ -108,13 +108,20 @@ namespace engbench {
 inline std::string escape_json(const std::string& s) {
   std::ostringstream o;
   for (char c : s) {
-    if (c == '"') o << "\\\"";
-    else if (c == '\\') o << "\\\\";
-    else if (c == '\b') o << "\\b";
-    else if (c == '\f') o << "\\f";
-    else if (c == '\n') o << "\\n";
-    else if (c == '\r') o << "\\r";
-    else if (c == '\t') o << "\\t";
+    if (c == '"')
+      o << "\\\"";
+    else if (c == '\\')
+      o << "\\\\";
+    else if (c == '\b')
+      o << "\\b";
+    else if (c == '\f')
+      o << "\\f";
+    else if (c == '\n')
+      o << "\\n";
+    else if (c == '\r')
+      o << "\\r";
+    else if (c == '\t')
+      o << "\\t";
     else if (static_cast<unsigned char>(c) <= 0x1f) {
       char buf[8];
       std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
@@ -152,8 +159,8 @@ inline Stats summarise(std::vector<double> samples) {
   s.min_ms = samples.front();
   s.max_ms = samples.back();
   const std::size_t mid = samples.size() / 2;
-  s.median_ms = (samples.size() % 2 == 0) ? 0.5 * (samples[mid - 1] + samples[mid])
-                                          : samples[mid];
+  s.median_ms =
+      (samples.size() % 2 == 0) ? 0.5 * (samples[mid - 1] + samples[mid]) : samples[mid];
   return s;
 }
 
@@ -312,7 +319,8 @@ struct Result {
     oss << "      \"gflops\": " << gflops() << ",\n";
     oss << "      \"gbps\": " << gbps() << ",\n";
     const double peak_bw = engine::cuda_peak_bandwidth_gbs();
-    const double pct_bw = (bytes > 0.0 && peak_bw > 0.0) ? (100.0 * gbps() / peak_bw) : 0.0;
+    const double pct_bw =
+        (bytes > 0.0 && peak_bw > 0.0) ? (100.0 * gbps() / peak_bw) : 0.0;
     oss << "      \"pct_peak_bw\": " << pct_bw << ",\n";
     oss << "      \"arithmetic_intensity\": " << arithmetic_intensity() << "\n";
     oss << "    }";
@@ -403,17 +411,25 @@ class Table {
       const bool noisy = spread > kNoisySpreadPct;
       if (noisy) any_noisy = true;
 
-      os << num(r.stats.median_ms) << " | " << num(r.stats.min_ms) << " | "
-         << num(spread) << "%" << (noisy ? " (!)" : "") << " | ";
+      const bool is_gemm = (r.name.find("matmul") != std::string::npos &&
+                            r.name.find("rmsnorm") == std::string::npos) ||
+                           (r.name.find("cublas") != std::string::npos &&
+                            r.name.find("gemv") == std::string::npos);
+
+      os << num(r.stats.median_ms) << " | " << num(r.stats.min_ms) << " | " << num(spread)
+         << "%" << (noisy ? " (!)" : "") << " | ";
       os << (r.flops > 0.0 ? num(r.gflops()) : std::string("--")) << " | ";
-      os << (r.bytes > 0.0 ? num(r.gbps()) : std::string("--")) << " | ";
-      if (r.bytes > 0.0 && peak_bw > 0.0) {
-        os << num(100.0 * r.gbps() / peak_bw) << "% | ";
+      if (is_gemm || r.bytes <= 0.0) {
+        os << "— | — | — |\n";
       } else {
-        os << "-- | ";
+        os << num(r.gbps()) << " | ";
+        if (peak_bw > 0.0) {
+          os << num(100.0 * r.gbps() / peak_bw) << "% | ";
+        } else {
+          os << "-- | ";
+        }
+        os << num(r.arithmetic_intensity()) << " |\n";
       }
-      os << (r.bytes > 0.0 ? num(r.arithmetic_intensity()) : std::string("--"))
-         << " |\n";
     }
 
     // Provenance. A benchmark table without the hardware, the build type and the
@@ -461,8 +477,10 @@ class Table {
     os << "  \"title\": \"" << escape_json(title_) << "\",\n";
     os << "  \"environment\": {\n";
     os << "    \"device\": \"" << escape_json(engine::cuda_device_summary()) << "\",\n";
-    os << "    \"driver_version\": \"" << escape_json(engine::cuda_driver_version()) << "\",\n";
-    os << "    \"clock_rate_mhz\": " << (live_sm_clock > 0 ? live_sm_clock : static_sm_clock) << ",\n";
+    os << "    \"driver_version\": \"" << escape_json(engine::cuda_driver_version())
+       << "\",\n";
+    os << "    \"clock_rate_mhz\": "
+       << (live_sm_clock > 0 ? live_sm_clock : static_sm_clock) << ",\n";
     os << "    \"live_sm_clock_mhz\": " << live_sm_clock << ",\n";
     os << "    \"static_sm_clock_mhz\": " << static_sm_clock << ",\n";
     os << "    \"peak_bandwidth_gbs\": " << peak_bw << ",\n";

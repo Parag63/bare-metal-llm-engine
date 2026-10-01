@@ -15,8 +15,7 @@
 
 namespace engine::cpu {
 
-void rmsnorm_linear(const float* in, const float* rms_weight,
-                    const float* W, float* out,
+void rmsnorm_linear(const float* in, const float* rms_weight, const float* W, float* out,
                     std::int64_t M, std::int64_t N, std::int64_t K, float eps) {
   std::vector<float> temp(static_cast<std::size_t>(K));
 
@@ -31,7 +30,8 @@ void rmsnorm_linear(const float* in, const float* rms_weight,
     }
 
     const double mean_sq = sumsq / static_cast<double>(K);
-    const float scale = static_cast<float>(1.0 / std::sqrt(mean_sq + static_cast<double>(eps)));
+    const float scale =
+        static_cast<float>(1.0 / std::sqrt(mean_sq + static_cast<double>(eps)));
 
     for (std::int64_t k = 0; k < K; ++k) {
       const float w = (rms_weight != nullptr) ? rms_weight[k] : 1.0f;
@@ -42,7 +42,8 @@ void rmsnorm_linear(const float* in, const float* rms_weight,
     for (std::int64_t n = 0; n < N; ++n) {
       double acc = 0.0;
       for (std::int64_t k = 0; k < K; ++k) {
-        acc += static_cast<double>(temp[static_cast<std::size_t>(k)]) * static_cast<double>(W[k * N + n]);
+        acc += static_cast<double>(temp[static_cast<std::size_t>(k)]) *
+               static_cast<double>(W[k * N + n]);
       }
       dst[n] = static_cast<float>(acc);
     }
