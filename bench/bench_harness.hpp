@@ -422,7 +422,11 @@ class Table {
     os << "\nHardware: " << engine::cuda_device_summary() << "\n";
 #if ENGINE_HAS_CUDA
     os << "Driver version: " << engine::cuda_driver_version() << "\n";
-    if (engine::cuda_clock_rate_khz() > 0) {
+    const int live_sm_clock = engine::cuda_live_sm_clock_mhz();
+    if (live_sm_clock > 0) {
+      os << "GPU SM clock: " << live_sm_clock << " MHz (live via NVML; nominal "
+         << (engine::cuda_clock_rate_khz() / 1000) << " MHz)\n";
+    } else if (engine::cuda_clock_rate_khz() > 0) {
       os << "GPU clock rate: " << (engine::cuda_clock_rate_khz() / 1000) << " MHz\n";
     }
 #endif
@@ -451,12 +455,16 @@ class Table {
   /// Print all results as a JSON document for scripting and plot generation.
   void print_json(std::ostream& os = std::cout) const {
     const double peak_bw = engine::cuda_peak_bandwidth_gbs();
+    const int live_sm_clock = engine::cuda_live_sm_clock_mhz();
+    const int static_sm_clock = engine::cuda_clock_rate_khz() / 1000;
     os << "{\n";
     os << "  \"title\": \"" << escape_json(title_) << "\",\n";
     os << "  \"environment\": {\n";
     os << "    \"device\": \"" << escape_json(engine::cuda_device_summary()) << "\",\n";
     os << "    \"driver_version\": \"" << escape_json(engine::cuda_driver_version()) << "\",\n";
-    os << "    \"clock_rate_mhz\": " << (engine::cuda_clock_rate_khz() / 1000) << ",\n";
+    os << "    \"clock_rate_mhz\": " << (live_sm_clock > 0 ? live_sm_clock : static_sm_clock) << ",\n";
+    os << "    \"live_sm_clock_mhz\": " << live_sm_clock << ",\n";
+    os << "    \"static_sm_clock_mhz\": " << static_sm_clock << ",\n";
     os << "    \"peak_bandwidth_gbs\": " << peak_bw << ",\n";
     os << "    \"git_hash\": \"" << escape_json(ENGINE_GIT_HASH) << "\",\n";
     os << "    \"build_description\": \"" << escape_json(build_description()) << "\"\n";

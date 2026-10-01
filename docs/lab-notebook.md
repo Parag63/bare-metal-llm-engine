@@ -67,6 +67,90 @@ Build type: RelWithDebInfo / Release
 
 ---
 
+## Week 08 — 2026-10-01 · Phase 1: Benchmark Credibility (Live NVML Clocks, Cold-Cache GEMV, cuBLAS 4096³, and llama-bench Baseline)
+
+**Objective / module:** Phase 1 (Benchmark Credibility) — Harden all benchmark provenance, introduce dynamic NVML SM clock querying, validate cold-cache DRAM streaming on GEMV via weight buffer pool rotation, establish baseline comparisons for cuBLAS 4096³ and unfused RMSNorm+Linear at $M=512$, and compare against external `llama-bench` on TinyLlama.
+
+### What I did
+
+1. **Dynamic NVML SM Clock Sampling (`include/engine/cuda_device.hpp`, `src/cuda_device.cpp`):**
+   - Implemented dynamic runtime querying of `NVML_CLOCK_SM` via `dlopen`/`dlsym` (`libnvidia-ml.so.1` on Linux) and `LoadLibrary`/`GetProcAddress` (`nvml.dll` on Windows).
+   - Embedded live SM clock directly into the benchmark footer and JSON provenance (`clock_rate_mhz`, `live_sm_clock_mhz`, `static_sm_clock_mhz`), with zero compile-time dependencies so CPU-only and non-NVIDIA builds remain completely clean.
+2. **Cold-Cache GEMV Benchmarking (`bench/bench_kernels.cu`):**
+   - To distinguish between warm L2 cache residency and true DRAM streaming bandwidth, added a weight buffer pool rotating across 4 distinct 64 MiB matrices (256 MiB total) at $4096^2$ and 2 distinct 192 MiB matrices (384 MiB total) at $12288 \times 4096$.
+   - Since the RTX 4070 SUPER L2 cache is 48 MiB, cycling across $> 256\text{ MiB}$ ensures every timed iteration accesses cold off-chip GDDR6X DRAM.
+   - Added an explicit `gemv (warm L2)` row to benchmark both modes side-by-side.
+3. **cuBLAS 4096³ SGEMM Baseline & Unfused RMSNorm+Linear Row (`bench/bench_kernels.cu`, `tools/generate_results_table.py`):**
+   - Exposed cuBLAS 4096³ SGEMM in the benchmark summary table as the authoritative hardware upper bound (Tensor Cores / assembly).
+   - Isolated the unfused baseline (`rmsnorm + matmul_tiled`) at $M=512, N=4096, K=4096$ to provide the apples-to-apples comparison against `rmsnorm_linear (fused)`.
+4. **External Baseline Evaluation with `llama-bench` (`tools/run_llama_bench.sh`):**
+   - Installed `llama-bench` (b11320, sm_89 CUDA backend) and evaluated TinyLlama-1.1B across FP16, Q8_0, and Q4_K_M for prompt processing ($p=512$) and token generation ($n=128$).
+5. **Single-Script Table Regeneration (`tools/generate_results_table.py`):**
+   - Extended script to parse JSON provenance, format all 9 kernels, format the baseline verification table, and update `README.md` in one command.
+
+### Does it work
+
+Full test suite verification:
+```
+ctest --test-dir build --output-on-failure
+100% tests passed, 0 tests failed out of 7 (97 individual tests passed)
+```
+
+### Prediction, written before measuring
+
+1. **Live SM Clock via NVML:** Predicted live clock during benchmark execution will boost above nominal base clock (nominal 2475 MHz -> live boost to ~2500–2800 MHz depending on thermals and power limit).
+2. **Cold-Cache GEMV:**
+   - For $1 \times 4096 \times 4096$: 64 MiB weight matrix. In warm cache, portions of the matrix remain in the 48 MiB L2 cache.
+   - In cold cache (rotating across 256 MiB pool), every load must hit off-chip GDDR6X DRAM.
+   - Prediction: Because our GEMV utilizes 128-bit vector loads (`float2`) and 8-warp cooperative reduction across 64 output columns per block, DRAM memory bus efficiency will remain exceptionally high ($\ge 440\text{ GB/s}$, $\ge 87\%$ of peak 504.0 GB/s), showing minimal degradation from warm L2 cache hits.
+3. **cuBLAS 4096³ SGEMM vs Tiled GEMM:**
+   - 4096³ requires 137.4 GFLOP.
+   - Hand-written FP32 `matmul_tiled` runs on CUDA cores (SIMT), predicted at ~2,500–2,600 GFLOP/s (~3.1% of theoretical peak TF32 compute).
+   - cuBLAS leverages Ada Lovelace 4th-gen Tensor Cores and deep pipeline scheduling, predicted to reach 20,000–30,000 GFLOP/s (approx $10\times$ faster than scalar FP32 shared-memory tiling).
+4. **Unfused vs Fused RMSNorm+Linear at $M=512$:**
+   - Unfused (`rmsnorm + matmul_tiled`): At $M=512$, tiled matmul benefits from 2D thread blocking ($32 \times 32$ shared tiles) across both dimensions, predicted at ~6.5–7.0 ms.
+   - Fused (`rmsnorm_linear`): 1D row broadcast implementation without 2D tiling, predicted to be slower (~13–14 ms) due to sub-optimal tile utilization, reinforcing our ADR 0006 negative result.
+5. **llama-bench TinyLlama:**
+   - Decode generation ($n=128$, $M=1$) will be memory-bandwidth bound: throughput should scale proportionally to inverse model size (Q4_K_M ~350–400 t/s, Q8_0 ~260–290 t/s, FP16 ~160–190 t/s).
+
+### Measurement
+
+Hardware: NVIDIA GeForce RTX 4070 SUPER | sm_89 | 12.0 GiB | 56 SMs | 504.0 GB/s
+Driver version: 13.2 | GPU SM clock: 2790 MHz (live via NVML; nominal 2475 MHz)
+Build: optimised (NDEBUG set), CUDA arch 89, git ad0f09b
+
+#### Kernel Benchmarks & Cold vs Warm Cache
+
+| Kernel | Size | Median (ms) | Min (ms) | GFLOP/s | GB/s | % Peak BW |
+|---|---|---:|---:|---:|---:|---:|
+| `matmul_tiled` | 4096³ | 53.66 ms | 53.39 ms | 2,561.5 | 3.75 | 0.74% |
+| `cublasSgemm (baseline)` | 4096³ | **5.58 ms** | **5.22 ms** | **24,636.7** | **36.09** | **7.16%** |
+| `gemv (warm L2)` | 1x4096x4096 (decode) | 0.144 ms | 0.143 ms | 232.7 | 465.6 | 92.38% |
+| `gemv (cold DRAM, rotated pool)` | 1x4096x4096 (decode) | **0.144 ms** | **0.143 ms** | **232.4** | **465.1** | **92.28%** |
+| `cublasSgemm (M=1)` | 1x4096x4096 (decode) | 0.144 ms | 0.143 ms | 232.4 | 465.0 | 92.26% |
+| `gemv (cold DRAM, rotated pool)` | 1x12288x4096 (MLP) | **0.425 ms** | **0.423 ms** | **236.9** | **474.0** | **94.04%** |
+| `cublasSgemm (M=1)` | 1x12288x4096 (MLP) | 0.484 ms | 0.479 ms | 208.1 | 416.4 | 82.60% |
+| `rmsnorm+matmul (separate)` | 512x4096x4096 | **6.76 ms** | **6.42 ms** | 2,543.9 | 13.66 | 2.71% |
+| `rmsnorm_linear (fused)` | 512x4096x4096 | 13.44 ms | 13.10 ms | 1,278.7 | 6.24 | 1.24% |
+
+#### External Baseline Comparison (`llama-bench` on TinyLlama-1.1B)
+
+| Model / Quant | Size on GPU | Params | Prompt Processing ($p=512$) | Token Generation ($n=128$) | Effective Bandwidth |
+|---|---|---|---:|---:|---:|
+| TinyLlama-1.1B (Q4_K_M) | 636.18 MiB | 1.10 B | 18,512.0 tokens/s | **391.2 tokens/s** | ~248.8 GB/s |
+| TinyLlama-1.1B (Q8_0) | 1.09 GiB | 1.10 B | 18,767.1 tokens/s | **275.2 tokens/s** | ~300.0 GB/s |
+| TinyLlama-1.1B (FP16) | 2.05 GiB | 1.10 B | 21,357.9 tokens/s | **181.3 tokens/s** | ~371.6 GB/s |
+
+### Prediction vs measurement — what the gap was
+
+1. **NVML Live Clock:** Measured live clock of **2790 MHz** during GPU execution compared to the nominal 2475 MHz. The dynamic boost was successfully recorded in both the markdown output and JSON provenance.
+2. **Cold DRAM Streaming on GEMV:** With a 256 MiB rotating buffer pool, GEMV achieved **465.1 GB/s (92.28% of peak)**, effectively identical to warm cache (465.6 GB/s). This confirms that our GEMV kernel memory pipeline is saturated and fully coalesced — it streams off-chip memory at the physical limit of the memory controller.
+3. **cuBLAS 4096³ SGEMM:** cuBLAS reached **24,636.7 GFLOP/s** ($9.62\times$ faster than our 2,561.5 GFLOP/s hand-written tiled kernel). As predicted, cuBLAS utilizes hardware Tensor Cores that execute matrix multiply-accumulate on 16x16 tiles per cycle, whereas our kernel executes pure FP32 SIMT instructions.
+4. **Unfused vs Fused RMSNorm+Linear at $M=512$:** As predicted, separate execution (6.76 ms) beats 1D fused execution (13.44 ms). At $M=512$, the intermediate tensor is 8 MiB, but 2D tiled matmul parallelism outweighs the 16 MiB DRAM roundtrip savings when compared against an un-tiled 1D row fusion kernel.
+5. **llama-bench Decode Scaling:** Decode generation throughput tracked the inverse model size closely ($391.2 \rightarrow 275.2 \rightarrow 181.3$ tokens/s), demonstrating the classic bandwidth-bound nature of autoregressive LLM decoding.
+
+---
+
 ## Week 07 — 2026-10-01 · Dedicated GEMV Kernel, JSON Benchmark Harness, and Roofline Analysis
 
 **Objective / module:** Action List [Must] deliverables — GEMV decode kernel (Item D2), JSON benchmark output (Item B1), Environment capture (Item A3), Roofline plot (Item A5), and Negative Results (Item A6).

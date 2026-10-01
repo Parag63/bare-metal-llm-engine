@@ -34,7 +34,7 @@ passed 97   failed 0   pending 0   skipped 0
 - [x] **[Should]** CI building CPU-only and running CPU tests (`.github/workflows/ci.yml`)
 - [x] **[Should]** Roofline plot script against bandwidth and compute ceilings (`tools/roofline_plot.py` -> `docs/roofline.png`)
 - [x] **[Should]** "Negative results" page for non-optimizations and bottlenecks (`docs/negative-results.md`)
-- [ ] **[Must]** Benchmark script running `llama.cpp`'s `llama-bench` on same machine, model, and prompt lengths (Scheduled for Module 8)
+- [x] **[Must]** Benchmark script running `llama.cpp`'s `llama-bench` on same machine, model, and prompt lengths (`tools/run_llama_bench.sh`, verified on TinyLlama FP16, Q8_0, Q4_K_M)
 - [ ] **[Stretch]** Thin HTTP streaming serving layer (Scheduled for Module 8)
 
 ### Completed Modules (1, 2, 3)

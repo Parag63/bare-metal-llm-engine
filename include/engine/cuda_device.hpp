@@ -39,4 +39,8 @@ std::string cuda_driver_version();
 /// Device clock rate in kHz. Returns 0 on CPU-only builds.
 int cuda_clock_rate_khz();
 
+/// Live SM clock rate in MHz queried dynamically via NVML at runtime.
+/// Falls back to nominal clock rate if NVML is not available. Returns 0 on CPU-only builds.
+int cuda_live_sm_clock_mhz();
+
 }  // namespace engine

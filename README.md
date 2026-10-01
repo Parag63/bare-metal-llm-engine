@@ -131,15 +131,17 @@ Seven foundational kernels, each introducing one idea and reusing everything bef
 implemented, verified against float64 reference data, and benchmarked on the RTX 4070
 SUPER (504.0 GB/s peak, sm_89) with locked GPU clocks (2475 MHz):
 
-| # | Kernel | New idea | GPU result (RTX 4070 SUPER) |
+| # | Kernel | New idea | GPU result |
 |---|---|---|---|
-| 1 | `vector_add` | threads, blocks, grid-stride loops | ✅ 432.6 GB/s (85.8% peak) |
-| 2 | `reduce_sum` | shared memory, `__syncthreads`, warp shuffles | ✅ 458.3 GB/s (90.9% peak) |
+| 1 | `vector_add` | threads, blocks, grid-stride loops | ✅ 423.6 GB/s (84.0% peak) |
+| 2 | `reduce_sum` | shared memory, `__syncthreads`, warp shuffles | ✅ 448.0 GB/s (88.9% peak) |
 | 3 | `softmax_rows` | per-row reduction, numerical stability | ✅ 435.7 GB/s (86.4% peak) |
 | 4 | `rmsnorm` | reusing the reduction pattern | ✅ 435.5 GB/s (86.4% peak) |
-| 5 | `matmul_naive` | 2-D indexing, memory traffic problem | ✅ 1,852 GFLOP/s @ 4096³ |
-| 6 | `matmul_tiled` | shared-memory tiling and data reuse | ✅ 2,563 GFLOP/s @ 4096³ (+38% over naive) |
-| 7 | `gemv` | decode token projection (M=1), 128-bit vector loads, warp shuffles | ✅ **473.5 GB/s (94.0% peak)** · $+13.7\%$ over cuBLAS |
+| 5 | `matmul_naive` | 2-D indexing, memory traffic problem | ✅ 1893 GFLOP/s @ 4096^3 |
+| 6 | `matmul_tiled` | shared-memory tiling and data reuse | ✅ 2621 GFLOP/s @ 4096^3 (+38%) |
+| 7 | `gemv` | decode token projection (M=1), 128-bit vector loads | ✅ 474.4 GB/s (94.1% peak) |
+| 8 | `residual_rmsnorm` | fused elementwise add + row reduction in 1 pass | ✅ 0.019 ms (+10.2% over separate) |
+| 9 | `rmsnorm_linear` | fused activation normalization + linear projection | ✅ 0.368 ms (+30.1% decode M=1) |
 
 ### Kernel fusion (Module 3 — complete)
 
@@ -157,6 +159,17 @@ Arithmetic intensity, against the RTX 4070 SUPER's ~70 FLOP/byte balance point (
 resource limits each one: `vector_add` is 0.08 (memory-bound by a factor of nearly a thousand),
 `gemv` is 0.25–0.50, `rmsnorm` 0.5, `softmax` 0.6, and matmul at 4096³ is ~170 — the first compute-bound
 kernel in the project, and the only one where being clever about arithmetic wins anything.
+
+### Benchmark Credibility & Baseline Verification
+
+| Baseline Comparison | Configuration | Baseline Result | Engine Result | Ratio / Notes |
+|---|---|---:|---:|---|
+| **cuBLAS SGEMM vs Tiled GEMM** | 4096³ FP32 | 25329 GFLOP/s (cuBLAS) | 2621 GFLOP/s (tiled) | 10.3% of cuBLAS (hand-written FP32 SIMT vs Tensor Cores) |
+| **Unfused vs Fused RMSNorm+Linear** | M=512, N=4096, K=4096 | 6.44 ms (separate) | 13.32 ms (fused) | +106.9% latency (1D row broadcast vs 2D shared tiling) |
+| **GEMV Cold DRAM vs Warm L2** | 1x4096x4096 (decode) | 465.5 GB/s (warm L2) | 465.5 GB/s (cold DRAM) | 92.3% peak DRAM (pure streaming via rotating weight buffers) |
+| **llama-bench External Baseline** | TinyLlama-1.1B (Q4_K_M) | 18,512.0 t/s (pp512) | 391.2 t/s (tg128) | 4-bit quantized weights (~249 GB/s effective) |
+| **llama-bench External Baseline** | TinyLlama-1.1B (Q8_0) | 18,767.1 t/s (pp512) | 275.2 t/s (tg128) | 8-bit quantized weights (~300 GB/s effective) |
+| **llama-bench External Baseline** | TinyLlama-1.1B (FP16) | 21,357.9 t/s (pp512) | 181.3 t/s (tg128) | 16-bit unquantized weights (~372 GB/s effective) |
 
 ## Design decisions
 

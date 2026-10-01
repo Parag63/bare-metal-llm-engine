@@ -447,22 +447,51 @@ void bench_gemv(Table& t, int reps) {
 
   for (const Case& c : cases) {
     const std::int64_t N = c.n, K = c.k;
-    DeviceBuffer<float> A(random_host(static_cast<std::size_t>(K * N), 1u));
-    DeviceBuffer<float> x(random_host(static_cast<std::size_t>(K), 2u));
+    const std::size_t matrix_elems = static_cast<std::size_t>(K * N);
+    const std::size_t matrix_bytes = matrix_elems * sizeof(float);
+    // Allocate enough distinct weight matrices to comfortably exceed the hardware L2 cache
+    // (RTX 4070 SUPER has 48 MiB; RTX 4090 has 72 MiB enabled / 96 MiB physical).
+    // For 4096^2 (64 MiB/matrix), 4 buffers = 256 MiB.
+    // For 12288x4096 (192 MiB/matrix), 2 buffers = 384 MiB.
+    const std::size_t num_buffers = (matrix_bytes >= 128 * 1024 * 1024) ? 2 : 4;
+    std::vector<DeviceBuffer<float>> A_pool;
+    A_pool.reserve(num_buffers);
+    for (std::size_t b = 0; b < num_buffers; ++b) {
+      A_pool.emplace_back(random_host(matrix_elems, static_cast<unsigned>(b + 1)));
+    }
+
+    DeviceBuffer<float> x(random_host(static_cast<std::size_t>(K), 2026u));
     DeviceBuffer<float> out(static_cast<std::size_t>(N));
 
     const double flops = 2.0 * d(N) * d(K);
     const double bytes = (d(K) * d(N) + d(K) + d(N)) * sizeof(float);
 
+    // Warm-cache measurement for 4096^2 (for comparison against cold DRAM)
+    if (N == 4096 && K == 4096) {
+      t.measure_gpu("gemv (warm L2)", c.label, flops, bytes,
+                    [&] {
+                      engine::cuda::gemv(A_pool[0].get(), x.get(), out.get(), N, K);
+                    },
+                    /*warmup=*/5, reps);
+    }
+
+    // Cold-cache measurements: rotating across the weight pool guarantees that each
+    // iteration accesses a matrix evicted from L2 cache, measuring pure off-chip DRAM streaming.
+    std::size_t iter_tiled = 0;
     t.measure_gpu("matmul_tiled (M=1)", c.label, flops, bytes,
                   [&] {
-                    engine::cuda::matmul_tiled(x.get(), A.get(), out.get(), 1, N, K);
+                    const auto& A_cur = A_pool[iter_tiled % num_buffers];
+                    iter_tiled++;
+                    engine::cuda::matmul_tiled(x.get(), A_cur.get(), out.get(), 1, N, K);
                   },
                   /*warmup=*/5, reps);
 
+    std::size_t iter_gemv = 0;
     t.measure_gpu("gemv", c.label, flops, bytes,
                   [&] {
-                    engine::cuda::gemv(A.get(), x.get(), out.get(), N, K);
+                    const auto& A_cur = A_pool[iter_gemv % num_buffers];
+                    iter_gemv++;
+                    engine::cuda::gemv(A_cur.get(), x.get(), out.get(), N, K);
                   },
                   /*warmup=*/5, reps);
 
@@ -472,11 +501,14 @@ void bench_gemv(Table& t, int reps) {
       cublasCreate(&handle);
       const float alpha = 1.0f;
       const float beta = 0.0f;
+      std::size_t iter_cublas = 0;
       t.measure_gpu("cublasSgemm (M=1)", c.label, flops, bytes,
                     [&] {
+                      const auto& A_cur = A_pool[iter_cublas % num_buffers];
+                      iter_cublas++;
                       cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
                                   static_cast<int>(N), 1, static_cast<int>(K),
-                                  &alpha, A.get(), static_cast<int>(N),
+                                  &alpha, A_cur.get(), static_cast<int>(N),
                                   x.get(), static_cast<int>(K),
                                   &beta, out.get(), static_cast<int>(N));
                     },

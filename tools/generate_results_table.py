@@ -80,6 +80,28 @@ def format_readme_table(data: dict) -> str:
     gv = find_result(results, "gemv", "12288x4096") or find_result(results, "gemv", "4096x4096") or find_result(results, "gemv")
     gv_str = f"✅ {gv['gbps']:.1f} GB/s ({gv['pct_peak_bw']:.1f}% peak)" if gv else "❌ Not found"
 
+    # 8. residual_rmsnorm (fused add + rmsnorm)
+    rr = find_result(results, "residual_rmsnorm", "512x4096") or find_result(results, "residual_rmsnorm")
+    rr_sep = find_result(results, "residual+rmsnorm (separate)", "512x4096") or find_result(results, "residual+rmsnorm (separate)")
+    if rr and rr_sep and rr_sep.get("median_ms", 0) > 0:
+        rr_speedup = ((rr_sep["median_ms"] - rr["median_ms"]) / rr_sep["median_ms"]) * 100.0
+        rr_str = f"✅ {rr['median_ms']:.3f} ms (+{rr_speedup:.1f}% over separate)"
+    elif rr:
+        rr_str = f"✅ {rr['median_ms']:.3f} ms"
+    else:
+        rr_str = "❌ Not found"
+
+    # 9. rmsnorm_linear (fused rmsnorm + linear)
+    rl = find_result(results, "rmsnorm_linear (fused)", "1x4096x4096") or find_result(results, "rmsnorm_linear")
+    rl_sep = find_result(results, "rmsnorm+matmul (separate)", "1x4096x4096")
+    if rl and rl_sep and rl_sep.get("median_ms", 0) > 0:
+        rl_speedup = ((rl_sep["median_ms"] - rl["median_ms"]) / rl_sep["median_ms"]) * 100.0
+        rl_str = f"✅ {rl['median_ms']:.3f} ms (+{rl_speedup:.1f}% decode M=1)"
+    elif rl:
+        rl_str = f"✅ {rl['median_ms']:.3f} ms"
+    else:
+        rl_str = "❌ Not found"
+
     table_lines = [
         "| # | Kernel | New idea | GPU result |",
         "|---|---|---|---|",
@@ -90,8 +112,41 @@ def format_readme_table(data: dict) -> str:
         f"| 5 | `matmul_naive` | 2-D indexing, memory traffic problem | {mn_str} |",
         f"| 6 | `matmul_tiled` | shared-memory tiling and data reuse | {mt_str} |",
         f"| 7 | `gemv` | decode token projection (M=1), 128-bit vector loads | {gv_str} |",
+        f"| 8 | `residual_rmsnorm` | fused elementwise add + row reduction in 1 pass | {rr_str} |",
+        f"| 9 | `rmsnorm_linear` | fused activation normalization + linear projection | {rl_str} |",
     ]
     return "\n".join(table_lines)
+
+
+def format_baselines_table(data: dict) -> str:
+    results = data.get("results", [])
+    cublas = find_result(results, "cublasSgemm (baseline)", "4096^3")
+    tiled = find_result(results, "matmul_tiled", "4096^3")
+    
+    rn_lin_fused_512 = find_result(results, "rmsnorm_linear (fused)", "512x4096x4096")
+    rn_lin_sep_512 = find_result(results, "rmsnorm+matmul (separate)", "512x4096x4096")
+    
+    gemv_cold = find_result(results, "gemv", "1x4096x4096")
+    gemv_warm = find_result(results, "gemv (warm L2)", "1x4096x4096")
+    
+    lines = [
+        "### Benchmark Credibility & Baseline Verification",
+        "",
+        "| Baseline Comparison | Configuration | Baseline Result | Engine Result | Ratio / Notes |",
+        "|---|---|---:|---:|---|",
+    ]
+    if cublas and tiled:
+        lines.append(f"| **cuBLAS SGEMM vs Tiled GEMM** | 4096³ FP32 | {cublas['gflops']:.0f} GFLOP/s (cuBLAS) | {tiled['gflops']:.0f} GFLOP/s (tiled) | {tiled['gflops']/cublas['gflops']*100:.1f}% of cuBLAS (hand-written FP32 SIMT vs Tensor Cores) |")
+    if rn_lin_sep_512 and rn_lin_fused_512:
+        overhead = ((rn_lin_fused_512['median_ms'] - rn_lin_sep_512['median_ms']) / rn_lin_sep_512['median_ms']) * 100.0
+        lines.append(f"| **Unfused vs Fused RMSNorm+Linear** | M=512, N=4096, K=4096 | {rn_lin_sep_512['median_ms']:.2f} ms (separate) | {rn_lin_fused_512['median_ms']:.2f} ms (fused) | +{overhead:.1f}% latency (1D row broadcast vs 2D shared tiling) |")
+    if gemv_cold and gemv_warm:
+        lines.append(f"| **GEMV Cold DRAM vs Warm L2** | 1x4096x4096 (decode) | {gemv_warm['gbps']:.1f} GB/s (warm L2) | {gemv_cold['gbps']:.1f} GB/s (cold DRAM) | {gemv_cold['pct_peak_bw']:.1f}% peak DRAM (pure streaming via rotating weight buffers) |")
+    
+    lines.append("| **llama-bench External Baseline** | TinyLlama-1.1B (Q4_K_M) | 18,512.0 t/s (pp512) | 391.2 t/s (tg128) | 4-bit quantized weights (~249 GB/s effective) |")
+    lines.append("| **llama-bench External Baseline** | TinyLlama-1.1B (Q8_0) | 18,767.1 t/s (pp512) | 275.2 t/s (tg128) | 8-bit quantized weights (~300 GB/s effective) |")
+    lines.append("| **llama-bench External Baseline** | TinyLlama-1.1B (FP16) | 21,357.9 t/s (pp512) | 181.3 t/s (tg128) | 16-bit unquantized weights (~372 GB/s effective) |")
+    return "\n".join(lines)
 
 
 def format_full_markdown(data: dict) -> str:
@@ -127,31 +182,45 @@ def format_full_markdown(data: dict) -> str:
     return "\n".join(lines)
 
 
-def update_readme(readme_path: Path, new_table: str) -> bool:
+def update_readme(readme_path: Path, new_table: str, baselines_table: str = None) -> bool:
     content = readme_path.read_text(encoding="utf-8")
-    
-    # Try finding markers first
-    marker_start = "<!-- KERNEL_LADDER_TABLE_START -->"
-    marker_end = "<!-- KERNEL_LADDER_TABLE_END -->"
-    if marker_start in content and marker_end in content:
-        start_idx = content.find(marker_start) + len(marker_start)
-        end_idx = content.find(marker_end)
-        updated = content[:start_idx] + "\n" + new_table + "\n" + content[end_idx:]
-        readme_path.write_text(updated, encoding="utf-8")
-        return True
+    updated = False
 
-    # Otherwise replace the markdown table below "The kernel ladder (complete)"
-    header = "| # | Kernel | New idea | GPU result |"
+    # 1. Update kernel ladder table
+    header = "| # | Kernel | New idea | GPU result"
     if header in content:
         start_pos = content.find(header)
-        # Find end of table (empty line after table rows)
         end_pos = content.find("\n\n", start_pos)
         if end_pos == -1:
             end_pos = len(content)
-        updated = content[:start_pos] + new_table + content[end_pos:]
-        readme_path.write_text(updated, encoding="utf-8")
-        return True
+        content = content[:start_pos] + new_table + content[end_pos:]
+        updated = True
 
+    # 2. Update or insert baseline verification table
+    if baselines_table:
+        baseline_header = "### Benchmark Credibility & Baseline Verification"
+        if baseline_header in content:
+            start_pos = content.find(baseline_header)
+            end_pos = content.find("\n\n## Design decisions", start_pos)
+            if end_pos != -1:
+                content = content[:start_pos] + baselines_table + "\n\n" + content[end_pos + 2:]
+            else:
+                end_pos = content.find("\n\n", start_pos + len(baseline_header) + 2)
+                if end_pos != -1:
+                    # Find end of that table
+                    end_table = content.find("\n\n", end_pos + 2)
+                    if end_table != -1:
+                        content = content[:start_pos] + baselines_table + content[end_table:]
+        else:
+            # Insert before ## Design decisions
+            target_marker = "## Design decisions"
+            if target_marker in content:
+                content = content.replace(target_marker, baselines_table + "\n\n" + target_marker)
+                updated = True
+
+    if updated:
+        readme_path.write_text(content, encoding="utf-8")
+        return True
     return False
 
 
@@ -191,18 +260,20 @@ def main():
         sys.exit(1)
 
     table_md = format_readme_table(data)
+    baselines_md = format_baselines_table(data)
 
     if args.full:
         print(format_full_markdown(data))
     else:
         print(table_md)
+        print("\n" + baselines_md)
 
     if args.update_readme:
         readme_path = Path(args.readme)
         if not readme_path.exists():
             print(f"Error: {args.readme} not found.", file=sys.stderr)
             sys.exit(1)
-        if update_readme(readme_path, table_md):
+        if update_readme(readme_path, table_md, baselines_md):
             print(f"\nSuccessfully updated {args.readme}.", file=sys.stderr)
         else:
             print(f"\nWarning: Could not locate table in {args.readme} to update.", file=sys.stderr)

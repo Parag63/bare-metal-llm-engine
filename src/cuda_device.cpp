@@ -19,6 +19,14 @@
 
 #if ENGINE_HAS_CUDA
 #include <cuda_runtime.h>
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 #endif
 
 namespace engine {
@@ -30,6 +38,7 @@ int cuda_device_count() { return 0; }
 double cuda_peak_bandwidth_gbs() { return 0.0; }
 std::string cuda_driver_version() { return "none"; }
 int cuda_clock_rate_khz() { return 0; }
+int cuda_live_sm_clock_mhz() { return 0; }
 void print_cuda_device_info() {
   std::printf("CUDA: not available -- this is a CPU-only build.\n");
 }
@@ -75,6 +84,62 @@ int cuda_clock_rate_khz() {
   cudaDeviceProp prop{};
   if (!get_props(prop)) return 0;
   return prop.clockRate;
+}
+
+int cuda_live_sm_clock_mhz() {
+  if (cuda_device_count() == 0) return 0;
+
+  using nvmlReturn_t = int;
+  using nvmlDevice_t = void*;
+  constexpr int kNvmlClockSm = 1;
+
+  using pfn_nvmlInit_v2 = nvmlReturn_t (*)();
+  using pfn_nvmlDeviceGetHandleByIndex_v2 = nvmlReturn_t (*)(unsigned int, nvmlDevice_t*);
+  using pfn_nvmlDeviceGetClockInfo = nvmlReturn_t (*)(nvmlDevice_t, int, unsigned int*);
+  using pfn_nvmlShutdown = nvmlReturn_t (*)();
+
+#if defined(_WIN32)
+  HMODULE lib = LoadLibraryA("nvml.dll");
+  if (!lib) return cuda_clock_rate_khz() / 1000;
+  auto fn_init = reinterpret_cast<pfn_nvmlInit_v2>(GetProcAddress(lib, "nvmlInit_v2"));
+  auto fn_get_handle = reinterpret_cast<pfn_nvmlDeviceGetHandleByIndex_v2>(GetProcAddress(lib, "nvmlDeviceGetHandleByIndex_v2"));
+  auto fn_get_clock = reinterpret_cast<pfn_nvmlDeviceGetClockInfo>(GetProcAddress(lib, "nvmlDeviceGetClockInfo"));
+  auto fn_shutdown = reinterpret_cast<pfn_nvmlShutdown>(GetProcAddress(lib, "nvmlShutdown"));
+#else
+  void* lib = dlopen("libnvidia-ml.so.1", RTLD_LAZY);
+  if (!lib) lib = dlopen("libnvidia-ml.so", RTLD_LAZY);
+  if (!lib) return cuda_clock_rate_khz() / 1000;
+  auto fn_init = reinterpret_cast<pfn_nvmlInit_v2>(dlsym(lib, "nvmlInit_v2"));
+  auto fn_get_handle = reinterpret_cast<pfn_nvmlDeviceGetHandleByIndex_v2>(dlsym(lib, "nvmlDeviceGetHandleByIndex_v2"));
+  auto fn_get_clock = reinterpret_cast<pfn_nvmlDeviceGetClockInfo>(dlsym(lib, "nvmlDeviceGetClockInfo"));
+  auto fn_shutdown = reinterpret_cast<pfn_nvmlShutdown>(dlsym(lib, "nvmlShutdown"));
+#endif
+
+  int result_clock = 0;
+  if (fn_init && fn_get_handle && fn_get_clock) {
+    if (fn_init() == 0) {
+      int dev = 0;
+      if (cudaGetDevice(&dev) == cudaSuccess) {
+        nvmlDevice_t handle = nullptr;
+        if (fn_get_handle(static_cast<unsigned int>(dev), &handle) == 0) {
+          unsigned int clock_mhz = 0;
+          if (fn_get_clock(handle, kNvmlClockSm, &clock_mhz) == 0) {
+            result_clock = static_cast<int>(clock_mhz);
+          }
+        }
+      }
+      if (fn_shutdown) fn_shutdown();
+    }
+  }
+
+#if defined(_WIN32)
+  FreeLibrary(lib);
+#else
+  dlclose(lib);
+#endif
+
+  if (result_clock > 0) return result_clock;
+  return cuda_clock_rate_khz() / 1000;
 }
 
 std::string cuda_device_summary() {
@@ -127,7 +192,13 @@ void print_cuda_device_info() {
   std::printf("  Shared mem / SM           : %zu B\n", prop.sharedMemPerMultiprocessor);
   std::printf("  Registers / block         : %d\n", prop.regsPerBlock);
   std::printf("  L2 cache                  : %d KiB\n", prop.l2CacheSize / 1024);
-  std::printf("  Clock rate                : %.0f MHz\n", prop.clockRate / 1000.0);
+  const int live_clk = cuda_live_sm_clock_mhz();
+  if (live_clk > 0) {
+    std::printf("  Clock rate                : %d MHz (live SM via NVML; nominal %.0f MHz)\n",
+                live_clk, prop.clockRate / 1000.0);
+  } else {
+    std::printf("  Clock rate                : %.0f MHz\n", prop.clockRate / 1000.0);
+  }
   std::printf("  Async engines             : %d\n", prop.asyncEngineCount);
   std::printf("  Concurrent kernels        : %s\n", prop.concurrentKernels ? "yes" : "no");
   std::printf("===================================================================\n");
