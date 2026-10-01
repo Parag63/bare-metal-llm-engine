@@ -423,7 +423,14 @@ void bench_rmsnorm_linear(Table& t, int reps) {
                   },
                   /*warmup=*/3, reps);
 
-    t.measure_gpu("rmsnorm_linear (fused)", label, flops, fused_bytes,
+    t.measure_gpu("rmsnorm_linear (1D fused)", label, flops, fused_bytes,
+                  [&] {
+                    engine::cuda::rmsnorm_linear_fused_direct(in.get(), weight.get(), W.get(), out.get(),
+                                                              M, N, K, 1e-5f);
+                  },
+                  /*warmup=*/3, reps);
+
+    t.measure_gpu("rmsnorm_linear (dispatched)", label, flops, fused_bytes,
                   [&] {
                     engine::cuda::rmsnorm_linear(in.get(), weight.get(), W.get(), out.get(),
                                                  M, N, K, 1e-5f);

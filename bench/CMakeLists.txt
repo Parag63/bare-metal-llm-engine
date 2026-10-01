@@ -76,6 +76,14 @@ if(ENGINE_CUDA_ENABLED)
   set_target_properties(bench_kernels PROPERTIES
     CUDA_ARCHITECTURES "${ENGINE_CUDA_ARCH}")
 
+  add_executable(profile_dram profile_dram.cu)
+  target_link_libraries(profile_dram PRIVATE engine)
+  target_include_directories(profile_dram PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  engine_apply_warnings(profile_dram)
+
+  set_target_properties(profile_dram PROPERTIES
+    CUDA_ARCHITECTURES "${ENGINE_CUDA_ARCH}")
+
   # ENGINE_BENCH_CUBLAS is read with #if, so it must always be defined to something --
   # otherwise `#if ENGINE_BENCH_CUBLAS` silently evaluates an undefined identifier as 0
   # and the cuBLAS rows vanish with no indication why. Defining it to 0 explicitly

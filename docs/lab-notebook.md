@@ -67,7 +67,103 @@ Build type: RelWithDebInfo / Release
 
 ---
 
+## Week 08 (Part 2) — 2026-10-01 · Phase 2: Fusion Validation (Nsight Compute DRAM Profiling, 1D vs 2D Tiling Trade-Off, and Dynamic Dispatch)
+
+**Objective / module:** Phase 2 (Fusion Validation) — Empirically validate theoretical DRAM traffic models (8 MiB and 16 MiB predictions) using NVIDIA Nsight Compute (`ncu`) hardware performance counters, prove the architectural root cause of the $M=512$ fusion regression, restrict dispatch in `kernels/rmsnorm_linear.cu` to decode shapes ($M=1$), and ensure 100% test suite correctness.
+
+### What I did
+
+1. **Hardware Counter Enablement & Dedicated Profiler Harness (`bench/profile_dram.cu`):**
+   - Configured non-root GPU performance counter permissions (`RmProfilingAdminOnly = 0`) on Machine B (RTX 4070 SUPER, sm_89, nvcc 12.6).
+   - Created `bench/profile_dram.cu` with dedicated single-pass kernel executions and L2 cache flushing buffers ($32\text{ M floats} = 128\text{ MiB}$) to guarantee repeatable, isolated hardware counter sampling.
+   - Built and linked `profile_dram` under `ENGINE_CUDA_ENABLED` in `bench/CMakeLists.txt`.
+2. **Nsight Compute Profiling (`dram__bytes.sum`, `dram__bytes_read.sum`, `dram__bytes_write.sum`, `lts__t_bytes.sum`):**
+   - Measured exact DRAM and LTS/L2 byte metrics across all 6 key configurations:
+     - `residual_separate_512` vs `residual_fused_512`
+     - `rmsnorm_linear_separate_512` vs `rmsnorm_linear_fused_512`
+     - `rmsnorm_linear_separate_1` vs `rmsnorm_linear_fused_1`
+3. **Architectural Dispatch Implementation (`kernels/rmsnorm_linear.cu`, `include/engine/kernels.hpp`):**
+   - Dispatched the 1D fused kernel strictly at $M=1$ (decode phase), where it avoids kernel launch overhead and 2D tile quantization waste (+43% to +2.52x faster than separate).
+   - Dispatched separate `rmsnorm` + `matmul_tiled` using a stream-ordered asynchronous temporary buffer (`cudaMallocAsync` / `cudaFreeAsync`) for $M > 1$ (prefill phase), preserving 2D shared-memory tile reuse of matrix $W$ across tokens and preventing the 2.29 GB DRAM read penalty.
+   - Exposed `rmsnorm_linear_fused_direct` for explicit profiling and negative result benchmarking.
+4. **Documentation & Provenance Updates (`docs/negative-results.md`, `README.md`, `docs/roofline.png`):**
+   - Documented the microarchitectural analysis and empirical NCU tables in `docs/negative-results.md`.
+   - Updated `bench/bench_kernels.cu` to benchmark `rmsnorm_linear (1D fused)` alongside `rmsnorm_linear (dispatched)`.
+   - Regenerated `results.json`, updated `README.md`, and refreshed `docs/roofline.png`.
+
+### Does it work
+
+```
+ctest --test-dir build --output-on-failure
+100% tests passed, 0 tests failed out of 7 (97 individual tests passed)
+```
+
+### Prediction, written before measuring
+
+1. **`residual_rmsnorm` at $512 \times 4096$:**
+   - In separate execution: `vector_add` reads $x$ (8 MiB) and $res$ (8 MiB), writing $temp\_sum$ (8 MiB); `rmsnorm` reads $temp\_sum$ (8 MiB) and $weight$ (16 KiB), writing $norm\_out$ (8 MiB).
+   - In fused execution: $temp\_sum$ is accumulated in registers; $x$, $res$, and $weight$ are read once, and $norm\_out$ and $sum\_out$ are written once.
+   - Prediction: Fusing eliminates exactly **8.0 MiB (8,388,608 bytes)** of DRAM read traffic ($temp\_sum$).
+2. **`rmsnorm_linear` at $M=512, K=4096, N=4096$ (Prefill):**
+   - Theoretical model predicted 16 MiB DRAM roundtrip savings ($512 \times 4096 \times 4$ B write + 8 MiB read).
+   - Architectural hypothesis: 1D row fusion computes one output row strip per block and cannot share weight tiles $W$ across tokens ($M=512$). As a result, weight columns will be re-read from memory for every block.
+   - Prediction: The lack of 2D tile reuse will cause a massive memory amplification for matrix $W$, severely overwhelming the 16 MiB intermediate savings and causing a $2\times$ slowdown.
+3. **`rmsnorm_linear` at $M=1, K=4096, N=4096$ (Decode):**
+   - Intermediate activation is $1 \times 4096 \times 4\text{ B} = 16\text{ KiB}$.
+   - Hardware hypothesis: 16 KiB resides entirely within the 48 MiB L2 cache. In separate execution, it will never touch DRAM.
+   - Prediction: DRAM intermediate savings will be **0 MiB**. The speedup will originate entirely from eliminating launch overhead and avoiding 2D tile quantization waste on 1D vector workloads.
+
+### Measurement
+
+Hardware: NVIDIA GeForce RTX 4070 SUPER | sm_89 | 12.0 GiB | 56 SMs | 504.0 GB/s
+Driver version: 13.2 | GPU SM clock: 2790 MHz (live via NVML; nominal 2475 MHz)
+Build: optimised (NDEBUG set), CUDA arch 89, git df76319
+
+#### Nsight Compute (`ncu`) Hardware Performance Counters
+
+| Kernel Execution | Configuration | `dram__bytes_read` | `dram__bytes_write` | `dram__bytes.sum` | `lts__t_bytes.sum` (L2) | Kernel Latency |
+|---|---|---:|---:|---:|---:|---:|
+| **Separate:** `vector_add` + `rmsnorm` | $512 \times 4096$ | 25.20 MB | 0.08 MB | 25.20 MB | 49.59 MB | 0.022 ms |
+| **Fused:** `residual_rmsnorm` | $512 \times 4096$ | 16.81 MB | 0.08 MB | 16.89 MB | 42.91 MB | 0.019 ms |
+| **Delta (Residual Fusion)** | | **-8.39 MB (-8.0 MiB)** | **~0 MB** | **-8.31 MB** | **-6.68 MB** | **-13.6% (WIN)** |
+| | | | | | | |
+| **Separate:** `rmsnorm` + `matmul_tiled` | $512 \times 4096 \times 4096$ | 1.08 GB | 27.10 MB | 1.11 GB | 2.24 GB | 6.43 ms |
+| **1D Fused:** `rmsnorm_linear_kernel` | $512 \times 4096 \times 4096$ | 3.37 GB | 153.07 MB | 3.52 GB | 33.61 GB | 13.48 ms |
+| **Delta (Prefill Fusion)** | | **+2.29 GB (+212%)** | **+125.9 MB** | **+2.41 GB** | **+31.37 GB** | **+109.6% (LOSS)** |
+| | | | | | | |
+| **Separate:** `rmsnorm` + `matmul_tiled` | $1 \times 4096 \times 4096$ | 73.59 MB | 0.03 MB | 73.63 MB | 76.00 MB | 0.524 ms |
+| **1D Fused:** `rmsnorm_linear_kernel` | $1 \times 4096 \times 4096$ | 67.16 MB | 1.27 MB | 68.43 MB | 67.84 MB | 0.366 ms |
+| **Delta (Decode Fusion)** | | **-6.43 MB** | **+1.24 MB** | **-5.20 MB** | **-8.16 MB** | **-30.2% (WIN)** |
+
+#### Benchmark Timings with Dynamic Dispatch (`bench_kernels`)
+
+| Kernel Name | Shape | Min Latency | Median Latency | Effective BW / GFLOP/s | Notes |
+|---|---|---:|---:|---:|---|
+| `rmsnorm+matmul (separate)` | 1x4096x4096 | 0.524 ms | 0.527 ms | 127.4 GB/s | Baseline separate execution |
+| `rmsnorm_linear (1D fused)` | 1x4096x4096 | **0.366 ms** | **0.369 ms** | 182.2 GB/s | Fused 1D decode (+43% vs separate) |
+| `rmsnorm_linear (dispatched)` | 1x4096x4096 | **0.366 ms** | **0.372 ms** | 180.7 GB/s | Dispatches fused kernel |
+| `rmsnorm+matmul (separate)` | 512x4096x4096 | **6.43 ms** | **7.27 ms** | 2364.0 GFLOP/s | 2D shared-memory tile reuse |
+| `rmsnorm_linear (1D fused)` | 512x4096x4096 | 13.48 ms | 14.42 ms | 1192.1 GFLOP/s | 1D fusion without 2D reuse (2x regression) |
+| `rmsnorm_linear (dispatched)` | 512x4096x4096 | **7.08 ms** | **8.33 ms** | 2062.6 GFLOP/s | Dispatches tiled separate path |
+| `rmsnorm+matmul (separate)` | 1x12288x4096 | 1.23 ms | 1.25 ms | 161.6 GB/s | Baseline separate execution |
+| `rmsnorm_linear (1D fused)` | 1x12288x4096 | **0.487 ms** | **0.492 ms** | 409.0 GB/s | Fused decode (+2.52x vs separate) |
+| `rmsnorm_linear (dispatched)` | 1x12288x4096 | **0.487 ms** | **0.492 ms** | 409.0 GB/s | Dispatches fused kernel |
+
+### Prediction vs measurement — what the gap was
+
+1. **`residual_rmsnorm` 8 MiB Reduction:** Predicted 8.0 MiB read traffic savings. Measured exact reduction was **8.39 MB (8,388,608 bytes = 8.00 MiB)**. The empirical hardware counter confirmed the exact analytical derivation.
+2. **`rmsnorm_linear` Prefill Memory Amplification:** NCU profiling confirmed the hypothesis with remarkable clarity. Fused execution saved the 16 MiB intermediate tensor, but because 1D row fusion cannot share weight tiles across tokens, DRAM read traffic exploded by **+2.29 GB (+212%)** and L2 traffic surged by **+31.37 GB (15x)**. The 16 MiB savings was dwarfed $143\times$ over by the weight reload penalty, confirming why 1D fusion at $M=512$ is counter-productive.
+3. **`rmsnorm_linear` Decode ($M=1$):** As predicted, the 16 KiB activation tensor is completely resident in L2 cache (0 MiB intermediate DRAM savings). The observed $+43\%$ to $+2.52\times$ speedup is strictly attributable to launch latency elimination and avoidance of 2D tile quantization waste on 1D vector workloads.
+4. **Dynamic Dispatch:** By gating dispatch on $M==1$, `rmsnorm_linear` achieves the best of both worlds: decode latency drops to 0.366 ms, while prefill latency stays at 7.08 ms, eliminating the $2\times$ regression entirely.
+
+### What did not work
+
+- **1D Row-Fused RMSNorm+Linear for Prefill ($M > 1$):** Slower than separate kernels by $2\times$ due to the destruction of 2D shared-memory tile reuse for matrix $W$. Recorded in `docs/negative-results.md` with full NCU counter evidence.
+
+---
+
 ## Week 08 — 2026-10-01 · Phase 1: Benchmark Credibility (Live NVML Clocks, Cold-Cache GEMV, cuBLAS 4096³, and llama-bench Baseline)
+
 
 **Objective / module:** Phase 1 (Benchmark Credibility) — Harden all benchmark provenance, introduce dynamic NVML SM clock querying, validate cold-cache DRAM streaming on GEMV via weight buffer pool rotation, establish baseline comparisons for cuBLAS 4096³ and unfused RMSNorm+Linear at $M=512$, and compare against external `llama-bench` on TinyLlama.
 

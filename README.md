@@ -133,15 +133,15 @@ SUPER (504.0 GB/s peak, sm_89) with locked GPU clocks (2475 MHz):
 
 | # | Kernel | New idea | GPU result |
 |---|---|---|---|
-| 1 | `vector_add` | threads, blocks, grid-stride loops | ✅ 423.6 GB/s (84.0% peak) |
-| 2 | `reduce_sum` | shared memory, `__syncthreads`, warp shuffles | ✅ 448.0 GB/s (88.9% peak) |
-| 3 | `softmax_rows` | per-row reduction, numerical stability | ✅ 435.7 GB/s (86.4% peak) |
-| 4 | `rmsnorm` | reusing the reduction pattern | ✅ 435.5 GB/s (86.4% peak) |
-| 5 | `matmul_naive` | 2-D indexing, memory traffic problem | ✅ 1893 GFLOP/s @ 4096^3 |
-| 6 | `matmul_tiled` | shared-memory tiling and data reuse | ✅ 2621 GFLOP/s @ 4096^3 (+38%) |
-| 7 | `gemv` | decode token projection (M=1), 128-bit vector loads | ✅ 474.4 GB/s (94.1% peak) |
-| 8 | `residual_rmsnorm` | fused elementwise add + row reduction in 1 pass | ✅ 0.019 ms (+10.2% over separate) |
-| 9 | `rmsnorm_linear` | fused activation normalization + linear projection | ✅ 0.368 ms (+30.1% decode M=1) |
+| 1 | `vector_add` | threads, blocks, grid-stride loops | ✅ 417.6 GB/s (82.8% peak) |
+| 2 | `reduce_sum` | shared memory, `__syncthreads`, warp shuffles | ✅ 447.3 GB/s (88.7% peak) |
+| 3 | `softmax_rows` | per-row reduction, numerical stability | ✅ 434.6 GB/s (86.2% peak) |
+| 4 | `rmsnorm` | reusing the reduction pattern | ✅ 431.3 GB/s (85.6% peak) |
+| 5 | `matmul_naive` | 2-D indexing, memory traffic problem | ✅ 1732 GFLOP/s @ 4096^3 |
+| 6 | `matmul_tiled` | shared-memory tiling and data reuse | ✅ 2398 GFLOP/s @ 4096^3 (+38%) |
+| 7 | `gemv` | decode token projection (M=1), 128-bit vector loads | ✅ 472.8 GB/s (93.8% peak) |
+| 8 | `residual_rmsnorm` | fused elementwise add + row reduction in 1 pass | ✅ 0.020 ms (+13.2% over separate) |
+| 9 | `rmsnorm_linear` | fused activation normalization + linear projection | ✅ 0.369 ms (+30.1% decode M=1) |
 
 ### Kernel fusion (Module 3 — complete)
 
@@ -164,9 +164,8 @@ kernel in the project, and the only one where being clever about arithmetic wins
 
 | Baseline Comparison | Configuration | Baseline Result | Engine Result | Ratio / Notes |
 |---|---|---:|---:|---|
-| **cuBLAS SGEMM vs Tiled GEMM** | 4096³ FP32 | 25329 GFLOP/s (cuBLAS) | 2621 GFLOP/s (tiled) | 10.3% of cuBLAS (hand-written FP32 SIMT vs Tensor Cores) |
-| **Unfused vs Fused RMSNorm+Linear** | M=512, N=4096, K=4096 | 6.44 ms (separate) | 13.32 ms (fused) | +106.9% latency (1D row broadcast vs 2D shared tiling) |
-| **GEMV Cold DRAM vs Warm L2** | 1x4096x4096 (decode) | 465.5 GB/s (warm L2) | 465.5 GB/s (cold DRAM) | 92.3% peak DRAM (pure streaming via rotating weight buffers) |
+| **cuBLAS SGEMM vs Tiled GEMM** | 4096³ FP32 | 22142 GFLOP/s (cuBLAS) | 2398 GFLOP/s (tiled) | 10.8% of cuBLAS (hand-written FP32 SIMT vs Tensor Cores) |
+| **GEMV Cold DRAM vs Warm L2** | 1x4096x4096 (decode) | 459.1 GB/s (warm L2) | 459.1 GB/s (cold DRAM) | 91.1% peak DRAM (pure streaming via rotating weight buffers) |
 | **llama-bench External Baseline** | TinyLlama-1.1B (Q4_K_M) | 18,512.0 t/s (pp512) | 391.2 t/s (tg128) | 4-bit quantized weights (~249 GB/s effective) |
 | **llama-bench External Baseline** | TinyLlama-1.1B (Q8_0) | 18,767.1 t/s (pp512) | 275.2 t/s (tg128) | 8-bit quantized weights (~300 GB/s effective) |
 | **llama-bench External Baseline** | TinyLlama-1.1B (FP16) | 21,357.9 t/s (pp512) | 181.3 t/s (tg128) | 16-bit unquantized weights (~372 GB/s effective) |

@@ -142,10 +142,10 @@ __global__ void rmsnorm_linear_kernel(const float* __restrict__ in,
 
 }  // namespace
 
-void rmsnorm_linear(const float* in, const float* rms_weight,
-                    const float* W, float* out,
-                    std::int64_t M, std::int64_t N, std::int64_t K,
-                    float eps, cudaStream_t stream) {
+void rmsnorm_linear_fused_direct(const float* in, const float* rms_weight,
+                                 const float* W, float* out,
+                                 std::int64_t M, std::int64_t N, std::int64_t K,
+                                 float eps, cudaStream_t stream) {
   ENGINE_CHECK(M >= 0 && N >= 0 && K >= 0, "rmsnorm_linear: negative dimension");
   ENGINE_CHECK(in != nullptr && W != nullptr && out != nullptr,
                "rmsnorm_linear: null device pointer");
@@ -170,6 +170,36 @@ void rmsnorm_linear(const float* in, const float* rms_weight,
   rmsnorm_linear_kernel<<<grid, block, smem_bytes, stream>>>(
       in, rms_weight, W, out, M, N, K, eps);
   CUDA_CHECK_KERNEL();
+}
+
+void rmsnorm_linear(const float* in, const float* rms_weight,
+                    const float* W, float* out,
+                    std::int64_t M, std::int64_t N, std::int64_t K,
+                    float eps, cudaStream_t stream) {
+  ENGINE_CHECK(M >= 0 && N >= 0 && K >= 0, "rmsnorm_linear: negative dimension");
+  ENGINE_CHECK(in != nullptr && W != nullptr && out != nullptr,
+               "rmsnorm_linear: null device pointer");
+  ENGINE_CHECK(eps >= 0.0f, "rmsnorm_linear: eps must be non-negative");
+  if (M == 0 || N == 0 || K == 0) return;
+
+  // Architectural dispatch decision (see docs/negative-results.md and docs/adr/0009):
+  // At M=1 (decode phase), 1D row fusion eliminates launch latency and avoids 2D tile
+  // quantization waste (+43% to +2.5x speedup over separate).
+  // At M > 1 (prefill phase), 2D shared-memory tiling in matmul_tiled reuses the weight
+  // matrix across tokens, saving 2.29 GB of DRAM traffic compared to 1D row fusion
+  // (6.76 ms vs 13.44 ms at M=512). The 16 MiB intermediate activation savings of 1D
+  // fusion is dwarfed by the 2.29 GB weight reload penalty.
+  // Therefore, dispatch fused 1D kernel strictly at M=1, and separate tiled path for M > 1.
+  if (M == 1) {
+    rmsnorm_linear_fused_direct(in, rms_weight, W, out, M, N, K, eps, stream);
+  } else {
+    float* temp = nullptr;
+    const std::size_t temp_bytes = static_cast<std::size_t>(M * K) * sizeof(float);
+    CUDA_CHECK(cudaMallocAsync(&temp, temp_bytes, stream));
+    rmsnorm(in, rms_weight, temp, M, K, eps, stream);
+    matmul_tiled(temp, W, out, M, N, K, stream);
+    CUDA_CHECK(cudaFreeAsync(temp, stream));
+  }
 }
 
 }  // namespace engine::cuda

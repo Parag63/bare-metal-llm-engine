@@ -83,10 +83,17 @@ void gemv(const float* A, const float* x, float* out, std::int64_t N,
 /// out[M x N] = RMSNorm(in[M x K], rms_weight[K], eps) * W[K x N]
 /// Eliminates the intermediate M×K write/read between RMSNorm and matmul.
 /// `rms_weight` may be nullptr (no per-channel gain).
+/// Dynamically dispatches fused 1D kernel for M=1 (decode) and tiled matmul for M>1 (prefill).
 void rmsnorm_linear(const float* in, const float* rms_weight,
                     const float* W, float* out,
                     std::int64_t M, std::int64_t N, std::int64_t K,
                     float eps, cudaStream_t stream = 0);
+
+/// Direct execution of the 1D fused kernel regardless of M (used for benchmarking/profiling).
+void rmsnorm_linear_fused_direct(const float* in, const float* rms_weight,
+                                 const float* W, float* out,
+                                 std::int64_t M, std::int64_t N, std::int64_t K,
+                                 float eps, cudaStream_t stream = 0);
 
 /// Exercise 8. Fused Residual-Add + RMSNorm.
 /// norm_out[r][c] = RMSNorm(x[r][c] + residual[r][c], weight, eps)
