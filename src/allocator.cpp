@@ -15,6 +15,10 @@
 #include <cstdlib>
 #include <sstream>
 
+#if defined(_WIN32) || defined(_MSC_VER)
+#include <malloc.h>
+#endif
+
 #if ENGINE_HAS_CUDA
 #include <cuda_runtime.h>
 #endif
