@@ -36,7 +36,7 @@ Formal records of significant design decisions and their rationale.
 | [ADR-0007](adr/0007-gemv-decode-specialization.md) | GEMV decode specialization | Dedicated matrix-vector kernel for $M=1$ autoregressive decode, achieving 94.0% peak BW and beating cuBLAS |
 | [ADR-0008](adr/0008-benchmark-harness-provenance.md) | Benchmark harness JSON & provenance | Structured `--json` export, device driver, hardware clock, and git commit hash tracking |
 | [ADR-0009](adr/0009-negative-results-reporting.md) | Negative results reporting | Explicitly document optimizations that failed or degraded performance to preserve empirical boundaries |
-| [ADR-0010](adr/0010-multi-architecture-cuda-compilation.md) | Multi-architecture compilation | Multi-arch fat binaries (`86;89`) for Ampere and Ada Lovelace without PTX JIT overhead |
+| [ADR-0010](adr/0010-multi-architecture-cuda-compilation.md) | Flexible architecture compilation | Flexible architecture specification with native SASS generation without PTX JIT overhead |
 
 ### API Reference (to be added)
 

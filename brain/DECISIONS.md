@@ -19,7 +19,7 @@
 | [ADR-0007](../docs/adr/0007-gemv-decode-specialization.md) | GEMV decode specialization | Dedicated matrix-vector kernel for $M=1$ autoregressive decode, reaching 94.0% peak BW and beating cuBLAS |
 | [ADR-0008](../docs/adr/0008-benchmark-harness-provenance.md) | Benchmark harness JSON & provenance | Structured `--json` export, device driver, hardware clock, and git commit hash tracking |
 | [ADR-0009](../docs/adr/0009-negative-results-reporting.md) | Negative results reporting | Explicitly document optimizations that failed or degraded performance to preserve empirical boundaries |
-| [ADR-0010](../docs/adr/0010-multi-architecture-cuda-compilation.md) | Multi-architecture CUDA compilation | Multi-arch fat binaries (`86;89`) for Ampere and Ada Lovelace without PTX JIT overhead |
+| [ADR-0010](../docs/adr/0010-multi-architecture-cuda-compilation.md) | Flexible CUDA architecture compilation | Support flexible architecture specification with native SASS generation without PTX JIT overhead |
 
 ## Informal Decisions
 

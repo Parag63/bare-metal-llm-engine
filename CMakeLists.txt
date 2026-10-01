@@ -81,10 +81,8 @@ option(ENGINE_SYNC_CHECK_KERNELS
        "Synchronise and check after every kernel launch, even in release builds" OFF)
 
 # 89 = GeForce RTX 4090 / RTX 4070 SUPER (Ada Lovelace).
-# 86 = RTX A4000 / RTX 3090 (Ampere).
-# Multi-arch lists (e.g. "86;89") compile native fat binaries for both architectures (ADR 0010).
 # On CMake >= 3.24 you may instead set this to "native" to auto-detect the GPU actually present.
-set(ENGINE_CUDA_ARCH "89" CACHE STRING "CUDA architectures to compile for (e.g. 89 or '86;89')")
+set(ENGINE_CUDA_ARCH "89" CACHE STRING "CUDA architecture to target (e.g. 89 for Ada Lovelace)")
 
 #-----------------------------------------------------------------------------------
 # CUDA detection (never fatal)

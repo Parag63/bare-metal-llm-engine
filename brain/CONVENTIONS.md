@@ -6,7 +6,7 @@
 ## Language and standard
 
 - **C++17** — no C++20 features, no compiler extensions (`CMAKE_CXX_EXTENSIONS OFF`)
-- **CUDA** — compiled by `nvcc`, targeting `sm_86;sm_89` (Ampere & Ada Lovelace: RTX A4000, RTX 4070 SUPER, RTX 4090)
+- **CUDA** — compiled by `nvcc`, targeting `sm_89` (NVIDIA GeForce RTX 4070 SUPER / RTX 4090, Ada Lovelace)
 - **Python 3** — for tooling only (reference data generation)
 
 ## Naming conventions

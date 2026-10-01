@@ -33,7 +33,6 @@ nvidia-smi -q -d CLOCK
 Common clock values:
 - **RTX 4070 SUPER**: Base **1980 MHz**, Boost **2475 MHz**
 - **RTX 4090**: Base **2100 MHz**, Boost **2520 MHz**
-- **RTX A4000**: Base **735 MHz**, Boost **1560 MHz**
 
 ### 2. Build in release mode
 

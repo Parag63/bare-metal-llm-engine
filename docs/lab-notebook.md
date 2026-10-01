@@ -65,15 +65,15 @@ Build type: RelWithDebInfo / Release
 ### Next week
 ```
 
-## Week 08 (Part 5) — 2026-10-01 · Phase 4: Production Foundation & Register Tiling (Multi-Arch, Stream/Event RAII, Pool Allocator, Fused SwiGLU, and 2D Register-Tiled GEMM)
+## Week 08 (Part 5) — 2026-10-01 · Phase 4: Production Foundation & Register Tiling (Flexible Architecture Compilation, Stream/Event RAII, Pool Allocator, Fused SwiGLU, and 2D Register-Tiled GEMM)
 
-**Objective / module:** Phase 4 — Multi-architecture fat binary compilation (`sm_86;sm_89`), RAII CUDA Stream/Event lifecycle wrappers, high-throughput `PoolAllocator` (slab + power-of-two size class buckets), Fused SwiGLU activation kernel (`kernels/swiglu.cu`), and 2D Register-Tiled GEMM (`kernels/matmul_register_tiled.cu`) with 128-bit vector memory loads and outer-product register tile accumulation.
+**Objective / module:** Phase 4 — Flexible native architecture compilation targeting Ada Lovelace (`sm_89`), RAII CUDA Stream/Event lifecycle wrappers, high-throughput `PoolAllocator` (slab + power-of-two size class buckets), Fused SwiGLU activation kernel (`kernels/swiglu.cu`), and 2D Register-Tiled GEMM (`kernels/matmul_register_tiled.cu`) with 128-bit vector memory loads and outer-product register tile accumulation.
 
 ### What I did
 
-1. **Multi-Architecture Fat Binary Compilation (ADR 0010, `CMakeLists.txt`):**
-   - Authored [ADR 0010](file:///c:/ProjectP/bare-metal-llm-engine/docs/adr/0010-multi-architecture-cuda-compilation.md) defining the compilation strategy for fat binaries supporting Ampere (`sm_86`) and Ada Lovelace (`sm_89`).
-   - Configured CMake `ENGINE_CUDA_ARCH="86;89"` to embed native SASS microcode for both architectures into a single binary, eliminating runtime JIT latency and driver version mismatch crashes.
+1. **Flexible Architecture Native Compilation (ADR 0010, `CMakeLists.txt`):**
+   - Authored [ADR 0010](file:///c:/ProjectP/bare-metal-llm-engine/docs/adr/0010-multi-architecture-cuda-compilation.md) defining the compilation strategy for native SASS generation targeting Ada Lovelace (`sm_89`).
+   - Configured CMake `ENGINE_CUDA_ARCH` support for flexible architecture lists, eliminating runtime JIT latency and driver version mismatch crashes.
 2. **RAII CUDA Stream & Event Primitives (`include/engine/cuda_stream.hpp`, `src/cuda_stream.cpp`):**
    - Engineered move-only, zero-overhead abstractions `CudaStream` and `CudaEvent` encapsulating `cudaStreamCreateWithFlags` / `cudaEventCreateWithFlags`.
    - Guaranteed deterministic resource destruction, non-blocking default flags (`cudaStreamNonBlocking`, `cudaEventDisableTiming`), and exception-safe inter-stream synchronization primitives.

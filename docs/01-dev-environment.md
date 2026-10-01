@@ -4,7 +4,7 @@ Two machines, one repository.
 
 | | Machine A — the laptop | Machine B — the GPU Box |
 |---|---|---|
-| GPU | none usable for CUDA | GeForce RTX 4070 SUPER (`sm_89`) / RTX A4000 (`sm_86`) / RTX 4090 (`sm_89`) |
+| GPU | none usable for CUDA | GeForce RTX 4070 SUPER (`sm_89`) [Reference: RTX 4090] |
 | What happens here | write C++, run the CPU test suite, run `bench_cpu_ref`, edit docs, commit | compile the kernels, run the `kernels` suite, run `bench_kernels`, profile with Nsight |
 | CUDA in the build | absent — `ENGINE_CUDA_ENABLED=OFF` | present — `ENGINE_CUDA_ENABLED=ON` |
 | Test suites that run | `dtype`, `golden`, `cpu_ref`, `storage`, `tensor`, `allocator` | all of the above, plus `kernels` |
@@ -95,11 +95,11 @@ Confirm the summary:
 
 ```
   CUDA             : ENABLED (nvcc 12.x)
-  CUDA arch        : 86;89
+  CUDA arch        : 89
   Sync-check       : OFF  (ON = debuggable, benchmarks invalid)
 ```
 
-Per [ADR 0010](adr/0010-multi-architecture-cuda-compilation.md), the engine compiles multi-architecture fat binaries (`86;89`) embedding native SASS for Ampere and Ada Lovelace GPUs.
+Per [ADR 0005](adr/0005-cuda-arch-explicit.md), the engine compiles native SASS targeting `sm_89` (Ada Lovelace, GeForce RTX 4070 SUPER / RTX 4090) without runtime PTX JIT overhead. Flexible multi-architecture compilation is also supported via [ADR 0010](adr/0010-multi-architecture-cuda-compilation.md).
 
 `scripts/build.ps1` wraps the above, and `scripts/gpu-run.sh` runs the whole
 pull → configure → build → generate → test → benchmark sequence in one go.

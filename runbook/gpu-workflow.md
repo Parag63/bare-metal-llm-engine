@@ -1,7 +1,7 @@
 # GPU Workflow — Running CUDA Kernels on Machine B
 
 > **When to use:** Every time you push new kernel code from Machine A and need to
-> compile, test, and benchmark on the target GPU (RTX 4070 SUPER, RTX A4000, or RTX 4090).
+> compile, test, and benchmark on the target GPU (RTX 4070 SUPER or RTX 4090).
 >
 > **Prerequisites:** Code pushed from Machine A, Machine B has CUDA toolkit + CMake
 >
@@ -10,8 +10,8 @@
 ## The workflow
 
 ```
-Machine A (laptop)     Machine B (RTX 4070 SUPER / A4000)
-─────────────────      ──────────────────────────────────
+Machine A (laptop)     Machine B (RTX 4070 SUPER)
+─────────────────      ──────────────────────────
 1. Write kernel code
 2. git add, commit
 3. git push
@@ -77,5 +77,5 @@ decision, not a side effect.
 |---|---|
 | `no CUDA device visible` | Run `nvidia-smi` — driver may not be loaded |
 | Tests all skipped | CUDA not enabled in build — reconfigure with `ENGINE_WITH_CUDA=ON` |
-| Wrong CUDA arch | Check `ENGINE_CUDA_ARCH="86;89"` (or `89` / `86`) in configure output |
+| Wrong CUDA arch | Check `ENGINE_CUDA_ARCH=89` in configure output |
 | Kernel crashes without useful error | Build with `ENGINE_SYNC_CHECK_KERNELS=ON` (separate build dir!) |

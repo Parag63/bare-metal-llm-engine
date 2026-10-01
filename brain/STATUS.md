@@ -27,7 +27,7 @@ passed 118   failed 0   pending 0   skipped 0
 ---
 
 ## Phase 4 Completion: Production Foundation & Register Tiling
-- [x] **Multi-Architecture Fat Binaries (ADR 0010):** Authored `docs/adr/0010-multi-architecture-cuda-compilation.md`. Configured `ENGINE_CUDA_ARCH="86;89"` to embed native SASS for Ampere (`sm_86`) and Ada Lovelace (`sm_89`), eliminating runtime JIT overhead and driver crashes.
+- [x] **Flexible Architecture Compilation (ADR 0010):** Authored `docs/adr/0010-multi-architecture-cuda-compilation.md`. Added support for flexible architecture specification in `ENGINE_CUDA_ARCH` with native SASS generation, eliminating runtime JIT overhead.
 - [x] **RAII Stream & Event Wrappers:** `include/engine/cuda_stream.hpp`, `src/cuda_stream.cpp` providing move-only zero-overhead wrappers over `cudaStream_t` and `cudaEvent_t` with non-blocking default flags.
 - [x] **Pool Allocator & Memory Accounting:** `include/engine/pool_allocator.hpp`, `src/pool_allocator.cpp`. Slab pre-allocation, power-of-two size bucketing (256 B to 1 GiB), 256-byte alignment, current/peak memory tracking. Passed 100,000 cycles acceptance test with `num_driver_allocs == 1` ($< 20$ required).
 - [x] **Fused SwiGLU Activation:** `kernels/swiglu.cu`, `src/cpu_ref/swiglu_cpu.cpp`. Single-pass activation reducing DRAM traffic from $20N \to 12N$ bytes. Achieves **0.295 ms** ($1.52\times$ speedup over unfused SiLU+Mul) on $512 \times 11008$ prefill and **0.0051 ms** ($1.61\times$ speedup) on decode. FP16 SwiGLU achieves **0.031 ms** ($9.5\times$ over FP32).
