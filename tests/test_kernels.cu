@@ -637,6 +637,54 @@ TEST(kernels, matmul_tiled_agrees_with_matmul_naive) {
   }
 }
 
+TEST(kernels, matmul_register_tiled_matches_reference) {
+  REQUIRE_CUDA_DEVICE();
+
+  for (const Shape3& s : kMatmulShapes) {
+    const std::string stem = "matmul__" + std::to_string(s.m) + "x" +
+                             std::to_string(s.n) + "x" + std::to_string(s.k);
+    LOAD_GOLDEN(g, stem);
+
+    DeviceBuffer<float> d_a(g.at("A").data);
+    DeviceBuffer<float> d_b(g.at("B").data);
+    DeviceBuffer<float> d_c(usize(s.m * s.n));
+    d_c.zero();
+
+    engine::cuda::matmul_register_tiled(d_a.get(), d_b.get(), d_c.get(), s.m, s.n, s.k);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    const std::vector<float> host = d_c.download();
+    CHECK_CASE(stem, host.data(), g.at("expected").data.data(), host.size(),
+               kMatmulRtol, kMatmulAtol);
+  }
+}
+
+TEST(kernels, matmul_register_tiled_agrees_with_matmul_naive) {
+  REQUIRE_CUDA_DEVICE();
+
+  for (const Shape3& s : kMatmulShapes) {
+    const std::string stem = "matmul__" + std::to_string(s.m) + "x" +
+                             std::to_string(s.n) + "x" + std::to_string(s.k);
+    LOAD_GOLDEN(g, stem);
+
+    DeviceBuffer<float> d_a(g.at("A").data);
+    DeviceBuffer<float> d_b(g.at("B").data);
+    DeviceBuffer<float> d_naive(usize(s.m * s.n));
+    DeviceBuffer<float> d_reg(usize(s.m * s.n));
+    d_naive.zero();
+    d_reg.zero();
+
+    engine::cuda::matmul_naive(d_a.get(), d_b.get(), d_naive.get(), s.m, s.n, s.k);
+    engine::cuda::matmul_register_tiled(d_a.get(), d_b.get(), d_reg.get(), s.m, s.n, s.k);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    const std::vector<float> naive = d_naive.download();
+    const std::vector<float> reg = d_reg.download();
+    CHECK_CASE(stem + " (reg_tiled vs naive)", reg.data(), naive.data(), reg.size(),
+               /*rtol=*/1e-6, /*atol=*/1e-6);
+  }
+}
+
 TEST(kernels, matmul_with_k_zero_is_the_zero_matrix) {
   REQUIRE_CUDA_DEVICE();
 
@@ -1170,8 +1218,73 @@ TEST(kernels, argmax_fp16_matches_cpu_ref) {
 }
 
 //===----------------------------------------------------------------------===//
+// Phase 4 -- Fused SwiGLU activation tests
+//===----------------------------------------------------------------------===//
+
+TEST(kernels, swiglu_f32_matches_cpu_ref) {
+  REQUIRE_CUDA_DEVICE();
+
+  const std::int64_t sizes[] = {1, 65, 1024, 4096, 11008};
+  for (std::int64_t n : sizes) {
+    std::vector<float> gate(static_cast<std::size_t>(n));
+    std::vector<float> up(static_cast<std::size_t>(n));
+    std::vector<float> exp(static_cast<std::size_t>(n));
+
+    for (std::size_t i = 0; i < gate.size(); ++i) {
+      gate[i] = static_cast<float>(static_cast<int>(i % 23) - 11) * 0.2f;
+      up[i]   = static_cast<float>(static_cast<int>(i % 17) - 8) * 0.2f;
+    }
+
+    engine::cpu::swiglu(gate.data(), up.data(), exp.data(), n);
+
+    DeviceBuffer<float> d_gate(gate);
+    DeviceBuffer<float> d_up(up);
+    DeviceBuffer<float> d_out(static_cast<std::size_t>(n));
+    d_out.zero();
+
+    engine::cuda::swiglu(d_gate.get(), d_up.get(), d_out.get(), n);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    const std::vector<float> host = d_out.download();
+    CHECK_CASE("swiglu_f32__n" + std::to_string(n), host.data(), exp.data(), host.size(), 1e-5, 1e-5);
+  }
+}
+
+TEST(kernels, swiglu_fp16_matches_cpu_ref) {
+  REQUIRE_CUDA_DEVICE();
+
+  const std::int64_t sizes[] = {1, 65, 1024, 4096, 11008};
+  for (std::int64_t n : sizes) {
+    std::vector<engine::half> gate(static_cast<std::size_t>(n));
+    std::vector<engine::half> up(static_cast<std::size_t>(n));
+    std::vector<engine::half> exp(static_cast<std::size_t>(n));
+
+    for (std::size_t i = 0; i < gate.size(); ++i) {
+      gate[i] = engine::float_to_half(static_cast<float>(static_cast<int>(i % 23) - 11) * 0.2f);
+      up[i]   = engine::float_to_half(static_cast<float>(static_cast<int>(i % 17) - 8) * 0.2f);
+    }
+
+    engine::cpu::swiglu_fp16(gate.data(), up.data(), exp.data(), n);
+
+    DeviceBuffer<engine::half> d_gate(gate);
+    DeviceBuffer<engine::half> d_up(up);
+    DeviceBuffer<engine::half> d_out(static_cast<std::size_t>(n));
+    d_out.zero();
+
+    engine::cuda::swiglu_fp16(d_gate.get(), d_up.get(), d_out.get(), n);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    const std::vector<engine::half> host = d_out.download();
+    for (std::size_t i = 0; i < host.size(); ++i) {
+      EXPECT_NEAR(engine::half_to_float(host[i]), engine::half_to_float(exp[i]), 2e-3f);
+    }
+  }
+}
+
+//===----------------------------------------------------------------------===//
 // PART 3 -- the launch CONTRACT.
 //===----------------------------------------------------------------------===//
+
 
 TEST(kernels, launchers_reject_negative_dimensions) {
   REQUIRE_CUDA_DEVICE();
@@ -1214,6 +1327,11 @@ TEST(kernels, launchers_reject_negative_dimensions) {
   EXPECT_THROWS_MSG(engine::cuda::argmax(p, p_i, -1), "positive");
   EXPECT_THROWS_MSG(engine::cuda::argmax_fp16(p_h, p_i, 0), "positive");
   EXPECT_THROWS_MSG(engine::cuda::argmax_fp16(p_h, p_i, -1), "positive");
+  EXPECT_THROWS_MSG(engine::cuda::matmul_register_tiled(p, p, p, -1, 4, 4), "non-negative");
+  EXPECT_THROWS_MSG(engine::cuda::matmul_register_tiled(p, p, p, 4, -1, 4), "non-negative");
+  EXPECT_THROWS_MSG(engine::cuda::matmul_register_tiled(p, p, p, 4, 4, -1), "non-negative");
+  EXPECT_THROWS_MSG(engine::cuda::swiglu(p, p, p, -1), "non-negative");
+  EXPECT_THROWS_MSG(engine::cuda::swiglu_fp16(p_h, p_h, p_h, -1), "non-negative");
 
   // eps < 0 would put a negative number under the square root.
   EXPECT_THROWS_MSG(engine::cuda::rmsnorm(p, p, p, 4, 4, -1.0f), "eps");
@@ -1269,6 +1387,15 @@ TEST(kernels, launchers_reject_null_pointers) {
   EXPECT_THROWS_MSG(engine::cuda::argmax(p, nullptr, 10), "null");
   EXPECT_THROWS_MSG(engine::cuda::argmax_fp16(nullptr, p_i, 10), "null");
   EXPECT_THROWS_MSG(engine::cuda::argmax_fp16(p_h, nullptr, 10), "null");
+  EXPECT_THROWS_MSG(engine::cuda::matmul_register_tiled(nullptr, p, p, 2, 2, 2), "null");
+  EXPECT_THROWS_MSG(engine::cuda::matmul_register_tiled(p, nullptr, p, 2, 2, 2), "null");
+  EXPECT_THROWS_MSG(engine::cuda::matmul_register_tiled(p, p, nullptr, 2, 2, 2), "null");
+  EXPECT_THROWS_MSG(engine::cuda::swiglu(nullptr, p, p, 4), "null");
+  EXPECT_THROWS_MSG(engine::cuda::swiglu(p, nullptr, p, 4), "null");
+  EXPECT_THROWS_MSG(engine::cuda::swiglu(p, p, nullptr, 4), "null");
+  EXPECT_THROWS_MSG(engine::cuda::swiglu_fp16(nullptr, p_h, p_h, 4), "null");
+  EXPECT_THROWS_MSG(engine::cuda::swiglu_fp16(p_h, nullptr, p_h, 4), "null");
+  EXPECT_THROWS_MSG(engine::cuda::swiglu_fp16(p_h, p_h, nullptr, 4), "null");
 
   // rmsnorm's, residual_rmsnorm's, and rmsnorm_linear's `weight` is ALLOWED to be null:
   // "no learned gain" is a valid configuration, not a mistake.
@@ -1316,6 +1443,11 @@ TEST(kernels, empty_work_is_a_no_op_not_an_error) {
   EXPECT_NO_THROW(engine::cuda::embedding(p, p_i, p, 8, 0, 10));
   EXPECT_NO_THROW(engine::cuda::embedding_fp16(p_h, p_i, p_h, 0, 8, 10));
   EXPECT_NO_THROW(engine::cuda::embedding_fp16(p_h, p_i, p_h, 8, 0, 10));
+  EXPECT_NO_THROW(engine::cuda::matmul_register_tiled(p, p, p, 0, 8, 8));
+  EXPECT_NO_THROW(engine::cuda::matmul_register_tiled(p, p, p, 8, 0, 8));
+  EXPECT_NO_THROW(engine::cuda::matmul_register_tiled(p, p, p, 8, 8, 0));
+  EXPECT_NO_THROW(engine::cuda::swiglu(p, p, p, 0));
+  EXPECT_NO_THROW(engine::cuda::swiglu_fp16(p_h, p_h, p_h, 0));
 
   // And nothing may have been launched, let alone written.
   CUDA_CHECK(cudaDeviceSynchronize());

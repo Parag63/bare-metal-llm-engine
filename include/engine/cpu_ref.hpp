@@ -110,4 +110,8 @@ void embedding_fp16(const half* table, const std::int32_t* input_ids, half* out,
 std::int32_t argmax(const float* logits, std::int64_t vocab_size);
 std::int32_t argmax_fp16(const half* logits, std::int64_t vocab_size);
 
+/// SwiGLU activation: out[i] = SiLU(gate[i]) * up[i] = (gate[i] / (1 + exp(-gate[i]))) * up[i].
+void swiglu(const float* gate, const float* up, float* out, std::int64_t n);
+void swiglu_fp16(const half* gate, const half* up, half* out, std::int64_t n);
+
 }  // namespace engine::cpu

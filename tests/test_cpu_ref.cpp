@@ -795,3 +795,47 @@ TEST(cpu_ref, argmax_fp16_finds_maximum_and_tiebreaks) {
   EXPECT_EQ(best, 2);
 }
 
+TEST(cpu_ref, swiglu_matches_mathematical_definition) {
+  const std::vector<float> gate = {0.0f, 1.0f, -1.0f, 2.0f, -2.0f, 10.0f, -10.0f};
+  const std::vector<float> up   = {2.0f, 3.0f,  4.0f, -1.5f, 0.5f,  1.0f,   1.0f};
+  std::vector<float> out(gate.size(), 0.0f);
+
+  engine::cpu::swiglu(gate.data(), up.data(), out.data(), static_cast<std::int64_t>(gate.size()));
+
+  for (std::size_t i = 0; i < gate.size(); ++i) {
+    const double g = static_cast<double>(gate[i]);
+    const double u = static_cast<double>(up[i]);
+    const double expected = (g / (1.0 + std::exp(-g))) * u;
+    EXPECT_NEAR(out[i], static_cast<float>(expected), 1e-6f);
+  }
+
+  // Contract: null pointers & negative length throw
+  float dummy = 0.0f;
+  EXPECT_THROWS(engine::cpu::swiglu(nullptr, &dummy, &dummy, 1));
+  EXPECT_THROWS(engine::cpu::swiglu(&dummy, nullptr, &dummy, 1));
+  EXPECT_THROWS(engine::cpu::swiglu(&dummy, &dummy, nullptr, 1));
+  EXPECT_THROWS(engine::cpu::swiglu(&dummy, &dummy, &dummy, -1));
+}
+
+TEST(cpu_ref, swiglu_fp16_matches_mathematical_definition) {
+  const std::vector<float> gate_f = {0.0f, 1.5f, -1.5f, 3.0f, -3.0f};
+  const std::vector<float> up_f   = {1.0f, 2.0f,  0.5f, -2.0f, 4.0f};
+  std::vector<engine::half> gate(gate_f.size());
+  std::vector<engine::half> up(up_f.size());
+  std::vector<engine::half> out(gate_f.size());
+
+  for (std::size_t i = 0; i < gate_f.size(); ++i) {
+    gate[i] = engine::float_to_half(gate_f[i]);
+    up[i] = engine::float_to_half(up_f[i]);
+  }
+
+  engine::cpu::swiglu_fp16(gate.data(), up.data(), out.data(), static_cast<std::int64_t>(gate.size()));
+
+  for (std::size_t i = 0; i < gate_f.size(); ++i) {
+    const double g = static_cast<double>(gate_f[i]);
+    const double u = static_cast<double>(up_f[i]);
+    const double expected = (g / (1.0 + std::exp(-g))) * u;
+    EXPECT_NEAR(engine::half_to_float(out[i]), static_cast<float>(expected), 2e-3f);
+  }
+}
+

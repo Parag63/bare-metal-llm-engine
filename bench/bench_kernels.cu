@@ -294,6 +294,12 @@ void bench_matmul(Table& t, int reps, bool include_large) {
                   },
                   /*warmup=*/3, r);
 
+    t.measure_gpu("matmul_register_tiled", label, flops, bytes,
+                  [&] {
+                    engine::cuda::matmul_register_tiled(A.get(), B.get(), C.get(), M, N, K);
+                  },
+                  /*warmup=*/3, r);
+
 #if ENGINE_BENCH_CUBLAS
     // CUBLAS IS COLUMN-MAJOR. This trips up everyone once.
     //
@@ -638,6 +644,77 @@ void bench_missing_kernels(Table& t, int reps) {
   }
 }
 
+//===----------------------------------------------------------------------===//
+// Phase 4 -- Fused SwiGLU vs Unfused (SiLU + Mul).
+//===----------------------------------------------------------------------===//
+
+__global__ void silu_unfused_kernel(const float* in, float* out, int64_t n) {
+  int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i < n) {
+    float x = in[i];
+    out[i] = x / (1.0f + __expf(-x));
+  }
+}
+
+__global__ void mul_unfused_kernel(const float* a, const float* b, float* out, int64_t n) {
+  int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i < n) {
+    out[i] = a[i] * b[i];
+  }
+}
+
+void bench_swiglu(Table& t, int reps) {
+  struct Case {
+    std::int64_t n;
+    const char* label;
+  };
+  const Case cases[] = {
+      {11008, "1x11008  (decode MLP)"},
+      {512 * 11008, "512x11008  (prefill MLP)"},
+  };
+
+  for (const Case& c : cases) {
+    const std::int64_t n = c.n;
+    DeviceBuffer<float> gate(random_host(static_cast<std::size_t>(n), 1u));
+    DeviceBuffer<float> up(random_host(static_cast<std::size_t>(n), 2u));
+    DeviceBuffer<float> temp_silu(static_cast<std::size_t>(n));
+    DeviceBuffer<float> out(static_cast<std::size_t>(n));
+
+    const double flops = 5.0 * d(n);
+    const double unfused_bytes = 5.0 * d(n) * sizeof(float);
+    const double fused_bytes = 3.0 * d(n) * sizeof(float);
+
+    const int threads = 256;
+    const int blocks = static_cast<int>((n + threads - 1) / threads);
+
+    t.measure_gpu("swiglu (unfused: silu+mul)", c.label, flops, unfused_bytes,
+                  [&] {
+                    silu_unfused_kernel<<<blocks, threads>>>(gate.get(), temp_silu.get(), n);
+                    mul_unfused_kernel<<<blocks, threads>>>(temp_silu.get(), up.get(), out.get(), n);
+                  },
+                  /*warmup=*/5, reps);
+
+    t.measure_gpu("swiglu (fused FP32)", c.label, flops, fused_bytes,
+                  [&] {
+                    engine::cuda::swiglu(gate.get(), up.get(), out.get(), n);
+                  },
+                  /*warmup=*/5, reps);
+
+    std::vector<engine::half> h_gate_half = random_host_half(static_cast<std::size_t>(n), 1u);
+    std::vector<engine::half> h_up_half = random_host_half(static_cast<std::size_t>(n), 2u);
+    DeviceBuffer<engine::half> d_gate_half(h_gate_half);
+    DeviceBuffer<engine::half> d_up_half(h_up_half);
+    DeviceBuffer<engine::half> d_out_half(static_cast<std::size_t>(n));
+
+    const double fused_bytes_fp16 = 3.0 * d(n) * sizeof(engine::half);
+    t.measure_gpu("swiglu_fp16 (fused FP16)", c.label, flops, fused_bytes_fp16,
+                  [&] {
+                    engine::cuda::swiglu_fp16(d_gate_half.get(), d_up_half.get(), d_out_half.get(), n);
+                  },
+                  /*warmup=*/5, reps);
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -693,6 +770,7 @@ int main(int argc, char** argv) {
   bench_residual_rmsnorm(t, reps);
   bench_rmsnorm_linear(t, reps);
   bench_missing_kernels(t, reps);
+  bench_swiglu(t, reps);
 
   if (json_output) {
     t.print_json(std::cout);

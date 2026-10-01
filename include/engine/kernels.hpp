@@ -73,6 +73,12 @@ void matmul_naive(const float* A, const float* B, float* C, std::int64_t M,
 void matmul_tiled(const float* A, const float* B, float* C, std::int64_t M,
                   std::int64_t N, std::int64_t K, cudaStream_t stream = 0);
 
+/// Advanced Phase 4 GEMM: Register-tiled 2D GEMM.
+/// Uses 128x128 block tiles, 8x8 thread register tiles, float4 vectorized loads,
+/// and outer-product math to bypass shared-memory bandwidth saturation.
+void matmul_register_tiled(const float* A, const float* B, float* C, std::int64_t M,
+                           std::int64_t N, std::int64_t K, cudaStream_t stream = 0);
+
 /// GEMV: Matrix-vector multiply out[N] = x[K] * A[K x N], row-major.
 /// Specialized for M=1 decode-time token generation to bypass 2D tile waste.
 void gemv(const float* A, const float* x, float* out, std::int64_t N,
@@ -130,6 +136,10 @@ void argmax(const float* logits, std::int32_t* out_token, std::int64_t vocab_siz
             cudaStream_t stream = 0);
 void argmax_fp16(const half* logits, std::int32_t* out_token, std::int64_t vocab_size,
                  cudaStream_t stream = 0);
+
+/// SwiGLU activation: out[i] = SiLU(gate[i]) * up[i] = (gate[i] / (1 + exp(-gate[i]))) * up[i].
+void swiglu(const float* gate, const float* up, float* out, std::int64_t n, cudaStream_t stream = 0);
+void swiglu_fp16(const half* gate, const half* up, half* out, std::int64_t n, cudaStream_t stream = 0);
 
 }  // namespace engine::cuda
 

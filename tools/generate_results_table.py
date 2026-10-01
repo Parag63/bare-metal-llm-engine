@@ -122,6 +122,27 @@ def format_readme_table(data: dict) -> str:
     am = find_result(results, "argmax (FP32)") or find_result(results, "argmax")
     am_str = f"✅ {am['min_ms']:.3f} ms (deterministic tie-breaking)" if am else "❌ Not found"
 
+    # 13. matmul_register_tiled
+    mrt = find_result(results, "matmul_register_tiled", "4096^3", exact=True) or find_result(results, "matmul_register_tiled", "2048^3", exact=True) or find_result(results, "matmul_register_tiled")
+    if mrt and mt and mt.get("gflops", 0) > 0:
+        mrt_speedup = mrt["gflops"] / mt["gflops"]
+        mrt_str = f"✅ {mrt['gflops']:.0f} GFLOP/s @ {mrt['size']} ({mrt_speedup:.1f}× over tiled)"
+    elif mrt:
+        mrt_str = f"✅ {mrt['gflops']:.0f} GFLOP/s @ {mrt['size']}"
+    else:
+        mrt_str = "❌ Not found"
+
+    # 14. swiglu
+    sw = find_result(results, "swiglu (fused FP32)", "512x11008") or find_result(results, "swiglu (fused FP32)")
+    sw_sep = find_result(results, "swiglu (unfused: silu+mul)", "512x11008")
+    if sw and sw_sep and sw_sep.get("median_ms", 0) > 0:
+        sw_speedup = sw_sep["median_ms"] / sw["median_ms"]
+        sw_str = f"✅ {sw['median_ms']:.3f} ms ({sw_speedup:.2f}× over unfused SiLU+Mul)"
+    elif sw:
+        sw_str = f"✅ {sw['median_ms']:.3f} ms"
+    else:
+        sw_str = "❌ Not found"
+
     table_lines = [
         "| # | Kernel | New idea | GPU result |",
         "|---|---|---|---|",
@@ -137,6 +158,8 @@ def format_readme_table(data: dict) -> str:
         f"| 10 | `gemv_fp16` | decode token projection in FP16 with FP32 accumulator | {g16_str} |",
         f"| 11 | `embedding` | token gather from row-major embedding table (FP32 & FP16) | {emb_str} |",
         f"| 12 | `argmax` | greedy token sampling via 16-warp shuffle reduction | {am_str} |",
+        f"| 13 | `matmul_register_tiled` | 2D register tiling (8x8 thread tile, outer products, float4) | {mrt_str} |",
+        f"| 14 | `swiglu` | fused SiLU + elementwise multiply (40% memory traffic reduction) | {sw_str} |",
     ]
     return "\n".join(table_lines)
 
@@ -145,12 +168,16 @@ def format_baselines_table(data: dict) -> str:
     results = data.get("results", [])
     cublas = find_result(results, "cublasSgemm (baseline)", "4096^3")
     tiled = find_result(results, "matmul_tiled", "4096^3")
+    mrt_4096 = find_result(results, "matmul_register_tiled", "4096^3")
     
     rn_lin_fused_512 = find_result(results, "rmsnorm_linear (fused)", "512x4096x4096")
     rn_lin_sep_512 = find_result(results, "rmsnorm+matmul (separate)", "512x4096x4096")
     
     gemv_cold = find_result(results, "gemv", "1x4096x4096")
     gemv_warm = find_result(results, "gemv (warm L2)", "1x4096x4096")
+
+    sw_fused = find_result(results, "swiglu (fused FP32)", "512x11008")
+    sw_unfused = find_result(results, "swiglu (unfused: silu+mul)", "512x11008")
     
     lines = [
         "### Benchmark Credibility & Baseline Verification",
@@ -160,11 +187,15 @@ def format_baselines_table(data: dict) -> str:
     ]
     if cublas and tiled:
         lines.append(f"| **cuBLAS SGEMM vs Tiled GEMM** | 4096³ FP32 | {cublas['gflops']:.0f} GFLOP/s (cuBLAS) | {tiled['gflops']:.0f} GFLOP/s (tiled) | {tiled['gflops']/cublas['gflops']*100:.1f}% of cuBLAS (hand-written FP32 SIMT vs Tensor Cores) |")
+    if cublas and mrt_4096 and tiled:
+        lines.append(f"| **Register-Tiled GEMM vs cuBLAS** | 4096³ FP32 | {cublas['gflops']:.0f} GFLOP/s (cuBLAS) | {mrt_4096['gflops']:.0f} GFLOP/s (register-tiled) | {mrt_4096['gflops']/cublas['gflops']*100:.1f}% of cuBLAS ({mrt_4096['gflops']/tiled['gflops']:.1f}× over tiled) |")
     if rn_lin_sep_512 and rn_lin_fused_512:
         overhead = ((rn_lin_fused_512['median_ms'] - rn_lin_sep_512['median_ms']) / rn_lin_sep_512['median_ms']) * 100.0
         lines.append(f"| **Unfused vs Fused RMSNorm+Linear** | M=512, N=4096, K=4096 | {rn_lin_sep_512['median_ms']:.2f} ms (separate) | {rn_lin_fused_512['median_ms']:.2f} ms (fused) | +{overhead:.1f}% latency (1D row broadcast vs 2D shared tiling) |")
     if gemv_cold and gemv_warm:
         lines.append(f"| **GEMV Cold DRAM vs Warm L2** | 1x4096x4096 (decode) | {gemv_warm['gbps']:.1f} GB/s (warm L2) | {gemv_cold['gbps']:.1f} GB/s (cold DRAM) | {gemv_cold['pct_peak_bw']:.1f}% peak DRAM (pure streaming via rotating weight buffers) |")
+    if sw_fused and sw_unfused:
+        lines.append(f"| **Fused vs Unfused SwiGLU** | 512x11008 (prefill MLP) | {sw_unfused['median_ms']:.3f} ms (unfused) | {sw_fused['median_ms']:.3f} ms (fused) | {sw_unfused['median_ms']/sw_fused['median_ms']:.2f}× speedup (12N vs 20N bytes DRAM traffic) |")
     
     lines.append("| **llama-bench External Baseline** | TinyLlama-1.1B (Q4_K_M) | 18,512.0 t/s (pp512) | 391.2 t/s (tg128) | 4-bit quantized weights (~249 GB/s effective) |")
     lines.append("| **llama-bench External Baseline** | TinyLlama-1.1B (Q8_0) | 18,767.1 t/s (pp512) | 275.2 t/s (tg128) | 8-bit quantized weights (~300 GB/s effective) |")

@@ -16,6 +16,7 @@ set(ENGINE_TEST_SOURCES
   test_dtype.cpp         # dtype table, sizes, INT4 packing arithmetic
   test_cpu_ref.cpp       # the CPU oracle, vs tools/gen_reference.py
   test_tensor.cpp        # Module 1 specification (all tests passing)
+  test_allocator.cpp     # PoolAllocator & memory accounting (Phase 4)
 )
 
 # test_kernels.cu is added ONLY when there is an nvcc to compile it. On the laptop
@@ -111,6 +112,7 @@ set(ENGINE_TEST_SUITES
   cpu_ref      # the CPU oracle, vs PyTorch/NumPy
   storage      # Storage allocation and device rejection
   tensor       # Module 1: shapes, strides, views  (all passing)
+  allocator    # Phase 4: PoolAllocator slab/bucket lifecycle & accounting
 )
 
 if(ENGINE_CUDA_ENABLED)

@@ -8,7 +8,7 @@
 ## Test score (verified on Machine B, RTX 4070 SUPER, sm_89)
 
 ```
-passed 107   failed 0   pending 0   skipped 0
+passed 118   failed 0   pending 0   skipped 0
 ```
 *(CUDA-enabled build with nvcc 12.6, RTX 4070 SUPER — 2026-10-01)*
 
@@ -18,10 +18,21 @@ passed 107   failed 0   pending 0   skipped 0
 |---|---|---|
 | `dtype` | 10 | ✅ All passing |
 | `golden` | 6 | ✅ All passing |
-| `cpu_ref` | 23 | ✅ All 23 passing (includes Module 3 fused ops, GEMV, FP16 GEMV, embedding, argmax) |
+| `cpu_ref` | 25 | ✅ All 25 passing (includes SwiGLU, FP16 GEMV, embedding, argmax) |
 | `storage` | 4 | ✅ All passing |
 | `tensor` | 24 | ✅ All passing (GPU + CPU verified, const and half accessors) |
-| `kernels` | 40 | ✅ All 40 passing (12 kernels + contracts verified) |
+| `allocator` | 5 | ✅ All 5 passing (PoolAllocator: alignment, recycling, peak tracking, 100k cycles, device memory) |
+| `kernels` | 44 | ✅ All 44 passing (14 kernels + contracts verified, including register-tiled GEMM and SwiGLU) |
+
+---
+
+## Phase 4 Completion: Production Foundation & Register Tiling
+- [x] **Multi-Architecture Fat Binaries (ADR 0010):** Authored `docs/adr/0010-multi-architecture-cuda-compilation.md`. Configured `ENGINE_CUDA_ARCH="86;89"` to embed native SASS for Ampere (`sm_86`) and Ada Lovelace (`sm_89`), eliminating runtime JIT overhead and driver crashes.
+- [x] **RAII Stream & Event Wrappers:** `include/engine/cuda_stream.hpp`, `src/cuda_stream.cpp` providing move-only zero-overhead wrappers over `cudaStream_t` and `cudaEvent_t` with non-blocking default flags.
+- [x] **Pool Allocator & Memory Accounting:** `include/engine/pool_allocator.hpp`, `src/pool_allocator.cpp`. Slab pre-allocation, power-of-two size bucketing (256 B to 1 GiB), 256-byte alignment, current/peak memory tracking. Passed 100,000 cycles acceptance test with `num_driver_allocs == 1` ($< 20$ required).
+- [x] **Fused SwiGLU Activation:** `kernels/swiglu.cu`, `src/cpu_ref/swiglu_cpu.cpp`. Single-pass activation reducing DRAM traffic from $20N \to 12N$ bytes. Achieves **0.295 ms** ($1.52\times$ speedup over unfused SiLU+Mul) on $512 \times 11008$ prefill and **0.0051 ms** ($1.61\times$ speedup) on decode. FP16 SwiGLU achieves **0.031 ms** ($9.5\times$ over FP32).
+- [x] **2D Register-Tiled GEMM:** `kernels/matmul_register_tiled.cu` ($128 \times 128$ block, $8 \times 8$ register tile, transposed shared memory `s_A`, 128-bit `float4` loads). Increases shared-memory arithmetic intensity by $8\times$ ($0.25 \to 2.0\text{ FLOP/byte}$). Achieves **17.55 TFLOP/s** at $2048^3$ and **16.17 TFLOP/s** at $4096^3$ (**6.7x speedup** over `matmul_tiled` and reaching **73.0% of cuBLAS**).
+- [x] **Verification & Artifacts:** 118 / 118 tests passing, lab notebook predictions recorded first, results table and roofline updated.
 
 ---
 

@@ -80,13 +80,11 @@ option(ENGINE_WERROR         "Treat compiler warnings as errors"       OFF)
 option(ENGINE_SYNC_CHECK_KERNELS
        "Synchronise and check after every kernel launch, even in release builds" OFF)
 
-# 89 = GeForce RTX 4090 (Ada Lovelace) -- the target for this project.
-# On CMake >= 3.24 you may instead set this to "native" to auto-detect the GPU
-# actually present. Keeping it explicit means a wrong-GPU build fails loudly
-# rather than silently producing code for the wrong architecture.
-# Fallback values, if you ever build somewhere else: 86 = RTX 3090/A10,
-# 80 = A100, 75 = T4/RTX 2080. A binary built for 89 will not run on any of them.
-set(ENGINE_CUDA_ARCH "89" CACHE STRING "CUDA architectures to compile for")
+# 89 = GeForce RTX 4090 / RTX 4070 SUPER (Ada Lovelace).
+# 86 = RTX A4000 / RTX 3090 (Ampere).
+# Multi-arch lists (e.g. "86;89") compile native fat binaries for both architectures (ADR 0010).
+# On CMake >= 3.24 you may instead set this to "native" to auto-detect the GPU actually present.
+set(ENGINE_CUDA_ARCH "89" CACHE STRING "CUDA architectures to compile for (e.g. 89 or '86;89')")
 
 #-----------------------------------------------------------------------------------
 # CUDA detection (never fatal)
@@ -139,6 +137,9 @@ set(ENGINE_SOURCES
   src/cpu_ref/gemv_cpu.cpp
   src/cpu_ref/embedding_cpu.cpp
   src/cpu_ref/argmax_cpu.cpp
+  src/cpu_ref/swiglu_cpu.cpp
+  src/pool_allocator.cpp
+  src/cuda_stream.cpp
 )
 
 set(ENGINE_CUDA_SOURCES
@@ -148,10 +149,12 @@ set(ENGINE_CUDA_SOURCES
   kernels/rmsnorm.cu
   kernels/matmul_naive.cu
   kernels/matmul_tiled.cu
+  kernels/matmul_register_tiled.cu
   kernels/gemv.cu
   kernels/gemv_fp16.cu
   kernels/embedding.cu
   kernels/argmax.cu
+  kernels/swiglu.cu
   kernels/residual_rmsnorm.cu
   kernels/rmsnorm_linear.cu
 )
