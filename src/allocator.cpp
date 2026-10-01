@@ -49,7 +49,11 @@ class PassthroughAllocator final : public Allocator {
       // 256-byte alignment matches what cudaMalloc guarantees, so host and device
       // buffers behave the same way with respect to vectorised loads (float4 needs
       // 16-byte alignment; 256 covers every case we will meet).
+#if defined(_MSC_VER)
+      p = _aligned_malloc(round_up(bytes, 256), 256);
+#else
       p = std::aligned_alloc(256, round_up(bytes, 256));
+#endif
       ENGINE_CHECK(p != nullptr, "host allocation failed");
     } else {
 #if ENGINE_HAS_CUDA
@@ -72,7 +76,11 @@ class PassthroughAllocator final : public Allocator {
   void deallocate(void* ptr) override {
     if (ptr == nullptr) return;
     if (device_ == Device::CPU) {
+#if defined(_MSC_VER)
+      _aligned_free(ptr);
+#else
       std::free(ptr);
+#endif
     } else {
 #if ENGINE_HAS_CUDA
       cudaFree(ptr);

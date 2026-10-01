@@ -30,6 +30,7 @@
 
 #include <engine/check.hpp>
 #include <engine/config.hpp>
+#include <engine/cuda_device.hpp>
 #include <engine/dtype.hpp>
 #include <engine/tensor.hpp>
 
@@ -528,6 +529,9 @@ TEST(tensor, to_cuda_on_cpu_only_build_throws) {
 }
 #else
 TEST(tensor, host_device_round_trip_preserves_values) {
+  if (::engine::cuda_device_count() == 0) {
+    SKIP_TEST("no CUDA device visible -- check `nvidia-smi`");
+  }
   Tensor h(Shape{64, 16}, DType::F32, Device::CPU);
   fill_ramp(h);
 

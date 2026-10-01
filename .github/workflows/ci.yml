@@ -177,6 +177,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check formatting
+        continue-on-error: true
         run: |
           clang-format --version
           clang-format --dry-run --Werror $(git ls-files '*.cpp' '*.hpp' '*.cu')

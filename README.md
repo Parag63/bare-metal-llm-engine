@@ -8,11 +8,11 @@ inference path.
 B.Tech CSE major project · Parag Das (2303344) · Jul 2026 – Jun 2027
 
 > **Status: Modules 1, 2 & 3 complete. Moving to FlashAttention (Module 4).**
-> The tensor library, all eight CUDA kernels (6 ladder kernels + 2 fused kernels), and the full
-> verification/benchmark infrastructure are implemented and verified. `passed 92  failed 0  pending 0` on
-> the CUDA-enabled build (RTX 4070 SUPER, nvcc 12.6, 2026-09-29). Memory-bound
-> kernels achieve 85–91% of peak bandwidth; the tiled matmul reaches 2,563 GFLOP/s
-> at 4096³ (+38% over naive).
+> The tensor library, all nine CUDA kernels (7 ladder kernels including dedicated decode GEMV + 2 fused kernels), and the full
+> verification/benchmark infrastructure are implemented and verified. `passed 97  failed 0  pending 0` on
+> the CUDA-enabled build (RTX 4070 SUPER, nvcc 12.6, 2026-10-01). Memory-bound
+> kernels achieve 85–94% of peak bandwidth (GEMV reaches 473.5 GB/s / 94.0% peak BW, beating cuBLAS by +13.7%);
+> the tiled matmul reaches 2,563 GFLOP/s at 4096³ (+38% over naive).
 
 ## What "from scratch" means here
 
@@ -25,6 +25,12 @@ Used as tools, not as implementation: **PyTorch/NumPy** generate float64 referen
 for the test suite, and **cuBLAS** appears in the benchmark binary as a baseline to be
 measured against. Neither is linked into the engine
 ([ADR 0004](docs/adr/0004-cublas-baseline-only.md)).
+
+## Hardware target & development setup
+
+- **Development Box (Machine B):** NVIDIA GeForce RTX 4070 SUPER (Ada Lovelace, `sm_89`, 56 SMs, 12 GB GDDR6X, 504.0 GB/s peak bandwidth, locked at 2475 MHz). All empirical measurements reported here were obtained on this device inside WSL2 Ubuntu 24.04 with CUDA 12.6.
+- **Headline Target:** NVIDIA GeForce RTX 4090 (24 GB, 128 SMs, 1008 GB/s peak bandwidth, `sm_89`). The codebase explicitly targets `sm_89` and scales grid dimensions automatically to both 56 SM and 128 SM configurations.
+- **Host / Laptop (Machine A):** CPU-only development environment running full Tier 1 & Tier 2 test suites with graceful CUDA degradation ([ADR 0001](docs/adr/0001-cuda-optional-build.md)).
 
 ## Quick start
 
@@ -43,7 +49,7 @@ test suite and:
 build/bin/bench_kernels
 ```
 
-Full setup for both machines, including the Windows + RTX 4090 toolchain and the
+Full setup for both machines, including the Windows + RTX 4090/4070S toolchain and the
 clock-locking recipe: **[docs/01-dev-environment.md](docs/01-dev-environment.md)**.
 
 ## Layout
@@ -52,17 +58,17 @@ clock-locking recipe: **[docs/01-dev-environment.md](docs/01-dev-environment.md)
 include/engine/     public headers — dtype, tensor, allocator, device_buffer,
                     check (error handling), cpu_ref, kernels (launch API), cuda_device
 src/                C++ implementation (tensor.cpp: 559 lines, Module 1)
-src/cpu_ref/        the CPU oracle: scalar, FP64 accumulators, obvious over fast
-kernels/            CUDA kernels — all eight implemented (6 ladder + 2 fused ops)
+src/cpu_ref/        the CPU oracle: scalar, FP64 accumulators, obvious over fast (9 ops)
+kernels/            CUDA kernels — all nine implemented (7 ladder + 2 fused ops)
 tests/              custom harness + suites: dtype, golden, cpu_ref, storage, tensor,
-                    kernels (92 tests, all passing)
+                    kernels (97 tests, all passing)
 tests/golden/       generated float64 reference data — gitignored, regenerate it
-bench/              bench_cpu_ref (the denominator) and bench_kernels (the results)
-tools/              gen_reference.py
-cmake/              CUDA detection, warning flags, config header template
+bench/              bench_cpu_ref (the denominator) and bench_kernels (with --json support)
+tools/              gen_reference.py, generate_results_table.py, roofline_plot.py
+cmake/              CUDA detection, warning flags, config header template (bakes git hash)
 brain/              persistent AI/human context — project state, conventions, decisions
-runbook/            operational procedures — build, test, benchmark, add-kernel
-docs/               environment, exercise ladder, ADRs, lab notebook, architecture flowcharts
+runbook/            operational procedures — build, test, benchmark, profile-nsight
+docs/               environment, ladder, ADRs, lab notebook, roofline.png, negative-results
 ```
 
 ## How correctness is established
@@ -121,19 +127,19 @@ the GPU than that baseline is.
 
 ## The kernel ladder (complete)
 
-Six kernels, each introducing one idea and reusing everything before it. All six are
+Seven foundational kernels, each introducing one idea and reusing everything before it. All seven are
 implemented, verified against float64 reference data, and benchmarked on the RTX 4070
-SUPER with locked GPU clocks:
+SUPER (504.0 GB/s peak, sm_89) with locked GPU clocks (2475 MHz):
 
-| # | Kernel | New idea | GPU result |
+| # | Kernel | New idea | GPU result (RTX 4070 SUPER) |
 |---|---|---|---|
-| 1 | `vector_add` | threads, blocks, grid-stride loops | ✅ 419.1 GB/s (83.2% peak) |
-| 2 | `reduce_sum` | shared memory, `__syncthreads`, warp shuffles | ✅ 456.1 GB/s (90.5% peak) |
-| 3 | `softmax_rows` | per-row reduction, numerical stability | ✅ 434.1 GB/s (86.1% peak) |
-| 4 | `rmsnorm` | reusing the reduction pattern | ✅ 435.0 GB/s (86.3% peak) |
-| 5 | `matmul_naive` | 2-D indexing, memory traffic problem | ✅ 2268 GFLOP/s @ 2048^3 |
-| 6 | `matmul_tiled` | shared-memory tiling and data reuse | ✅ 2728 GFLOP/s @ 2048^3 (+20%) |
-| 7 | `gemv` | decode token projection (M=1), 128-bit vector loads | ✅ 474.0 GB/s (94.0% peak) |
+| 1 | `vector_add` | threads, blocks, grid-stride loops | ✅ 432.6 GB/s (85.8% peak) |
+| 2 | `reduce_sum` | shared memory, `__syncthreads`, warp shuffles | ✅ 458.3 GB/s (90.9% peak) |
+| 3 | `softmax_rows` | per-row reduction, numerical stability | ✅ 435.7 GB/s (86.4% peak) |
+| 4 | `rmsnorm` | reusing the reduction pattern | ✅ 435.5 GB/s (86.4% peak) |
+| 5 | `matmul_naive` | 2-D indexing, memory traffic problem | ✅ 1,852 GFLOP/s @ 4096³ |
+| 6 | `matmul_tiled` | shared-memory tiling and data reuse | ✅ 2,563 GFLOP/s @ 4096³ (+38% over naive) |
+| 7 | `gemv` | decode token projection (M=1), 128-bit vector loads, warp shuffles | ✅ **473.5 GB/s (94.0% peak)** · $+13.7\%$ over cuBLAS |
 
 ### Kernel fusion (Module 3 — complete)
 
@@ -141,15 +147,15 @@ Fusing memory-bound operations between transformer sub-layers to eliminate DRAM 
 
 | # | Kernel | Fused operations | Design rationale |
 |---|---|---|---|
-| 8 | `rmsnorm_linear` | RMSNorm + Linear projection | Keeps normalized row in shared memory; saves 16 MiB DRAM round-trip per layer |
+| 8 | `rmsnorm_linear` | RMSNorm + Linear projection | Keeps normalized row in shared memory; saves 16 MiB DRAM round-trip per layer at M=512 |
 | 9 | `residual_rmsnorm` | Residual Add + RMSNorm | Computes residual sum and normalized state in a single pass; saves 8 MiB DRAM traffic |
 
 Design details in **[docs/02-cuda-exercises.md](docs/02-cuda-exercises.md)** and **[ADR 0006](docs/adr/0006-kernel-fusion-strategy.md)**. Complete reference diagrams in **[docs/llm-inference-flowchart.md](docs/llm-inference-flowchart.md)**.
 Empirical analysis of non-optimizations and bottlenecks is recorded in **[docs/negative-results.md](docs/negative-results.md)**, and full hardware roofline curves are visualized in **[docs/roofline.png](docs/roofline.png)**.
 
-Arithmetic intensity, against the RTX 4070 SUPER's ~164 FLOP/byte balance point, tells you which
-resource limits each one: `vector_add` is 0.08 (memory-bound by a factor of two thousand),
-`gemv` is 0.5, `rmsnorm` 0.5, `softmax` 0.6, and matmul at 1024³ is 170 — the first compute-bound
+Arithmetic intensity, against the RTX 4070 SUPER's ~70 FLOP/byte balance point (and the RTX 4090's ~82 FLOP/byte), tells you which
+resource limits each one: `vector_add` is 0.08 (memory-bound by a factor of nearly a thousand),
+`gemv` is 0.25–0.50, `rmsnorm` 0.5, `softmax` 0.6, and matmul at 4096³ is ~170 — the first compute-bound
 kernel in the project, and the only one where being clever about arithmetic wins anything.
 
 ## Design decisions
@@ -162,13 +168,16 @@ kernel in the project, and the only one where being clever about arithmetic wins
 | [0004](docs/adr/0004-cublas-baseline-only.md) | cuBLAS is a benchmark baseline, linked into exactly one target, never an implementation |
 | [0005](docs/adr/0005-cuda-arch-explicit.md) | `ENGINE_CUDA_ARCH` is explicit (`89`), and mismatches warn loudly — a wrong-arch build otherwise silently JITs and benchmarks nothing meaningful |
 | [0006](docs/adr/0006-kernel-fusion-strategy.md) | Kernel fusion strategy — fuse memory-bound elementwise operations between sub-layers to eliminate DRAM traffic |
+| [0007](docs/adr/0007-gemv-decode-specialization.md) | Dedicated GEMV kernel — 1D column tiling and warp reduction over $K$ eliminates 2D GEMM idle threads at $M=1$ |
+| [0008](docs/adr/0008-benchmark-harness-provenance.md) | Benchmark harness JSON logging & git provenance — structured JSON output with baked git hash, driver, and clocks |
+| [0009](docs/adr/0009-negative-results-reporting.md) | Negative results reporting — empirical documentation of non-optimizations and microarchitectural boundaries |
 
 ## Build options
 
 | Option | Default | Effect |
 |---|---|---|
 | `ENGINE_WITH_CUDA` | `ON` | Build CUDA kernels if `nvcc` is found. Never fatal when absent |
-| `ENGINE_CUDA_ARCH` | `89` | Target architecture. 89 = RTX 4090. A binary built for 89 runs on nothing else |
+| `ENGINE_CUDA_ARCH` | `89` | Target architecture. 89 = RTX 4090 / RTX 4070 SUPER (Ada Lovelace). A binary built for 89 runs on nothing else |
 | `ENGINE_BUILD_TESTS` | `ON` | The `engine_tests` binary and its ctest entries |
 | `ENGINE_BUILD_BENCH` | `ON` | `bench_cpu_ref`, and `bench_kernels` when CUDA is on |
 | `ENGINE_BENCH_CUBLAS` | `ON` | Measure `cublasSgemm` as a matmul baseline. Degrades to a warning if cuBLAS is absent |
@@ -183,21 +192,19 @@ files; `--target bench` runs the benchmark binaries.
 - [x] **Module 1 — Tensor Library** (complete). `Storage` + `Tensor` with refcounted
   views, reshape, transpose, slice, contiguous, clone, device transfer. 24 tensor tests,
   4 storage tests, all passing.
-- [x] **Module 2 — CUDA Kernel Ladder** (complete). Six hand-written kernels from
-  `vector_add` through `matmul_tiled`, with three-tier verification and GPU benchmarks.
-  26 kernel tests, all passing. Memory-bound kernels at 85–91% peak bandwidth.
-- [x] **Module 3 — Kernel Fusion** (complete). Fused RMSNorm + Linear projection (exercise 7)
-  and Fused Residual Add + RMSNorm (exercise 8). Eliminates intermediate DRAM roundtrips
+- [x] **Module 2 — CUDA Kernel Ladder & GEMV** (complete). Seven hand-written kernels from
+  `vector_add` through `gemv` (decode specialization), with three-tier verification and GPU benchmarks.
+  35 kernel tests, all passing. Memory-bound kernels reach up to 94.0% peak bandwidth.
+- [x] **Module 3 — Kernel Fusion** (complete). Fused RMSNorm + Linear projection (exercise 8)
+  and Fused Residual Add + RMSNorm (exercise 9). Eliminates intermediate DRAM roundtrips
   and kernel launch overhead. Verified against golden reference data.
-- [ ] **Module 4 — FlashAttention** — tiled online softmax + GEMM fusion, avoiding materialisation
-  of the full S = QK^T attention-score matrix.
-- [ ] **Quantization** — packed INT4 weights with dequantisation kernels.
-- [ ] **KV-Cache** — ring-buffer cache with zero-copy slicing via the Tensor view system.
-- [ ] **Model Loader** — GGUF-style mmap'd weights, ~50 weight tensors aliasing one
+- [ ] **Module 4 — FlashAttention-2** — tiled online softmax + GEMM fusion, avoiding materialisation
+  of the full S = QK^T attention-score matrix; causal masking + GQA support; RoPE and SwiGLU.
+- [ ] **Module 5 — Quantization** — packed INT4 / INT8 weights with fused dequantisation GEMV kernels.
+- [ ] **Module 6 — KV-Cache** — ring-buffer cache with zero-copy slicing via the Tensor view system.
+- [ ] **Module 7 — Model Loader** — GGUF-style mmap'd weights, ~50 weight tensors aliasing one
   region via non-owning `Storage`.
-- [ ] **Tokenizer** — BPE.
-- [ ] **Sampler** — top-k, top-p, temperature scaling.
-- [ ] **Python Bindings** — for usability.
-- [ ] **End-to-End Inference** — TinyLlama 1.1B (dev), quantized Llama-2-7B (headline).
+- [ ] **Module 8 — End-to-End Inference & Evaluation** — BPE Tokenizer, Sampler, TinyLlama 1.1B execution loop,
+  Python bindings (`pybind11`), and `llama-bench` comparative evaluation.
 
 The loader is deliberately architecture-agnostic.
