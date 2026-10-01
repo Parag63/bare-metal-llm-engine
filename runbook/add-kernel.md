@@ -107,9 +107,9 @@ git commit -m "Exercise N: <kernel_name> — passed X, pending Y"
 - [ ] Lab notebook entry written with prediction-before-measurement
 - [ ] Committed with descriptive message
 
-## Adding a completely new kernel (not in the original six)
+## Adding a completely new kernel (beyond existing ladder exercises)
 
-If you're adding a kernel that isn't one of the six exercises:
+If you're adding a kernel that isn't one of the existing exercises:
 
 1. **Create the kernel file:** `kernels/<name>.cu`
 2. **Add the declaration** to `include/engine/kernels.hpp`

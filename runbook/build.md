@@ -31,7 +31,7 @@
    ```
    This writes ~28 MiB of float64 golden files to `tests/golden/`.
 
-## Machine B (RTX 4090 — with CUDA)
+## Machine B (RTX 4070 SUPER / RTX A4000 / RTX 4090 — with CUDA)
 
 ### Steps
 
@@ -42,12 +42,13 @@
 
 2. **Configure:**
    ```bash
+   # Default targets sm_86;sm_89 fat binaries (ADR 0010)
    cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
    ```
    The configure summary should show:
    ```
-   CUDA             : ENABLED (nvcc XX.X)
-   CUDA arch        : 89
+   CUDA             : ENABLED (nvcc 12.x)
+   CUDA arch        : 86;89
    ```
 
 3. **Build:**

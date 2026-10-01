@@ -30,9 +30,10 @@ sudo nvidia-smi -lgc 2100
 nvidia-smi -q -d CLOCK
 ```
 
-Common clock values for RTX 4090:
-- **2100 MHz** — a good stable point below max boost
-- **2520 MHz** — max boost (may thermal throttle under sustained load)
+Common clock values:
+- **RTX 4070 SUPER**: Base **1980 MHz**, Boost **2475 MHz**
+- **RTX 4090**: Base **2100 MHz**, Boost **2520 MHz**
+- **RTX A4000**: Base **735 MHz**, Boost **1560 MHz**
 
 ### 2. Build in release mode
 
@@ -63,11 +64,11 @@ build/bin/bench_kernels --json > results.json
 Instead of manual copy-pasting, use the automated table generator to synchronize `README.md`:
 
 ```bash
-# Option A: Run benchmark and update README.md directly
-python3 tools/generate_results_table.py --update-readme
-
-# Option B: Ingest an existing JSON file and update README.md
+# Option A: Ingest an existing JSON file and update README.md (Recommended)
 python3 tools/generate_results_table.py --input results.json --update-readme
+
+# Option B: Run benchmark directly and update README.md
+python3 tools/generate_results_table.py --update-readme
 ```
 
 This updates the benchmark table and provenance block in `README.md` without human error.
@@ -77,10 +78,7 @@ This updates the benchmark table and provenance block in `README.md` without hum
 Generate an empirical roofline visualization comparing all measured kernels against theoretical DRAM bandwidth and FP32 compute ceilings:
 
 ```bash
-# Generates docs/roofline.png from the latest benchmark run
-python3 tools/roofline_plot.py --output docs/roofline.png
-
-# Or specify a pre-generated JSON benchmark file
+# Recommended (always pass --input to prevent non-interactive stdin blocking under WSL):
 python3 tools/roofline_plot.py --input results.json --output docs/roofline.png
 ```
 

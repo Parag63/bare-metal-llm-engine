@@ -2,12 +2,12 @@
 
 Two machines, one repository.
 
-| | Machine A — the laptop | Machine B — the 4090 box |
+| | Machine A — the laptop | Machine B — the GPU Box |
 |---|---|---|
-| GPU | none usable for CUDA | GeForce RTX 4090, `sm_89` |
+| GPU | none usable for CUDA | GeForce RTX 4070 SUPER (`sm_89`) / RTX A4000 (`sm_86`) / RTX 4090 (`sm_89`) |
 | What happens here | write C++, run the CPU test suite, run `bench_cpu_ref`, edit docs, commit | compile the kernels, run the `kernels` suite, run `bench_kernels`, profile with Nsight |
 | CUDA in the build | absent — `ENGINE_CUDA_ENABLED=OFF` | present — `ENGINE_CUDA_ENABLED=ON` |
-| Test suites that run | `dtype`, `golden`, `cpu_ref`, `storage`, `tensor` | all of the above, plus `kernels` |
+| Test suites that run | `dtype`, `golden`, `cpu_ref`, `storage`, `tensor`, `allocator` | all of the above, plus `kernels` |
 | Access | yours | yours, exclusive |
 
 Git is the transport. Nothing is copied by hand, no files are edited over a remote
@@ -73,28 +73,21 @@ it as one would train you to ignore red builds.
 is fine; both compute in float64 and the tolerances in the tests are derived against
 float64 truth.
 
-## Machine B setup (Windows + RTX 4090)
+## Machine B setup (WSL2 / Windows + CUDA)
 
 Install, in this order:
 
-1. **Visual Studio 2022 Build Tools**, with the "Desktop development with C++"
-   workload. This is not optional and not replaceable by MinGW: on Windows, `nvcc`
-   uses `cl.exe` as its host compiler. There is no CUDA-on-Windows path that does not
-   go through MSVC.
-2. **CUDA Toolkit 12.x.** Must be ≥ 11.8, because that is the first release that can
-   emit `sm_89` at all. If `nvcc --list-gpu-arch` does not mention `compute_89`, the
-   toolkit is too old and the build will warn you about exactly this at configure time.
-3. **CMake ≥ 3.20** and **Ninja** (Ninja is bundled with the VS Build Tools).
+1. **Visual Studio 2022 Build Tools** (if native Windows) or **build-essential** (if WSL2 Ubuntu).
+2. **CUDA Toolkit 12.x.** Must be ≥ 11.8 to compile `sm_89`.
+3. **CMake ≥ 3.20** and **Ninja**.
 4. **Git**.
 
-Then build from an **x64 Native Tools Command Prompt for VS 2022** — a plain `cmd` or
-PowerShell window will not have `cl.exe` on `PATH`, and the CUDA detection will fail
-with a message about no working host compiler that reads as if CUDA itself is missing.
+Then build:
 
-```bat
+```bash
 git clone <your-repo-url> bare-metal-llm-engine
 cd bare-metal-llm-engine
-cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build -j
 ```
 
@@ -102,13 +95,11 @@ Confirm the summary:
 
 ```
   CUDA             : ENABLED (nvcc 12.x)
-  CUDA arch        : 89
+  CUDA arch        : 86;89
   Sync-check       : OFF  (ON = debuggable, benchmarks invalid)
 ```
 
-If `CUDA arch` is anything other than 89, you are compiling for the wrong GPU and the
-binary will not run. `ENGINE_CUDA_ARCH` is a cache variable — pass
-`-DENGINE_CUDA_ARCH=89` and reconfigure.
+Per [ADR 0010](adr/0010-multi-architecture-cuda-compilation.md), the engine compiles multi-architecture fat binaries (`86;89`) embedding native SASS for Ampere and Ada Lovelace GPUs.
 
 `scripts/build.ps1` wraps the above, and `scripts/gpu-run.sh` runs the whole
 pull → configure → build → generate → test → benchmark sequence in one go.

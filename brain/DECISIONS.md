@@ -19,6 +19,7 @@
 | [ADR-0007](../docs/adr/0007-gemv-decode-specialization.md) | GEMV decode specialization | Dedicated matrix-vector kernel for $M=1$ autoregressive decode, reaching 94.0% peak BW and beating cuBLAS |
 | [ADR-0008](../docs/adr/0008-benchmark-harness-provenance.md) | Benchmark harness JSON & provenance | Structured `--json` export, device driver, hardware clock, and git commit hash tracking |
 | [ADR-0009](../docs/adr/0009-negative-results-reporting.md) | Negative results reporting | Explicitly document optimizations that failed or degraded performance to preserve empirical boundaries |
+| [ADR-0010](../docs/adr/0010-multi-architecture-cuda-compilation.md) | Multi-architecture CUDA compilation | Multi-arch fat binaries (`86;89`) for Ampere and Ada Lovelace without PTX JIT overhead |
 
 ## Informal Decisions
 
@@ -102,4 +103,19 @@ macro was already expanded when the library was compiled. This was a real bug in
 **Date:** Oct 2026
 **Decision:** Do not attribute $M=1$ kernel fusion speedups to DRAM traffic reduction in the lab notebook.
 **Why:** At $M=1, K=4096$, the intermediate activation tensor is only 16 KiB. Modern Ada Lovelace GPUs have 48–72 MiB L2 cache, meaning the intermediate data stays in L2 even in unfused execution. The measured 3–5 µs speedup per projection is entirely due to eliminating kernel launch overhead, not DRAM bandwidth savings.
+
+### D-012: PoolAllocator power-of-two size class bucketing and 256-byte alignment
+**Date:** Oct 2026 (Phase 4)
+**Decision:** `PoolAllocator` organizes memory allocations into power-of-two size class freelists (256 B to 1 GiB) with contiguous slab carving for new sizes, enforcing 256-byte alignment.
+**Why:** Eliminates runtime `cudaMalloc` / `cudaFree` driver call overhead ($\sim 10\text{--}50\ \mu\text{s}$ per call). 256-byte alignment ensures that all tensor buffers satisfy hardware coalescing constraints and 128-bit vector memory instruction requirements. Passed the 100,000 cycles acceptance test with `num_driver_allocs == 1`.
+
+### D-013: 2D Register-tiled GEMM with transposed shared memory s_A
+**Date:** Oct 2026 (Phase 4)
+**Decision:** `matmul_register_tiled` maps a $128 \times 128$ block tile to 256 threads ($16 \times 16$), where each thread computes an $8 \times 8$ sub-matrix in 64 registers using outer products over $BK=8$. Shared memory for matrix A is stored transposed: `s_A[BK][BM]`.
+**Why:** Standard shared-memory tiling (`matmul_tiled`) saturates shared-memory bank bandwidth ($\text{AI}_{\text{smem}} = 0.25\text{ FLOP/byte}$). Register tiling raises shared-memory arithmetic intensity by $8\times$ to $2.0\text{ FLOP/byte}$. Transposing `s_A` enables conflict-free stride-1 column reads by warps. Achieves 16.17–17.55 TFLOP/s (6.7x speedup over tiled and 73% of cuBLAS).
+
+### D-014: Fused single-pass SwiGLU with 128-bit vector instructions
+**Date:** Oct 2026 (Phase 4)
+**Decision:** Fused SwiGLU activation computes $\text{SiLU}(\text{gate}) \cdot \text{up}$ in registers using `float4` (FP32) and `uint4` (FP16) vectorized memory loads, falling back to scalar loads for unaligned edges.
+**Why:** Avoids roundtripping the intermediate `silu_out` tensor through DRAM, cutting memory traffic from $20N$ bytes to $12N$ bytes ($40\%$ savings) and achieving a measured $1.52\times$ speedup on prefill ($512 \times 11008$) and $1.61\times$ speedup on decode.
 

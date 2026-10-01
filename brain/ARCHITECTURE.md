@@ -9,25 +9,32 @@
 bare-metal-llm-engine/
 ├── brain/              # AI context layer — persistent project memory (this folder)
 ├── docs/               # Technical documentation (human-readable)
-│   ├── adr/            # Architectural Decision Records (ADR-0001 through ADR-0005)
+│   ├── adr/            # Architectural Decision Records (ADR-0001 through ADR-0010)
 │   ├── 01-dev-environment.md
 │   ├── 02-cuda-exercises.md
-│   └── lab-notebook.md
+│   ├── lab-notebook.md
+│   ├── negative-results.md # Empirical boundaries & non-optimizations
+│   └── roofline.png    # Hardware roofline plot
 ├── runbook/            # Operational procedures — step-by-step how-tos
 ├── include/engine/     # Public C++ headers
 │   ├── dtype.hpp       # DType enum (F32, F16, BF16, I8, I4)
+│   ├── half.hpp        # IEEE-754 binary16 bit-exact host representation & conversions
 │   ├── tensor.hpp      # Tensor + Storage abstractions (Module 1)
 │   ├── allocator.hpp   # Memory allocation interface
+│   ├── pool_allocator.hpp # High-throughput PoolAllocator (slab + power-of-two buckets)
+│   ├── cuda_stream.hpp # RAII CudaStream and CudaEvent primitives
 │   ├── device_buffer.hpp  # RAII CUDA device buffer
 │   ├── check.hpp       # Error handling macros (ENGINE_CHECK, CUDA_CHECK)
 │   ├── cpu_ref.hpp     # CPU oracle function declarations
 │   ├── kernels.hpp     # CUDA kernel launcher declarations
-│   └── cuda_device.hpp # GPU device query utilities
+│   └── cuda_device.hpp # GPU device query utilities & live NVML clocks
 ├── src/                # C++ implementation
-│   ├── tensor.cpp      # Tensor + Storage implementation (559 lines, Module 1)
-│   ├── allocator.cpp   # Memory allocator
+│   ├── tensor.cpp      # Tensor + Storage implementation
+│   ├── allocator.cpp   # Default memory allocators
+│   ├── pool_allocator.cpp # PoolAllocator implementation
+│   ├── cuda_stream.cpp # RAII Stream & Event implementations
 │   ├── dtype.cpp       # DType utilities
-│   ├── cuda_device.cpp # GPU device queries
+│   ├── cuda_device.cpp # GPU device queries & dynamic NVML loader
 │   └── cpu_ref/        # CPU reference implementations (the oracle)
 │       ├── vector_add_cpu.cpp
 │       ├── reduce_cpu.cpp
@@ -36,35 +43,45 @@ bare-metal-llm-engine/
 │       ├── matmul_cpu.cpp
 │       ├── gemv_cpu.cpp
 │       ├── rmsnorm_linear_cpu.cpp
-│       └── residual_rmsnorm_cpu.cpp
-├── kernels/            # CUDA kernels (the exercise ladder)
+│       ├── residual_rmsnorm_cpu.cpp
+│       ├── embedding_cpu.cpp
+│       ├── argmax_cpu.cpp
+│       └── swiglu_cpu.cpp
+├── kernels/            # CUDA kernels (the exercise ladder + Phase 4 optimizations)
 │   ├── vector_add.cu   # Exercise 1 — WORKED EXAMPLE ✅
 │   ├── reduce_sum.cu   # Exercise 2 — ✅ implemented (two-stage + warp shuffle)
 │   ├── softmax.cu      # Exercise 3 — ✅ implemented (three-pass + block reduction)
 │   ├── rmsnorm.cu      # Exercise 4 — ✅ implemented (sum-of-squares + rsqrtf)
 │   ├── matmul_naive.cu # Exercise 5 — ✅ implemented (coalesced 16x16 2D mapping)
 │   ├── matmul_tiled.cu # Exercise 6 — ✅ implemented (shared-memory 32x32 tiled GEMM)
+│   ├── matmul_register_tiled.cu # Phase 4 — ✅ 2D register-tiled GEMM (128x128, 8x8 tile, float4)
 │   ├── gemv.cu         # Exercise 7 — ✅ implemented (M=1 decode, 64-col tile, float2)
+│   ├── gemv_fp16.cu    # Phase 3 — ✅ implemented (M=1 decode FP16, half2, float acc)
+│   ├── embedding.cu    # Phase 3 — ✅ implemented (128-bit vector gather)
+│   ├── argmax.cu       # Phase 3 — ✅ implemented (16-warp shuffle reduction)
+│   ├── swiglu.cu       # Phase 4 — ✅ implemented (fused SiLU + Mul, float4/uint4)
 │   ├── rmsnorm_linear.cu # Exercise 8 — ✅ implemented (fused RMSNorm + GEMM projection)
 │   └── residual_rmsnorm.cu # Exercise 9 — ✅ implemented (fused Residual Add + RMSNorm)
-├── tests/              # Test suites (97 tests total, 100% passing)
+├── tests/              # Test suites (118 tests total across 8 suites, 100% passing)
 │   ├── test_framework.hpp/cpp  # Custom test harness with TEST/TEST_PENDING
 │   ├── test_dtype.cpp          # DType tests
 │   ├── test_tensor.cpp         # Module 1 specification (tensor tests)
-│   ├── test_cpu_ref.cpp        # CPU oracle tests (37 tests)
-│   ├── test_kernels.cu         # CUDA kernel tests (40 tests)
+│   ├── test_allocator.cpp      # Phase 4 PoolAllocator tests (100k cycles acceptance)
+│   ├── test_cpu_ref.cpp        # CPU oracle tests (25 tests)
+│   ├── test_kernels.cu         # CUDA kernel tests (44 tests)
 │   ├── golden.hpp/cpp          # Golden file loader
 │   └── golden/                 # Float64 reference data (gitignored, regenerated)
 ├── bench/              # Benchmark harness + benchmarks
-│   ├── bench_harness.hpp       # CUDA-event timing, warmup, JSON export, provenance
+│   ├── bench_harness.hpp       # CUDA-event timing, warmup, JSON export, NVML clocks
 │   ├── bench_cpu_ref.cpp       # CPU reference baselines (--json support)
 │   └── bench_kernels.cu        # CUDA kernel benchmarks (--json support)
 ├── tools/
 │   ├── gen_reference.py        # Float64 reference data generator (PyTorch/NumPy)
 │   ├── generate_results_table.py # Automated README benchmark table updater
-│   └── roofline_plot.py        # Roofline model generator (produces docs/roofline.png)
+│   ├── roofline_plot.py        # Roofline model generator (produces docs/roofline.png)
+│   └── run_llama_bench.sh      # External llama.cpp benchmark runner
 ├── cmake/              # CMake modules
-│   ├── EngineCuda.cmake        # CUDA detection (never fatal)
+│   ├── EngineCuda.cmake        # Multi-arch CUDA detection (86;89)
 │   ├── EngineWarnings.cmake    # Warning flags
 │   └── engine_config.hpp.in    # Config header template (injects git hash & build info)
 ├── scripts/            # Build/test/run scripts
@@ -72,7 +89,7 @@ bare-metal-llm-engine/
 │   ├── test.sh
 │   ├── gpu-run.sh
 │   └── profile_kernels.sh      # Nsight Compute (ncu) profiling script
-├── CMakeLists.txt      # Root build configuration
+├── CMakeLists.txt      # Root build configuration (ENGINE_CUDA_ARCH="86;89")
 ├── .clang-format       # Code formatting rules
 ├── .gitignore
 └── README.md           # Human-readable project overview & auto-synced benchmark results
@@ -125,6 +142,20 @@ Two fused operations targeting the memory wall between sub-layers (ADR 0006):
 - **Decode ($M=1$) vs Prefill ($M=512$) Fusion Dynamics:**
   - At $M=1$, intermediate activation tensor is only 16 KiB ($1 \times 4096 \times 4$ bytes), which fits comfortably in the 48 MiB hardware L2 cache. Therefore, fusion speedup at decode shape is driven by kernel launch overhead elimination (~3–5 µs saved per projection) rather than DRAM traffic reduction.
   - At prefill shapes ($M \ge 512$), intermediate tensors spill out of cache, making shared-memory fusion deliver substantial DRAM bandwidth reductions.
+
+### Phase 4 — Production Foundation & 2D Register Tiling (Oct 2026)
+
+Advanced high-throughput GEMM, memory management, and activation fusion:
+
+| # | Component / Kernel | Target | Status | Architectural Impact |
+|---|---|---|---|---|
+| 10 | `gemv_fp16` | Token generation in FP16 | ✅ Complete | Coalesced `half2` vector loads, FP32 accumulator. Achieves **0.076 ms** ($1.89\times$ speedup over FP32) |
+| 11 | `embedding` | Token ID gather | ✅ Complete | 128-bit vector instructions (`float4`, `uint4`). $8.9\ \mu\text{s}$ execution time |
+| 12 | `argmax` | Greedy decoding | ✅ Complete | 16-warp shuffle reduction with deterministic lowest-index tie breaking. $10\ \mu\text{s}$ latency |
+| 13 | `matmul_register_tiled` | Compute-bound GEMM | ✅ Complete | $128 \times 128$ block, $8 \times 8$ register tile, transposed `s_A`, `float4` loads. Achieves **16.17–17.55 TFLOP/s** ($6.7\times$ over `matmul_tiled`, **73.0% of cuBLAS**) |
+| 14 | `swiglu` | Fused MLP activation | ✅ Complete | Single-pass $\text{SiLU}(\text{gate}) \cdot \text{up}$ ($40\%$ DRAM traffic reduction). **0.295 ms** ($1.52\times$ over unfused) |
+| -- | `PoolAllocator` | Host & Device memory | ✅ Complete | Slab pre-allocation, power-of-two size classes, 256-byte alignment. Passed 100k cycles test with 1 driver alloc |
+| -- | `CudaStream` / `CudaEvent` | Asynchronous compute | ✅ Complete | Move-only RAII wrappers with non-blocking flags and safe synchronization |
 
 ### Module 4 — FlashAttention-2 Forward Kernel (Oct – Nov 2026)
 - **Target:** Fused Multi-Head Attention forward pass without materializing the $S \times S$ attention matrix.

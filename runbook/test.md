@@ -55,13 +55,14 @@ TEST(tensor, numel_is_the_product_of_shape) { ... }
 
 ## Expected test suites per machine
 
-| Suite | Machine A (no GPU) | Machine B (RTX 4090) |
+| Suite | Machine A (no GPU) | Machine B (RTX 4070 SUPER / CUDA GPU) |
 |---|---|---|
 | `dtype` | ✅ Runs | ✅ Runs |
 | `golden` | ✅ Runs | ✅ Runs |
 | `cpu_ref` | ✅ Runs | ✅ Runs |
 | `storage` | ✅ Runs | ✅ Runs |
 | `tensor` | ✅ Runs | ✅ Runs |
+| `allocator` | ✅ Runs (CPU tests) | ✅ Runs (CPU + CUDA pool tests) |
 | `kernels` | ⏭️ Skipped (no CUDA) | ✅ Runs |
 
 ## Verification
