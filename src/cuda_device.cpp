@@ -39,6 +39,7 @@ double cuda_peak_bandwidth_gbs() { return 0.0; }
 std::string cuda_driver_version() { return "none"; }
 int cuda_clock_rate_khz() { return 0; }
 int cuda_live_sm_clock_mhz() { return 0; }
+int cuda_live_mem_clock_mhz() { return 0; }
 void print_cuda_device_info() {
   std::printf("CUDA: not available -- this is a CPU-only build.\n");
 }
