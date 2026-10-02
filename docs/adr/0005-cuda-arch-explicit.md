@@ -82,3 +82,10 @@ architectures and buys nothing for a project that runs on exactly one known GPU.
 **Leave it unset and let CMake choose.** CMake's default depends on the toolkit version
 and has changed between releases. That is precisely case 2 above: it works, and you do
 not know what you measured.
+
+---
+
+## Addendum (October 2026): Headless CI Architecture Default
+
+On headless CI runners lacking physical NVIDIA hardware, CMake defaults to `"86;89"` to validate compilation across Ampere and Ada Lovelace without requiring a runtime GPU at configure time.
+

@@ -86,12 +86,11 @@ int cuda_clock_rate_khz() {
   return prop.clockRate;
 }
 
-int cuda_live_sm_clock_mhz() {
+static int cuda_live_clock_mhz(int clock_type) {
   if (cuda_device_count() == 0) return 0;
 
   using nvmlReturn_t = int;
   using nvmlDevice_t = void*;
-  constexpr int kNvmlClockSm = 1;
 
   using pfn_nvmlInit_v2 = nvmlReturn_t (*)();
   using pfn_nvmlDeviceGetHandleByIndex_v2 = nvmlReturn_t (*)(unsigned int, nvmlDevice_t*);
@@ -100,7 +99,7 @@ int cuda_live_sm_clock_mhz() {
 
 #if defined(_WIN32)
   HMODULE lib = LoadLibraryA("nvml.dll");
-  if (!lib) return cuda_clock_rate_khz() / 1000;
+  if (!lib) return (clock_type == 1) ? (cuda_clock_rate_khz() / 1000) : 0;
   auto fn_init = reinterpret_cast<pfn_nvmlInit_v2>(GetProcAddress(lib, "nvmlInit_v2"));
   auto fn_get_handle = reinterpret_cast<pfn_nvmlDeviceGetHandleByIndex_v2>(
       GetProcAddress(lib, "nvmlDeviceGetHandleByIndex_v2"));
@@ -111,7 +110,7 @@ int cuda_live_sm_clock_mhz() {
 #else
   void* lib = dlopen("libnvidia-ml.so.1", RTLD_LAZY);
   if (!lib) lib = dlopen("libnvidia-ml.so", RTLD_LAZY);
-  if (!lib) return cuda_clock_rate_khz() / 1000;
+  if (!lib) return (clock_type == 1) ? (cuda_clock_rate_khz() / 1000) : 0;
   auto fn_init = reinterpret_cast<pfn_nvmlInit_v2>(dlsym(lib, "nvmlInit_v2"));
   auto fn_get_handle = reinterpret_cast<pfn_nvmlDeviceGetHandleByIndex_v2>(
       dlsym(lib, "nvmlDeviceGetHandleByIndex_v2"));
@@ -128,7 +127,7 @@ int cuda_live_sm_clock_mhz() {
         nvmlDevice_t handle = nullptr;
         if (fn_get_handle(static_cast<unsigned int>(dev), &handle) == 0) {
           unsigned int clock_mhz = 0;
-          if (fn_get_clock(handle, kNvmlClockSm, &clock_mhz) == 0) {
+          if (fn_get_clock(handle, clock_type, &clock_mhz) == 0) {
             result_clock = static_cast<int>(clock_mhz);
           }
         }
@@ -143,8 +142,19 @@ int cuda_live_sm_clock_mhz() {
   dlclose(lib);
 #endif
 
-  if (result_clock > 0) return result_clock;
+  return result_clock;
+}
+
+int cuda_live_sm_clock_mhz() {
+  constexpr int kNvmlClockSm = 1;
+  int clk = cuda_live_clock_mhz(kNvmlClockSm);
+  if (clk > 0) return clk;
   return cuda_clock_rate_khz() / 1000;
+}
+
+int cuda_live_mem_clock_mhz() {
+  constexpr int kNvmlClockMem = 2;
+  return cuda_live_clock_mhz(kNvmlClockMem);
 }
 
 std::string cuda_device_summary() {
@@ -203,6 +213,10 @@ void print_cuda_device_info() {
         live_clk, prop.clockRate / 1000.0);
   } else {
     std::printf("  Clock rate                : %.0f MHz\n", prop.clockRate / 1000.0);
+  }
+  const int live_mem_clk = cuda_live_mem_clock_mhz();
+  if (live_mem_clk > 0) {
+    std::printf("  Memory clock rate         : %d MHz (live via NVML)\n", live_mem_clk);
   }
   std::printf("  Async engines             : %d\n", prop.asyncEngineCount);
   std::printf("  Concurrent kernels        : %s\n",

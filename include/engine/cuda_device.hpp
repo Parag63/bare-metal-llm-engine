@@ -28,8 +28,8 @@ int cuda_device_count();
 
 /// Theoretical peak global-memory bandwidth in GB/s, computed from the clock and
 /// bus width. Compare a memory-bound kernel's achieved bandwidth against this to
-/// know whether it is worth optimising further -- on the RTX 4090 the ceiling is
-/// about 1008 GB/s, so a kernel sustaining ~900 GB/s is essentially done and
+/// know whether it is worth optimising further -- on the RTX 4070 SUPER the ceiling is
+/// 504.0 GB/s, so a kernel sustaining ~450 GB/s is essentially done and
 /// further effort belongs elsewhere.
 double cuda_peak_bandwidth_gbs();
 
@@ -42,5 +42,9 @@ int cuda_clock_rate_khz();
 /// Live SM clock rate in MHz queried dynamically via NVML at runtime.
 /// Falls back to nominal clock rate if NVML is not available. Returns 0 on CPU-only builds.
 int cuda_live_sm_clock_mhz();
+
+/// Live memory clock rate in MHz queried dynamically via NVML at runtime.
+/// Returns 0 on CPU-only builds or if NVML is not available.
+int cuda_live_mem_clock_mhz();
 
 }  // namespace engine

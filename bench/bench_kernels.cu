@@ -744,6 +744,14 @@ void bench_swiglu(Table& t, int reps) {
     const int threads = 256;
     const int blocks = static_cast<int>((n + threads - 1) / threads);
 
+    // Warm the GPU to ramp SM and memory clocks into performance P0 state
+    for (int w = 0; w < 30; ++w) {
+      silu_unfused_kernel<<<blocks, threads>>>(gate.get(), temp_silu.get(), n);
+      mul_unfused_kernel<<<blocks, threads>>>(temp_silu.get(), up.get(), out.get(), n);
+      engine::cuda::swiglu(gate.get(), up.get(), out.get(), n);
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
+
     t.measure_gpu(
         "swiglu (unfused: silu+mul)", c.label, flops, unfused_bytes,
         [&] {
@@ -751,12 +759,12 @@ void bench_swiglu(Table& t, int reps) {
           mul_unfused_kernel<<<blocks, threads>>>(temp_silu.get(), up.get(), out.get(),
                                                   n);
         },
-        /*warmup=*/5, reps);
+        /*warmup=*/10, reps);
 
     t.measure_gpu(
         "swiglu (fused FP32)", c.label, flops, fused_bytes,
         [&] { engine::cuda::swiglu(gate.get(), up.get(), out.get(), n); },
-        /*warmup=*/5, reps);
+        /*warmup=*/10, reps);
 
     std::vector<engine::half> h_gate_half =
         random_host_half(static_cast<std::size_t>(n), 1u);

@@ -445,6 +445,10 @@ class Table {
     } else if (engine::cuda_clock_rate_khz() > 0) {
       os << "GPU clock rate: " << (engine::cuda_clock_rate_khz() / 1000) << " MHz\n";
     }
+    const int live_mem_clock = engine::cuda_live_mem_clock_mhz();
+    if (live_mem_clock > 0) {
+      os << "GPU memory clock: " << live_mem_clock << " MHz (live via NVML)\n";
+    }
 #endif
     if (peak_bw > 0.0) {
       os << "Peak DRAM bandwidth (theoretical): " << num(peak_bw) << " GB/s\n";
@@ -472,6 +476,7 @@ class Table {
   void print_json(std::ostream& os = std::cout) const {
     const double peak_bw = engine::cuda_peak_bandwidth_gbs();
     const int live_sm_clock = engine::cuda_live_sm_clock_mhz();
+    const int live_mem_clock = engine::cuda_live_mem_clock_mhz();
     const int static_sm_clock = engine::cuda_clock_rate_khz() / 1000;
     os << "{\n";
     os << "  \"title\": \"" << escape_json(title_) << "\",\n";
@@ -482,6 +487,7 @@ class Table {
     os << "    \"clock_rate_mhz\": "
        << (live_sm_clock > 0 ? live_sm_clock : static_sm_clock) << ",\n";
     os << "    \"live_sm_clock_mhz\": " << live_sm_clock << ",\n";
+    os << "    \"live_mem_clock_mhz\": " << live_mem_clock << ",\n";
     os << "    \"static_sm_clock_mhz\": " << static_sm_clock << ",\n";
     os << "    \"peak_bandwidth_gbs\": " << peak_bw << ",\n";
     os << "    \"git_hash\": \"" << escape_json(ENGINE_GIT_HASH) << "\",\n";
