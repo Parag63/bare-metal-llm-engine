@@ -3,7 +3,7 @@
 > **When to use:** When recording performance numbers for the lab notebook. Unlocked
 > GPU clocks fluctuate under thermal throttling, making measurements incomparable.
 >
-> **Prerequisites:** Machine B (RTX 4090), admin/root access for `nvidia-smi`, tests
+> **Prerequisites:** Machine B (RTX 4070 SUPER), admin/root access for `nvidia-smi`, tests
 > passing for the kernel you want to benchmark.
 >
 > **Time estimate:** ~5 minutes including clock setup
@@ -23,8 +23,8 @@ the spread.
 # Enable persistence mode (survives between nvidia-smi calls)
 sudo nvidia-smi -pm 1
 
-# Lock clocks to a specific frequency (example: 2100 MHz for RTX 4090)
-sudo nvidia-smi -lgc 2100
+# Lock clocks to a specific frequency (example: 2475 MHz for RTX 4070 SUPER)
+sudo nvidia-smi -lgc 2475
 
 # Verify
 nvidia-smi -q -d CLOCK
@@ -32,7 +32,6 @@ nvidia-smi -q -d CLOCK
 
 Common clock values:
 - **RTX 4070 SUPER**: Base **1980 MHz**, Boost **2475 MHz**
-- **RTX 4090**: Base **2100 MHz**, Boost **2520 MHz**
 
 ### 2. Build in release mode
 

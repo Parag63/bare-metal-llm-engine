@@ -76,7 +76,7 @@ passed 118   failed 0   pending 0   skipped 0
 
 | Month | Module | Milestone & Deliverables | Priority Items |
 |---|---|---|---|
-| **Oct 2026** | **Module 4: FlashAttention** | • Naive attention baseline ($S \times S$ matrix)<br>• Causal masking + GQA (32 Q heads, 4 KV heads)<br>• Float64 stability test across sequence lengths<br>• Tiled online softmax kernel + memory crossover benchmark<br>• Separate prefill & decode attention kernels<br>• RoPE, SwiGLU, Embedding lookup, Argmax/sampling kernels | `[Must]`×4<br>`[Should]`×2 |
+| **Oct 2026** | **Module 4: FlashAttention-2** | • Rotary Position Embeddings (RoPE) kernel (`kernels/rope.cu`)<br>• Naive attention baseline with causal masking & GQA ($S \times S$ reference)<br>• Float64 stability test across sequence lengths ($S \in [64, 2048]$)<br>• Tiled online softmax FlashAttention-2 kernel + memory crossover benchmark<br>• Separate prefill & decode (FlashDecoding) attention kernels | `[Must]`×4<br>`[Should]`×2 |
 | **Nov 2026** | **Infrastructure & Ladder Refinements** | • Register-tiled GEMM (`matmul_register_tiled`, float4 loads, double buffer)<br>• End-to-end FP16 Tensor/kernel data path<br>• `PoolAllocator` with memory accounting (peak/current device bytes)<br>• CUDA stream/event asynchronous copy/compute wrapper | `[Must]`×2<br>`[Should]`×2 |
 | **Dec 2026 – Jan 2027** | **Module 5: Quantization** | • Q8_0 fallback + Q4_0 real GGUF block layout (32 weights/block + FP16 scale)<br>• Fused dequantize-and-multiply kernel for GEMV (decode) then prefill<br>• Perplexity measurement: FP16 vs Q8 vs Q4 vs `llama.cpp`<br>• Effective bandwidth per token reporting | `[Must]`×3<br>`[Should]`×1 |
 | **Feb 2027** | **Module 6: KV-Cache** | • Preallocated per-layer cache + incremental decode correctness test<br>• Memory math in notebook (~22 KB/token for TinyLlama FP16)<br>• Head-major vs sequence-major cache layout comparison<br>• [Stretch] INT8 KV quantization or paged allocator | `[Must]`×2<br>`[Should]`×1<br>`[Stretch]`×1 |
@@ -86,9 +86,10 @@ passed 118   failed 0   pending 0   skipped 0
 
 ---
 
-## Immediate Next Steps (October 2026)
+## Immediate Next Steps (Module 4: FlashAttention-2)
 
-1. **Module 4: Naive Attention Baseline** — build $S \times S$ attention matrix reference.
-2. **Support Causal Masking & GQA** — 32 Q heads sharing 4 KV heads for TinyLlama.
-3. **FlashAttention Implementation** — online softmax tile-by-tile fusion.
-4. **Prerequisite Kernels for TinyLlama** — RoPE (Rotary Embeddings) and SwiGLU.
+1. **Phase 4.1: Rotary Position Embeddings (RoPE):** Implement `tools/gen_reference.py` float64 generator, `src/cpu_ref/rope_cpu.cpp`, and vectorized CUDA kernel `kernels/rope.cu`.
+2. **Phase 4.2: Naive Multi-Head Attention Baseline:** Build $S \times S$ ground truth oracle with causal masking and GQA ($H_Q = 32, H_{KV} = 4$).
+3. **Phase 4.3: FlashAttention-2 Prefill Kernel:** Tiled shared-memory online softmax forward pass with causal mask branch skipping.
+4. **Phase 4.4: FlashDecoding Specialization:** Split-KV decode attention for single-token generation across extended context windows.
+5. **Phase 4.5: Benchmarking & Profiling:** Verify $O(S)$ vs $O(S^2)$ DRAM traffic scaling with Nsight Compute and log in `docs/lab-notebook.md`.

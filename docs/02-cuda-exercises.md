@@ -379,12 +379,19 @@ Modern LLMs (LLaMA, Mistral) use SwiGLU feed-forward networks: $\text{SwiGLU}(x,
 
 With elementwise, reductions, 2D GEMM, decode GEMV, and sublayer fusion mastered, the engine transitions to end-to-end transformer components:
 
-### Module 4: FlashAttention-2 (Oct – Nov 2026)
-- **Tiled Attention:** Fuses $Q K^T$, online softmax scaling, and $P V$ accumulation into a single kernel.
-- **Memory Advantage:** Never materializes the $S \times S$ attention matrix in DRAM, reducing memory footprint from $O(S^2)$ to $O(S)$.
-- **Key Techniques:** Online softmax rescaling factors ($m_{new}, \ell_{new}$), double buffering in shared memory, and causal autoregressive masking.
+### Module 4: FlashAttention-2 & Core Attention Architecture (Oct – Nov 2026)
+- **Rotary Position Embeddings (RoPE):** Pairwise 2D rotations applied to $Q$ and $K$ head tensors before attention dot product, implemented with 128-bit vector memory instructions (`kernels/rope.cu`).
+- **Naive Materialized Attention Baseline:** Full $S \times S$ attention matrix reference ($S = \frac{QK^T}{\sqrt{d_k}} \to \text{Mask} \to \text{Softmax} \to PV$) used as Tier 1/2 oracle and empirical DRAM bandwidth crossover comparison (`kernels/attention_naive.cu`).
+- **FlashAttention-2 Prefill Forward Kernel:**
+  - **Tiled Attention:** Fuses $Q K^T$, online softmax scaling, and $P V$ accumulation into a single kernel without materializing the $S \times S$ matrix in DRAM, reducing memory footprint from $O(S^2)$ to $O(S)$.
+  - **Loop Schedule:** Outer loop over $Q$ blocks ($B_r = 64$), inner loop streaming $K, V$ blocks ($B_c = 64$) through shared memory.
+  - **Online Rescaling:** Maintains running row maximum $m_{\text{new}}$ and sum $\ell_{\text{new}}$, updating output accumulators $O_i$ in registers via scaling factor $\alpha = \exp(m_{\text{prev}} - m_{\text{new}})$.
+  - **Causal Masking Optimization:** Branch elimination skipping strictly lower-triangular blocks (cuts prefill FLOPs by 50%).
+  - **Grouped-Query Attention (GQA):** 32 query heads mapped to 4 KV heads ($G=8$), reusing KV shared memory tiles across query head groups without tensor replication.
+- **Decode Specialization (FlashDecoding):** Split-KV reduction kernel for $S_q=1$ autoregressive decoding over large context windows ($S_{kv} \in [1, 2048]$).
 
 ### Module 5: Weight-Only Quantization (Nov – Dec 2026)
 - **Memory Compression:** Packs FP16/FP32 weights into 4-bit (INT4) or 8-bit (INT8) integers, reducing memory footprint by $4\times$ to $8\times$.
 - **Dequantization Kernels:** On-the-fly SIMD unpacking (`lop3.b32`, `prmt`) fused directly into the inner loop of `gemv`, enabling high token-per-second decoding speeds directly from memory-bandwidth constrained consumer GPUs.
+
 

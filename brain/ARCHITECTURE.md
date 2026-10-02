@@ -157,14 +157,14 @@ Advanced high-throughput GEMM, memory management, and activation fusion:
 | -- | `PoolAllocator` | Host & Device memory | ✅ Complete | Slab pre-allocation, power-of-two size classes, 256-byte alignment. Passed 100k cycles test with 1 driver alloc |
 | -- | `CudaStream` / `CudaEvent` | Asynchronous compute | ✅ Complete | Move-only RAII wrappers with non-blocking flags and safe synchronization |
 
-### Module 4 — FlashAttention-2 Forward Kernel (Oct – Nov 2026)
-- **Target:** Fused Multi-Head Attention forward pass without materializing the $S \times S$ attention matrix.
+### Module 4 — FlashAttention-2 & Core Attention Architecture (Oct – Nov 2026)
+- **Target:** Fused Multi-Head Attention forward pass without materializing the $S \times S$ attention matrix, reducing DRAM memory from $O(S^2)$ to $O(S)$.
 - **Components:**
-  - Tiled $Q K^T$ dot-product in shared memory ($B_r \times B_c$ tiles).
-  - Online softmax rescale loop ($m_{new} = \max(m_{prev}, m_{tile})$).
-  - Shared-memory $P V$ accumulation ($O_{new} = O_{prev} \cdot \alpha + P_{tile} V$).
-  - Causal masking support for autoregressive generation.
-  - Grouped-Query Attention (GQA) head mapping for LLaMA-2 / Mistral architectures.
+  - **Rotary Position Embeddings (RoPE):** Pairwise 2D rotations applied to $Q$ and $K$ heads before attention dot product (`kernels/rope.cu`).
+  - **Naive Attention Baseline Oracle:** $S \times S$ materialized reference checking causal masking and GQA (`src/cpu_ref/attention_cpu.cpp`, `kernels/attention_naive.cu`).
+  - **Prefill FlashAttention-2 Kernel:** Tiled $Q K^T$ in shared memory ($B_r \times B_c$), online softmax rescale loop ($m_{\text{new}}, \ell_{\text{new}}$), register-accumulated $P V$ projection, and causal mask branch skipping (`kernels/flash_attention.cu`).
+  - **Decode Specialization (FlashDecoding):** Split-KV reduction kernel for $S_q=1$ autoregressive decoding across extended context windows ($S_{kv} \in [1, 2048]$).
+  - **Grouped-Query Attention (GQA):** $H_Q / H_{KV}$ query-to-KV head mapping (e.g. 32 Q heads sharing 4 KV heads for TinyLlama-1.1B).
 
 ### Module 5 — Weight-Only Quantization (Nov – Dec 2026)
 - **Target:** Sub-byte weight storage and high-throughput on-the-fly dequantization.

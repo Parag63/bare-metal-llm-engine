@@ -119,3 +119,14 @@ macro was already expanded when the library was compiled. This was a real bug in
 **Decision:** Fused SwiGLU activation computes $\text{SiLU}(\text{gate}) \cdot \text{up}$ in registers using `float4` (FP32) and `uint4` (FP16) vectorized memory loads, falling back to scalar loads for unaligned edges.
 **Why:** Avoids roundtripping the intermediate `silu_out` tensor through DRAM, cutting memory traffic from $20N$ bytes to $12N$ bytes ($40\%$ savings) and achieving a measured $1.52\times$ speedup on prefill ($512 \times 11008$) and $1.61\times$ speedup on decode.
 
+### D-015: Conditional prefill register-tiled vs decode 1D strip dispatch for rmsnorm_linear
+**Date:** Oct 2026 (Pre-Module 4 Fix)
+**Decision:** `rmsnorm_linear` enforces dynamic conditional dispatch: $M=1$ (decode) dispatches to the 1D row-fused strip kernel (`rmsnorm_linear_fused_direct`); $M > 1$ (prefill) dispatches to `rmsnorm` followed by `matmul_register_tiled`.
+**Why:** 1D row fusion at $M=512$ destroys 2D register tiling, causing blocks to repeatedly stream columns of $W$ from memory (+2.55 GB DRAM penalty, $13.6\times$ slowdown). Register-tiled GEMM reuses $W$ across all 64 tokens in the tile, running in 0.99 ms vs 13.56 ms for 1D fused. At $M=1$, 1D fusion eliminates launch latency and avoids 2D tile quantization waste, running 43% faster than separate execution.
+
+### D-016: FlashAttention-2 online softmax formulation and causal block skipping
+**Date:** Oct 2026 (Module 4)
+**Decision:** Module 4 implements FlashAttention-2 with outer loop over $Q$ blocks ($B_r = 64$) and inner loop over $K,V$ blocks ($B_c = 64$). Causal masking skips strictly lower-triangular blocks entirely. GQA maps $h_q \in [0, H_Q-1]$ to $h_{kv} = \lfloor h_q / G \rfloor$ directly in memory.
+**Why:** FlashAttention-2 reduces register pressure by keeping $Q$ blocks in registers/SRAM and updating the output accumulator $O_i$ in-place via online rescaling factors ($m_{\text{new}}, \ell_{\text{new}}$). Causal block skipping cuts FLOPs by $50\%$ in autoregressive prefill. Zero memory materialization of the $S \times S$ matrix reduces DRAM traffic from $O(S^2)$ to $O(S)$.
+
+

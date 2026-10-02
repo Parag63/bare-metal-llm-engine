@@ -23,7 +23,7 @@ only for *verification* (PyTorch/NumPy generate reference data) and *benchmarkin
 | Current Status | Modules 1–3 + Phase 4 Complete (Oct 2026) · 118/118 Tests Passing |
 | Language | C++17 (engine), CUDA (kernels), Python (tools) |
 | Build | CMake ≥ 3.20 |
-| Target GPUs | NVIDIA GeForce RTX 4070 SUPER (sm_89, 56 SMs, 504 GB/s) · Reference: RTX 4090 (sm_89) |
+| Target GPU | NVIDIA GeForce RTX 4070 SUPER (sm_89, 56 SMs, 504.0 GB/s peak BW) |
 | Dev model | TinyLlama 1.1B |
 | Headline model | Quantized Llama-2-7B |
 
@@ -35,7 +35,7 @@ only for *verification* (PyTorch/NumPy generate reference data) and *benchmarkin
 | **Module 2: CUDA Kernel Ladder** | Aug – Sep 2026 | Kernels 1–6 (`vector_add` through `matmul_tiled`) | ✅ Complete (Up to 90.9% peak BW) |
 | **Module 3: Kernel Fusion & GEMV** | Sep – Oct 2026 | Kernels 7–9 (`gemv`, `rmsnorm_linear`, `residual_rmsnorm`) | ✅ Complete (94.0% peak BW, cuBLAS beaten on M=1) |
 | **Phase 4: Production & Ladder Refinement** | Oct 2026 | Register-tiled GEMM (73% of cuBLAS), PoolAllocator, Fused SwiGLU, sm_89 native tuning | ✅ Complete (118/118 tests, 17.5 TFLOP/s) |
-| **Module 4: FlashAttention-2** | Oct – Nov 2026 | Tiled online softmax, shared memory PV, GQA support | 🔄 Next Up (Oct 2026) |
+| **Module 4: FlashAttention-2** | Oct – Nov 2026 | Tiled online softmax, shared memory PV, causal masking, GQA, RoPE | 🔄 Active (Oct 2026) |
 | **Module 5: Weight Quantization** | Nov – Dec 2026 | Packed INT4 / INT8 dequantization, GEMV AWQ/GPTQ kernels | 📅 Scheduled |
 | **Module 6: KV-Cache Optimization** | Jan – Feb 2027 | PagedAttention / ring-buffer zero-copy slicing, RoPE | 📅 Scheduled |
 | **Module 7: GGUF Model Pipeline** | Mar – Apr 2027 | mmap loader, BPE tokenizer, sampler, TinyLlama end-to-end | 📅 Scheduled |
@@ -45,7 +45,7 @@ only for *verification* (PyTorch/NumPy generate reference data) and *benchmarkin
 
 | | Machine A (laptop) | Machine B (Development GPU Box) |
 |---|---|---|
-| GPU | None / Integrated | RTX 4070 SUPER (sm_89, 56 SMs, 504 GB/s) / RTX 4090 |
+| GPU | None / Integrated | RTX 4070 SUPER (sm_89, 56 SMs, 504.0 GB/s) |
 | Environment | Host OS / Linux | WSL2 Ubuntu 24.04 (nvcc 12.6, Driver 572.16 / 13.2) |
 | Purpose | Write C++, CPU tests, docs | Compile CUDA, GPU tests, benchmarks, profiling |
 | CUDA? | `ENGINE_CUDA_ENABLED=OFF` | `ENGINE_CUDA_ENABLED=ON` |

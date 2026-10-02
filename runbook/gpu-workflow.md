@@ -1,7 +1,7 @@
 # GPU Workflow — Running CUDA Kernels on Machine B
 
 > **When to use:** Every time you push new kernel code from Machine A and need to
-> compile, test, and benchmark on the target GPU (RTX 4070 SUPER or RTX 4090).
+> compile, test, and benchmark on the target GPU (RTX 4070 SUPER).
 >
 > **Prerequisites:** Code pushed from Machine A, Machine B has CUDA toolkit + CMake
 >

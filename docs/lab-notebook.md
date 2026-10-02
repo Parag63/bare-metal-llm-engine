@@ -65,6 +65,69 @@ Build type: RelWithDebInfo / Release
 ### Next week
 ```
 
+## Week 09 — 2026-10-02 · Pre-Module 4 Verification & Module 4 Architecture Planning (FlashAttention-2, RoPE, Causal Masking, GQA)
+
+**Objective / module:** Pre-Module 4 System Resolution & Module 4 Architectural Planning — Verified CI compilation across GCC 13, Clang 18, MSVC 2022, and headless CUDA (`linux-cuda-compile`); resolved `rmsnorm_linear` prefill 1D fusion bottleneck via register-tiled GEMM dispatch ($13.6\times$ speedup, 0.99 ms vs 13.56 ms); optimized `swiglu` with 4x float4 unrolling to reach $>80\%$ peak BW; implemented rotating token IDs for embedding; updated benchmark table formatting; synchronized documentation; and established the implementation plan for Module 4 (FlashAttention-2).
+
+### What I did
+
+1. **GitHub Actions CI Resolution (All 5 Jobs Passing Green):**
+   - Verified that all five CI checks pass cleanly on commit `c2f9700`:
+     - `clang-format` in 13s (`✓` green, formatted repository, removed `continue-on-error: true`).
+     - `linux-gcc` in 2m20s (`✓` green, resolved `-Werror=sign-conversion` in `include/engine/half.hpp`).
+     - `linux-clang` in 2m9s (`✓` green, clean build with Clang 18).
+     - `windows-msvc` in 2m56s (`✓` green, clean MSVC build and test).
+     - `linux-cuda-compile` in 2m23s (`✓` green, headless compilation with `nvcc --list-gpu-arch` warning guard).
+2. **`rmsnorm_linear` Prefill Optimization & Negative Results Logging:**
+   - Identified that 1D row fusion at $M=512$ destroyed 2D shared-memory tile reuse, incurring a $+2.55\text{ GB}$ weight matrix reload penalty and causing a $13.6\times$ slowdown ($13.56\text{ ms}$).
+   - Re-based prefill execution ($M > 1$) on `rmsnorm` followed by `matmul_register_tiled`, dropping latency to **0.99 ms** ($13.6\times$ speedup).
+   - Preserved 1D fused strip kernel strictly for decode ($M=1$), where it achieves **0.366 ms** ($+43\%$ faster than separate execution).
+   - Added `rmsnorm+matmul_register_tiled (unfused)` benchmark baseline in `bench/bench_kernels.cu` and logged full empirical analysis in `docs/negative-results.md`.
+3. **`swiglu` Kernel Memory Accounting & Float4 Vectorization:**
+   - Verified theoretical DRAM traffic: Fused moves $12N$ bytes ($3 \times \text{sizeof(float)} \times N$) vs $20N$ bytes for unfused SiLU+Mul ($40\%$ savings).
+   - Replaced single-element loads with grid-stride loops unrolling 4 `float4` loads per thread (64 bytes in flight) and fast reciprocal intrinsics (`__fdividef`), pushing achieved bandwidth from $45\%$ to $>80\%$ of peak DRAM bandwidth.
+4. **Benchmark Reporting Standardization:**
+   - Configured `bench/bench_harness.hpp` to output `"—"` for `GB/s`, `% peak BW`, and `AI` on compute-bound GEMM rows.
+   - Set `flops = 0.0` and `bytes = 0.0` for `embedding` and `argmax` to report latency rather than fictitious bandwidth figures.
+   - Implemented a 16-buffer rotating pool of random token IDs for `embedding` to prevent artificial L2 cache line reuse across benchmark iterations.
+5. **Documentation Honesty & Architecture Clean-Up:**
+   - Removed all references to RTX 4090 targets; set target hardware strictly as **NVIDIA GeForce RTX 4070 SUPER** (`sm_89`, 56 SMs, 504.0 GB/s peak BW).
+   - Purged all mentions of secondary GPU (A4000).
+   - Dropped the arbitrary "52% complete" metric in favor of verified milestone achievements (Modules 1–3 + Phase 4 Complete, 118/118 passing tests across 8 suites).
+   - Updated root `README.md`, `project_audit_results.md`, and ADR table (adding ADR-0010).
+6. **Module 4 Implementation Plan Formulated:**
+   - Authored comprehensive implementation plan artifact `module4_implementation_plan.md` defining RoPE, Naive Attention baseline, FlashAttention-2 prefill kernel, FlashDecoding decode kernel, and GQA head mapping.
+
+### Does it work
+
+```
+ctest --test-dir build --output-on-failure
+100% tests passed, 0 tests failed out of 8 (118 individual tests passed)
+```
+
+GitHub Actions CI run `36911092275`:
+- `linux-cuda-compile`: Passed (2m23s)
+- `clang-format`: Passed (13s)
+- `linux-gcc`: Passed (2m20s)
+- `windows-msvc`: Passed (2m56s)
+- `linux-clang`: Passed (2m9s)
+
+### Module 4 Implementation Roadmap & Predictions
+
+1. **Rotary Position Embeddings (RoPE):**
+   - Applies 2D rotations to $Q$ and $K$ heads before attention dot-product.
+   - Prediction: Vectorized 128-bit loads (`float4` / `uint4`) will achieve memory-bandwidth saturation ($\ge 420\text{ GB/s}$, $\sim 0.01\text{ ms}$ for $S=512$).
+2. **FlashAttention-2 vs Naive Materialized Attention:**
+   - Naive Attention materializes $S \times S$ matrix in DRAM: requires $O(S^2)$ memory ($536.87\text{ MB}$ at $S=2048$ with 32 heads).
+   - FlashAttention-2 computes online softmax in shared memory tiles ($B_r = 64, B_c = 64$), streaming $K, V$ and keeping $Q$ and output accumulators in registers/SRAM ($O(S)$ memory).
+   - Prediction at $S=512$: FlashAttention-2 should achieve $\sim 2\times$ speedup over naive execution.
+   - Prediction at $S=2048$: FlashAttention-2 should achieve $\ge 4\text{--}6\times$ speedup over naive execution, eliminating $> 1\text{ GB}$ of DRAM allocations and roundtrips.
+3. **Causal Masking & GQA:**
+   - Skipping strictly lower-triangular blocks eliminates $50\%$ of matrix multiplications in autoregressive prefill.
+   - Grouped-Query Attention (GQA) directly maps 32 Q heads to 4 KV heads ($G=8$), avoiding KV duplication in memory.
+
+---
+
 ## Week 08 (Part 5) — 2026-10-01 · Phase 4: Production Foundation & Register Tiling (Flexible Architecture Compilation, Stream/Event RAII, Pool Allocator, Fused SwiGLU, and 2D Register-Tiled GEMM)
 
 **Objective / module:** Phase 4 — Flexible native architecture compilation targeting Ada Lovelace (`sm_89`), RAII CUDA Stream/Event lifecycle wrappers, high-throughput `PoolAllocator` (slab + power-of-two size class buckets), Fused SwiGLU activation kernel (`kernels/swiglu.cu`), and 2D Register-Tiled GEMM (`kernels/matmul_register_tiled.cu`) with 128-bit vector memory loads and outer-product register tile accumulation.
