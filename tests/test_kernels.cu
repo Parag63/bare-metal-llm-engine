@@ -683,6 +683,59 @@ TEST(kernels, matmul_register_tiled_agrees_with_matmul_naive) {
   }
 }
 
+TEST(kernels, matmul_register_tiled_non_tile_multiples) {
+  REQUIRE_CUDA_DEVICE();
+
+  // matmul_register_tiled uses BM=64, BN=64, BK=8 with TM=8, TN=8 thread tiles.
+  // Test shapes that are explicitly NOT multiples of 64 or 8, including odd primes,
+  // to ensure thread bounds checks and partial tile guards prevent out-of-bounds reads/writes.
+  const Shape3 non_tile_shapes[] = {
+      {3, 7, 11},      // tiny: well below block and warp sizes
+      {65, 137, 73},   // 1 past BM, BN, BK multiples
+      {129, 257, 65},  // 1 past large tile multiples
+      {1, 65, 127},    // M=1 decode shape with unaligned N and K
+      {71, 97, 113},   // prime dimensions across all 3 axes
+  };
+
+  for (const Shape3& s : non_tile_shapes) {
+    const std::string name = "matmul_reg_tiled_non_tile__" + std::to_string(s.m) + "x" +
+                             std::to_string(s.n) + "x" + std::to_string(s.k);
+
+    const std::size_t size_A = usize(s.m * s.k);
+    const std::size_t size_B = usize(s.k * s.n);
+    const std::size_t size_C = usize(s.m * s.n);
+
+    std::vector<float> h_A(size_A);
+    std::vector<float> h_B(size_B);
+    std::vector<float> h_expected(size_C, 0.0f);
+
+    // Initialize with deterministic pseudo-random values scaled by 1/sqrt(K)
+    const float scale_A = 1.0f / std::sqrt(static_cast<float>(s.k));
+    const float scale_B = 1.0f / std::sqrt(static_cast<float>(s.k));
+    for (std::size_t i = 0; i < size_A; ++i) {
+      h_A[i] = std::sin(static_cast<float>(i + 1) * 0.1f) * scale_A;
+    }
+    for (std::size_t i = 0; i < size_B; ++i) {
+      h_B[i] = std::cos(static_cast<float>(i + 1) * 0.1f) * scale_B;
+    }
+
+    // Tier 2 double-precision scalar oracle
+    engine::cpu::matmul(h_A.data(), h_B.data(), h_expected.data(), s.m, s.n, s.k);
+
+    DeviceBuffer<float> d_a(h_A);
+    DeviceBuffer<float> d_b(h_B);
+    DeviceBuffer<float> d_c(size_C);
+    d_c.zero();
+
+    engine::cuda::matmul_register_tiled(d_a.get(), d_b.get(), d_c.get(), s.m, s.n, s.k);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    const std::vector<float> host = d_c.download();
+    CHECK_CASE(name, host.data(), h_expected.data(), host.size(), kMatmulRtol,
+               kMatmulAtol);
+  }
+}
+
 TEST(kernels, matmul_with_k_zero_is_the_zero_matrix) {
   REQUIRE_CUDA_DEVICE();
 

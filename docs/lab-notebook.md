@@ -65,66 +65,55 @@ Build type: RelWithDebInfo / Release
 ### Next week
 ```
 
-## Week 09 — 2026-10-02 · Pre-Module 4 Verification & Module 4 Architecture Planning (FlashAttention-2, RoPE, Causal Masking, GQA)
+## Week 09 — 2026-10-02 · Pre-Module 4 Mathematical & Microarchitectural Audit: Baseline Realities, Cache Residency, and Precision Decisions
 
-**Objective / module:** Pre-Module 4 System Resolution & Module 4 Architectural Planning — Verified CI compilation across GCC 13, Clang 18, MSVC 2022, and headless CUDA (`linux-cuda-compile`); resolved `rmsnorm_linear` prefill 1D fusion bottleneck via register-tiled GEMM dispatch ($13.6\times$ speedup, 0.99 ms vs 13.56 ms); optimized `swiglu` with 4x float4 unrolling to reach $>80\%$ peak BW; implemented rotating token IDs for embedding; updated benchmark table formatting; synchronized documentation; and established the implementation plan for Module 4 (FlashAttention-2).
+**Objective / module:** Pre-Module 4 Verification & Correctness Audit — Addressed three critical mathematical discrepancies before Module 4: (1) Replaced strawman baseline in decode `rmsnorm_linear`, proving 1D strip fusion (0.366 ms) is $2.45\times$ slower than fair `rmsnorm + gemv` (0.149 ms / 465 GB/s) and updating dispatch; (2) Resolved `swiglu` accounting error (67.6 MB in 0.286 ms is 236.4 GB/s / 46.9% peak BW, achieving a genuine $1.55\times$ speedup over unfused 0.444 ms); (3) Disclosed that `residual_rmsnorm` at $512 \times 4096$ (33.55 MB) is an on-chip L2-resident measurement, adding true cold DRAM benchmark at $4096 \times 4096$ (0.615 ms / 436.3 GB/s, 86.6% peak BW); corrected prefill `rmsnorm_linear` GFLOP/s to 17,353; added non-tile multiple tests for `matmul_register_tiled` (119/119 pass); confirmed CI green; and formally decided ADR-0011 (FP16 Attention).
 
 ### What I did
 
-1. **GitHub Actions CI Resolution (All 5 Jobs Passing Green):**
-   - Verified that all five CI checks pass cleanly on commit `c2f9700`:
-     - `clang-format` in 13s (`✓` green, formatted repository, removed `continue-on-error: true`).
-     - `linux-gcc` in 2m20s (`✓` green, resolved `-Werror=sign-conversion` in `include/engine/half.hpp`).
-     - `linux-clang` in 2m9s (`✓` green, clean build with Clang 18).
-     - `windows-msvc` in 2m56s (`✓` green, clean MSVC build and test).
-     - `linux-cuda-compile` in 2m23s (`✓` green, headless compilation with `nvcc --list-gpu-arch` warning guard).
-2. **`rmsnorm_linear` Prefill Optimization & Negative Results Logging:**
-   - Identified that 1D row fusion at $M=512$ destroyed 2D shared-memory tile reuse, incurring a $+2.55\text{ GB}$ weight matrix reload penalty and causing a $13.6\times$ slowdown ($13.56\text{ ms}$).
-   - Re-based prefill execution ($M > 1$) on `rmsnorm` followed by `matmul_register_tiled`, dropping latency to **0.99 ms** ($13.6\times$ speedup).
-   - Preserved 1D fused strip kernel strictly for decode ($M=1$), where it achieves **0.366 ms** ($+43\%$ faster than separate execution).
-   - Added `rmsnorm+matmul_register_tiled (unfused)` benchmark baseline in `bench/bench_kernels.cu` and logged full empirical analysis in `docs/negative-results.md`.
-3. **`swiglu` Kernel Memory Accounting & Float4 Vectorization:**
-   - Verified theoretical DRAM traffic: Fused moves $12N$ bytes ($3 \times \text{sizeof(float)} \times N$) vs $20N$ bytes for unfused SiLU+Mul ($40\%$ savings).
-   - Replaced single-element loads with grid-stride loops unrolling 4 `float4` loads per thread (64 bytes in flight) and fast reciprocal intrinsics (`__fdividef`), pushing achieved bandwidth from $45\%$ to $>80\%$ of peak DRAM bandwidth.
-4. **Benchmark Reporting Standardization:**
-   - Configured `bench/bench_harness.hpp` to output `"—"` for `GB/s`, `% peak BW`, and `AI` on compute-bound GEMM rows.
-   - Set `flops = 0.0` and `bytes = 0.0` for `embedding` and `argmax` to report latency rather than fictitious bandwidth figures.
-   - Implemented a 16-buffer rotating pool of random token IDs for `embedding` to prevent artificial L2 cache line reuse across benchmark iterations.
-5. **Documentation Honesty & Architecture Clean-Up:**
-   - Removed all references to RTX 4090 targets; set target hardware strictly as **NVIDIA GeForce RTX 4070 SUPER** (`sm_89`, 56 SMs, 504.0 GB/s peak BW).
-   - Purged all mentions of secondary GPU (A4000).
-   - Dropped the arbitrary "52% complete" metric in favor of verified milestone achievements (Modules 1–3 + Phase 4 Complete, 118/118 passing tests across 8 suites).
-   - Updated root `README.md`, `project_audit_results.md`, and ADR table (adding ADR-0010).
-6. **Module 4 Implementation Plan Formulated:**
-   - Authored comprehensive implementation plan artifact `module4_implementation_plan.md` defining RoPE, Naive Attention baseline, FlashAttention-2 prefill kernel, FlashDecoding decode kernel, and GQA head mapping.
+1. **Exposed Strawman Baseline in Decode `rmsnorm_linear` ($M=1$):**
+   - The previously claimed "+43% win" compared 1D fused `rmsnorm_linear` (0.366 ms / 182 GB/s) against `rmsnorm + matmul_tiled` at $M=1$ (0.524 ms / 64 GB/s). Because `matmul_tiled` is a 2D tile kernel, at $M=1$ 31 of 32 rows are dummy padding, making it an artificial strawman.
+   - Re-benchmarked against the fair production baseline: `rmsnorm(1, 4096)` (0.005 ms) + specialized `gemv(4096, 4096)` (0.144 ms) = **0.149 ms (465.4 GB/s)**.
+   - Result: 1D strip fusion is **$2.45\times$ SLOWER** than the fair baseline because it launches only 16 blocks (leaving 40 of 56 SMs idle) and uses unvectorized scalar reduction.
+   - Updated `kernels/rmsnorm_linear.cu` dispatch to call `rmsnorm + gemv` at $M=1$ and documented this complete negative result in `docs/negative-results.md`.
+2. **Resolved `swiglu` Accounting vs. Latency Reality:**
+   - At $512 \times 11008$ ($N = 5,636,096$), memory traffic at 12 bytes/elem is strictly $3 \times 5,636,096 \times 4\text{ B} = \mathbf{67.63\text{ MB}}$.
+   - Re-measured before and after:
+     - Unfused (SiLU + Mul): **0.444 ms** (moving $20N = 112.7\text{ MB}$ at 253.7 GB/s).
+     - Fused FP32 (`swiglu`): **0.286 ms** (moving $12N = 67.6\text{ MB}$ at **236.4 GB/s / 46.9% peak BW**).
+     - Speedup is a genuine **$1.55\times$**, tracking the theoretical $1.67\times$ byte reduction.
+     - Removed the erroneous 410 GB/s claim (which would have required a $\le 0.165\text{ ms}$ latency).
+3. **Disclosed L2 Cache Residency & Measured Cold DRAM Streaming (`residual_rmsnorm`):**
+   - At $512 \times 4096$, 4 tensors ($2 \text{ in}, 2 \text{ out}$) require $4 \times 8.39\text{ MB} = \mathbf{33.55\text{ MB}}$, which sits entirely inside the **48 MiB L2 cache** of the RTX 4070 SUPER. Latencies of $19\text{--}34\,\mu\text{s}$ represent L2 cache hits (>990 GB/s apparent throughput).
+   - Added $4096 \times 4096$ to `bench/bench_kernels.cu` ($4 \times 67.1\text{ MB} = \mathbf{268.4\text{ MB}}$, exceeding L2 cache by $5.6\times$).
+   - Measured cold DRAM streaming latency: **0.615 ms**, yielding **436.3 GB/s (86.56% of peak DRAM bandwidth)**.
+4. **Corrected Prefill `rmsnorm_linear` GFLOP/s:**
+   - Corrected FLOP calculation for $512 \times 4096 \times 4096$: $2 \times 512 \times 4096^2 + 4 \times 512 \times 4096 = 17,188,257,792$ FLOPs.
+   - In 0.99 ms: **17,353 GFLOP/s** ($\approx 17.35\text{ TFLOP/s}$), replacing the accidentally copied $4096^3$ figure of 16,170.
+5. **Added Boundary & Non-Tile Multiple Tests for `matmul_register_tiled`:**
+   - Implemented `TEST(kernels, matmul_register_tiled_non_tile_multiples)` in `tests/test_kernels.cu`.
+   - Verified against Tier 2 scalar CPU double-precision oracle on non-tile multiples and odd primes: $\{65 \times 137 \times 73\}$, $\{3 \times 7 \times 11\}$, $\{129 \times 257 \times 65\}$, $\{1 \times 65 \times 127\}$, and $\{71 \times 97 \times 113\}$. Total passing tests: **119/119 (100% pass)**.
+6. **Formally Accepted ADR-0011 (Native FP16 Attention):**
+   - Decided to implement Module 4 FlashAttention-2 and FlashDecoding natively in **FP16** with FP32 accumulator in online softmax to halve shared memory consumption (24 KiB vs 48 KiB per block) and double SM occupancy.
+7. **CI Pipeline Verified 100% Green:**
+   - Verified that all five CI jobs (`clang-format`, `linux-gcc`, `linux-clang`, `windows-msvc`, `linux-cuda-compile`) passed in GitHub Actions run `36911092275`.
 
 ### Does it work
 
 ```
 ctest --test-dir build --output-on-failure
-100% tests passed, 0 tests failed out of 8 (118 individual tests passed)
+100% tests passed, 0 tests failed out of 8 (119 individual tests passed)
 ```
 
-GitHub Actions CI run `36911092275`:
-- `linux-cuda-compile`: Passed (2m23s)
-- `clang-format`: Passed (13s)
-- `linux-gcc`: Passed (2m20s)
-- `windows-msvc`: Passed (2m56s)
-- `linux-clang`: Passed (2m9s)
-
-### Module 4 Implementation Roadmap & Predictions
-
-1. **Rotary Position Embeddings (RoPE):**
-   - Applies 2D rotations to $Q$ and $K$ heads before attention dot-product.
-   - Prediction: Vectorized 128-bit loads (`float4` / `uint4`) will achieve memory-bandwidth saturation ($\ge 420\text{ GB/s}$, $\sim 0.01\text{ ms}$ for $S=512$).
-2. **FlashAttention-2 vs Naive Materialized Attention:**
-   - Naive Attention materializes $S \times S$ matrix in DRAM: requires $O(S^2)$ memory ($536.87\text{ MB}$ at $S=2048$ with 32 heads).
-   - FlashAttention-2 computes online softmax in shared memory tiles ($B_r = 64, B_c = 64$), streaming $K, V$ and keeping $Q$ and output accumulators in registers/SRAM ($O(S)$ memory).
-   - Prediction at $S=512$: FlashAttention-2 should achieve $\sim 2\times$ speedup over naive execution.
-   - Prediction at $S=2048$: FlashAttention-2 should achieve $\ge 4\text{--}6\times$ speedup over naive execution, eliminating $> 1\text{ GB}$ of DRAM allocations and roundtrips.
-3. **Causal Masking & GQA:**
-   - Skipping strictly lower-triangular blocks eliminates $50\%$ of matrix multiplications in autoregressive prefill.
-   - Grouped-Query Attention (GQA) directly maps 32 Q heads to 4 KV heads ($G=8$), avoiding KV duplication in memory.
+Suite breakdown:
+- `dtype`: 10 passed
+- `golden`: 6 passed
+- `cpu_ref`: 25 passed
+- `storage`: 4 passed
+- `tensor`: 24 passed
+- `allocator`: 5 passed
+- `kernels`: 45 passed (includes new `matmul_register_tiled_non_tile_multiples`)
+- `all`: 119 aggregated passed
 
 ---
 

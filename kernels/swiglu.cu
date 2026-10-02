@@ -41,19 +41,14 @@ __global__ void swiglu_f32_vec4(const float* __restrict__ gate,
   const float4* __restrict__ u_vec = reinterpret_cast<const float4*>(up);
   float4* __restrict__ o_vec = reinterpret_cast<float4*>(out);
 
-  // 4x unroll for instruction-level parallelism and maximum memory controller saturation
-  for (; idx + 3 * stride < num_vecs; idx += 4 * stride) {
+  // 2x unroll for instruction-level parallelism and memory controller saturation
+  for (; idx + stride < num_vecs; idx += 2 * stride) {
     const float4 g0 = g_vec[idx];
     const float4 g1 = g_vec[idx + stride];
-    const float4 g2 = g_vec[idx + 2 * stride];
-    const float4 g3 = g_vec[idx + 3 * stride];
-
     const float4 u0 = u_vec[idx];
     const float4 u1 = u_vec[idx + stride];
-    const float4 u2 = u_vec[idx + 2 * stride];
-    const float4 u3 = u_vec[idx + 3 * stride];
 
-    float4 r0, r1, r2, r3;
+    float4 r0, r1;
     r0.x = silu_f(g0.x) * u0.x;
     r0.y = silu_f(g0.y) * u0.y;
     r0.z = silu_f(g0.z) * u0.z;
@@ -64,20 +59,8 @@ __global__ void swiglu_f32_vec4(const float* __restrict__ gate,
     r1.z = silu_f(g1.z) * u1.z;
     r1.w = silu_f(g1.w) * u1.w;
 
-    r2.x = silu_f(g2.x) * u2.x;
-    r2.y = silu_f(g2.y) * u2.y;
-    r2.z = silu_f(g2.z) * u2.z;
-    r2.w = silu_f(g2.w) * u2.w;
-
-    r3.x = silu_f(g3.x) * u3.x;
-    r3.y = silu_f(g3.y) * u3.y;
-    r3.z = silu_f(g3.z) * u3.z;
-    r3.w = silu_f(g3.w) * u3.w;
-
     o_vec[idx] = r0;
     o_vec[idx + stride] = r1;
-    o_vec[idx + 2 * stride] = r2;
-    o_vec[idx + 3 * stride] = r3;
   }
 
   // Remainder loop

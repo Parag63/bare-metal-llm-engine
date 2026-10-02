@@ -20,6 +20,7 @@
 | [ADR-0008](../docs/adr/0008-benchmark-harness-provenance.md) | Benchmark harness JSON & provenance | Structured `--json` export, device driver, hardware clock, and git commit hash tracking |
 | [ADR-0009](../docs/adr/0009-negative-results-reporting.md) | Negative results reporting | Explicitly document optimizations that failed or degraded performance to preserve empirical boundaries |
 | [ADR-0010](../docs/adr/0010-multi-architecture-cuda-compilation.md) | Flexible CUDA architecture compilation | Support flexible architecture specification with native SASS generation without PTX JIT overhead |
+| [ADR-0011](../docs/adr/0011-flashattention2-fp16-precision.md) | FlashAttention-2 FP16 precision | Attention starts natively in FP16 with FP32 online softmax accumulator to minimize shared memory |
 
 ## Informal Decisions
 
@@ -119,10 +120,10 @@ macro was already expanded when the library was compiled. This was a real bug in
 **Decision:** Fused SwiGLU activation computes $\text{SiLU}(\text{gate}) \cdot \text{up}$ in registers using `float4` (FP32) and `uint4` (FP16) vectorized memory loads, falling back to scalar loads for unaligned edges.
 **Why:** Avoids roundtripping the intermediate `silu_out` tensor through DRAM, cutting memory traffic from $20N$ bytes to $12N$ bytes ($40\%$ savings) and achieving a measured $1.52\times$ speedup on prefill ($512 \times 11008$) and $1.61\times$ speedup on decode.
 
-### D-015: Conditional prefill register-tiled vs decode 1D strip dispatch for rmsnorm_linear
+### D-015: Conditional dispatch for rmsnorm_linear: rmsnorm+gemv at M=1 and rmsnorm+register_tiled at M>1
 **Date:** Oct 2026 (Pre-Module 4 Fix)
-**Decision:** `rmsnorm_linear` enforces dynamic conditional dispatch: $M=1$ (decode) dispatches to the 1D row-fused strip kernel (`rmsnorm_linear_fused_direct`); $M > 1$ (prefill) dispatches to `rmsnorm` followed by `matmul_register_tiled`.
-**Why:** 1D row fusion at $M=512$ destroys 2D register tiling, causing blocks to repeatedly stream columns of $W$ from memory (+2.55 GB DRAM penalty, $13.6\times$ slowdown). Register-tiled GEMM reuses $W$ across all 64 tokens in the tile, running in 0.99 ms vs 13.56 ms for 1D fused. At $M=1$, 1D fusion eliminates launch latency and avoids 2D tile quantization waste, running 43% faster than separate execution.
+**Decision:** `rmsnorm_linear` enforces dynamic conditional dispatch: $M=1$ (decode) dispatches to `rmsnorm` followed by `gemv`; $M > 1$ (prefill) dispatches to `rmsnorm` followed by `matmul_register_tiled`.
+**Why:** 1D row fusion at $M=512$ destroys 2D register tiling, causing blocks to repeatedly stream columns of $W$ from memory (+2.55 GB DRAM penalty, $13.6\times$ slowdown). Register-tiled GEMM reuses $W$ across tokens, running in 0.99 ms vs 13.56 ms. At $M=1$, 1D strip fusion launches only 16 blocks (leaving 40 of 56 SMs idle) and achieves only 183 GB/s (0.366 ms), making it $2.45\times$ slower than separate `rmsnorm + gemv` (0.149 ms / 465 GB/s). Therefore, separate execution using specialized kernels is superior across all sequence lengths.
 
 ### D-016: FlashAttention-2 online softmax formulation and causal block skipping
 **Date:** Oct 2026 (Module 4)

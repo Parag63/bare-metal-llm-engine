@@ -179,15 +179,22 @@ void rmsnorm_linear(const float* in, const float* rms_weight, const float* W, fl
   if (M == 0 || N == 0 || K == 0) return;
 
   // Architectural dispatch decision (see docs/negative-results.md and docs/adr/0009):
-  // At M=1 (decode phase), 1D row fusion eliminates launch latency and avoids 2D tile
-  // quantization waste (+43% to +2.5x speedup over separate).
-  // At M > 1 (prefill phase), 2D shared-memory tiling in matmul_tiled reuses the weight
-  // matrix across tokens, saving 2.29 GB of DRAM traffic compared to 1D row fusion
-  // (6.76 ms vs 13.44 ms at M=512). The 16 MiB intermediate activation savings of 1D
-  // fusion is dwarfed by the 2.29 GB weight reload penalty.
-  // Therefore, dispatch fused 1D kernel strictly at M=1, and separate tiled path for M > 1.
+  // 1. At M=1 (decode phase): 1D strip fusion (rmsnorm_linear_fused_direct) launches only
+  //    N/256 blocks (16 blocks for N=4096), leaving 40 of 56 SMs (71%) idle on RTX 4070 SUPER.
+  //    It achieves only ~183 GB/s (0.366 ms). In contrast, separate rmsnorm (0.005 ms) followed
+  //    by gemv (0.144 ms) utilizes 64 blocks with multi-warp K-reduction and float2 memory loads,
+  //    achieving 465 GB/s (0.149 ms total). The 1D fused kernel is ~2.45x SLOWER than the fair
+  //    separate baseline (rmsnorm + gemv). Therefore, dispatch M=1 to rmsnorm + gemv.
+  // 2. At M > 1 (prefill phase): 1D strip fusion reloads the K x N weight matrix from DRAM
+  //    for every row, adding 2.29 GB of reload traffic (13.6x slower than register-tiled GEMM).
+  //    Therefore, dispatch M > 1 to rmsnorm + matmul_register_tiled.
   if (M == 1) {
-    rmsnorm_linear_fused_direct(in, rms_weight, W, out, M, N, K, eps, stream);
+    float* temp = nullptr;
+    const std::size_t temp_bytes = static_cast<std::size_t>(K) * sizeof(float);
+    CUDA_CHECK(cudaMallocAsync(&temp, temp_bytes, stream));
+    rmsnorm(in, rms_weight, temp, 1, K, eps, stream);
+    gemv(W, temp, out, N, K, stream);
+    CUDA_CHECK(cudaFreeAsync(temp, stream));
   } else {
     float* temp = nullptr;
     const std::size_t temp_bytes = static_cast<std::size_t>(M * K) * sizeof(float);

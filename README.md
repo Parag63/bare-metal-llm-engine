@@ -138,14 +138,14 @@ SUPER (504.0 GB/s peak, sm_89) with locked GPU clocks (2475 MHz):
 | 4 | `rmsnorm` | reusing the reduction pattern | ✅ 433.0 GB/s (85.9% peak) |
 | 5 | `matmul_naive` | 2-D indexing, memory traffic problem | ✅ 1738 GFLOP/s @ 4096^3 |
 | 6 | `matmul_tiled` | shared-memory tiling and data reuse | ✅ 2407 GFLOP/s @ 4096^3 (+39%) |
-| 7 | `gemv` | decode token projection (M=1), 128-bit vector loads | ✅ 461.8 GB/s (91.6% peak) |
-| 8 | `residual_rmsnorm` | fused elementwise add + row reduction in 1 pass | ✅ 0.033 ms (+11.1% over separate) |
-| 9 | `rmsnorm_linear` | fused activation normalization + linear projection | ✅ 0.609 ms (+47.0% decode M=1) |
-| 10 | `gemv_fp16` | decode token projection in FP16 with FP32 accumulator | ✅ 0.076 ms (1.89× speedup over FP32) |
+| 7 | `gemv` | decode token projection (M=1), 128-bit vector loads | ✅ 465.4 GB/s (92.3% peak) |
+| 8 | `residual_rmsnorm` | fused elementwise add + row reduction in 1 pass | ✅ 436.3 GB/s cold DRAM @ 4096² (86.6% peak); 0.034 ms @ 512×4096 (L2 resident) |
+| 9 | `rmsnorm_linear` | dispatched normalization + linear projection | ✅ 0.149 ms @ M=1 (rmsnorm+gemv, 2.45× over 1D fused); 17.35 TFLOP/s @ M=512 |
+| 10 | `gemv_fp16` | decode token projection in FP16 with FP32 accumulator | ✅ 0.071 ms (474.3 GB/s, 94.1% peak DRAM) |
 | 11 | `embedding` | token gather from row-major embedding table (FP32 & FP16) | ✅ 0.009 ms (128-bit vector loads) |
-| 12 | `argmax` | greedy token sampling via 16-warp shuffle reduction | ✅ 0.010 ms (deterministic tie-breaking) |
-| 13 | `matmul_register_tiled` | 2D register tiling (8x8 thread tile, outer products, float4) | ✅ 16173 GFLOP/s @ 4096^3 (6.7× over tiled) |
-| 14 | `swiglu` | fused SiLU + elementwise multiply (40% memory traffic reduction) | ✅ 0.295 ms (1.52× over unfused SiLU+Mul) |
+| 12 | `argmax` | greedy token sampling via 16-warp shuffle reduction | ✅ 0.008 ms (deterministic tie-breaking) |
+| 13 | `matmul_register_tiled` | 2D register tiling (8x8 thread tile, outer products, float4) | ✅ 17550 GFLOP/s @ 2048³, 16173 GFLOP/s @ 4096³ (73.0% cuBLAS) |
+| 14 | `swiglu` | fused SiLU + elementwise multiply (40% memory traffic reduction) | ✅ 0.286 ms (236.4 GB/s, 46.9% peak BW, 1.55× over unfused 0.444 ms) |
 
 ### Kernel fusion (Module 3 — complete)
 
@@ -153,8 +153,8 @@ Fusing memory-bound operations between transformer sub-layers to eliminate DRAM 
 
 | # | Kernel | Fused operations | Design rationale |
 |---|---|---|---|
-| 8 | `rmsnorm_linear` | RMSNorm + Linear projection | Keeps normalized row in shared memory; saves 16 MiB DRAM round-trip per layer at M=512 |
-| 9 | `residual_rmsnorm` | Residual Add + RMSNorm | Computes residual sum and normalized state in a single pass; saves 8 MiB DRAM traffic |
+| 8 | `rmsnorm_linear` | RMSNorm + Linear projection | Dispatches to `rmsnorm + gemv` at M=1 (2.45× faster than 1D strip) and `rmsnorm + matmul_register_tiled` at M>1 (13.6× faster than 1D strip) |
+| 9 | `residual_rmsnorm` | Residual Add + RMSNorm | Computes residual sum and normalized state in a single pass; achieves 436.3 GB/s cold DRAM (86.6% peak) at 4096² |
 
 Design details in **[docs/02-cuda-exercises.md](docs/02-cuda-exercises.md)** and **[ADR 0006](docs/adr/0006-kernel-fusion-strategy.md)**. Complete reference diagrams in **[docs/llm-inference-flowchart.md](docs/llm-inference-flowchart.md)**.
 Empirical analysis of non-optimizations and bottlenecks is recorded in **[docs/negative-results.md](docs/negative-results.md)**, and full hardware roofline curves are visualized in **[docs/roofline.png](docs/roofline.png)**.
@@ -170,8 +170,10 @@ kernel in the project, and the only one where being clever about arithmetic wins
 |---|---|---:|---:|---|
 | **cuBLAS SGEMM vs Tiled GEMM** | 4096³ FP32 | 22148 GFLOP/s (cuBLAS) | 2407 GFLOP/s (tiled) | 10.9% of cuBLAS (hand-written FP32 SIMT vs Tensor Cores) |
 | **Register-Tiled GEMM vs cuBLAS** | 4096³ FP32 | 22148 GFLOP/s (cuBLAS) | 16173 GFLOP/s (register-tiled) | 73.0% of cuBLAS (6.7× over tiled) |
-| **GEMV Cold DRAM vs Warm L2** | 1x4096x4096 (decode) | 461.8 GB/s (warm L2) | 461.8 GB/s (cold DRAM) | 91.6% peak DRAM (pure streaming via rotating weight buffers) |
-| **Fused vs Unfused SwiGLU** | 512x11008 (prefill MLP) | 0.448 ms (unfused) | 0.295 ms (fused) | 1.52× speedup (12N vs 20N bytes DRAM traffic) |
+| **GEMV Cold DRAM vs Warm L2** | 1x4096x4096 (decode) | 465.8 GB/s (warm L2) | 465.4 GB/s (cold DRAM) | 92.3% peak DRAM (pure streaming via rotating weight buffers) |
+| **Decode RMSNorm+Linear Baseline** | 1x4096x4096 (decode) | 0.366 ms (1D fused) | 0.149 ms (rmsnorm+gemv) | 2.45× speedup via fair gemv baseline (1D strip fusion defeated) |
+| **Fused vs Unfused SwiGLU** | 512x11008 (prefill MLP) | 0.444 ms (unfused) | 0.286 ms (fused) | 1.55× speedup (67.6 MB in 0.286 ms = 236.4 GB/s) |
+| **Residual RMSNorm Streaming** | 4096x4096 (268 MB cold DRAM) | 0.766 ms (separate) | 0.615 ms (fused) | 436.3 GB/s cold DRAM streaming (86.6% peak BW) |
 | **llama-bench External Baseline** | TinyLlama-1.1B (Q4_K_M) | 18,512.0 t/s (pp512) | 391.2 t/s (tg128) | 4-bit quantized weights (~249 GB/s effective) |
 | **llama-bench External Baseline** | TinyLlama-1.1B (Q8_0) | 18,767.1 t/s (pp512) | 275.2 t/s (tg128) | 8-bit quantized weights (~300 GB/s effective) |
 | **llama-bench External Baseline** | TinyLlama-1.1B (FP16) | 21,357.9 t/s (pp512) | 181.3 t/s (tg128) | 16-bit unquantized weights (~372 GB/s effective) |
@@ -190,6 +192,7 @@ kernel in the project, and the only one where being clever about arithmetic wins
 | [0008](docs/adr/0008-benchmark-harness-provenance.md) | Benchmark harness JSON logging & git provenance — structured JSON output with baked git hash, driver, and clocks |
 | [0009](docs/adr/0009-negative-results-reporting.md) | Negative results reporting — empirical documentation of non-optimizations and microarchitectural boundaries |
 | [0010](docs/adr/0010-multi-architecture-cuda-compilation.md) | Multi-architecture CUDA compilation — flexible architecture lists in `ENGINE_CUDA_ARCH` with native SASS generation |
+| [0011](docs/adr/0011-flashattention2-fp16-precision.md) | Attention Precision — start Module 4 FlashAttention-2 in FP16 with FP32 online softmax accumulator to minimize shared memory |
 
 ## Build options
 

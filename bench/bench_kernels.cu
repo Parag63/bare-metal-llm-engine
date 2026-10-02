@@ -372,16 +372,18 @@ void bench_launch_overhead(Table& t, int reps) {
 void bench_residual_rmsnorm(Table& t, int reps) {
   const struct {
     std::int64_t rows, cols;
+    const char* label;
   } shapes[] = {
-      {1, 4096},
-      {512, 4096},
+      {1, 4096, "1x4096 (decode token)"},
+      {512, 4096, "512x4096 (prefill batch, warm L2)"},
+      {4096, 4096, "4096x4096 (cold DRAM, 268 MB)"},
   };
 
   for (const auto& s : shapes) {
     const std::int64_t rows = s.rows;
     const std::int64_t cols = s.cols;
     const std::size_t n = static_cast<std::size_t>(rows * cols);
-    const std::string label = std::to_string(rows) + "x" + std::to_string(cols);
+    const std::string label = s.label;
 
     DeviceBuffer<float> x(random_host(n, 1u));
     DeviceBuffer<float> res(random_host(n, 2u));
@@ -440,6 +442,16 @@ void bench_rmsnorm_linear(Table& t, int reps) {
         (d(M) * d(K) * 2.0 + d(K) + d(K) * d(N) + d(M) * d(N)) * sizeof(float);
     const double fused_bytes =
         (d(M) * d(K) + d(K) + d(K) * d(N) + d(M) * d(N)) * sizeof(float);
+
+    if (M == 1) {
+      t.measure_gpu(
+          "rmsnorm+gemv (fair baseline)", label, flops, separate_bytes,
+          [&] {
+            engine::cuda::rmsnorm(in.get(), weight.get(), temp.get(), M, K, 1e-5f);
+            engine::cuda::gemv(W.get(), temp.get(), out.get(), N, K);
+          },
+          /*warmup=*/3, reps);
+    }
 
     t.measure_gpu(
         "rmsnorm+matmul_register_tiled (unfused)", label, flops, separate_bytes,

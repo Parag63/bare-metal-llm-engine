@@ -8,9 +8,9 @@
 ## Test score (verified on Machine B, RTX 4070 SUPER, sm_89)
 
 ```
-passed 118   failed 0   pending 0   skipped 0
+passed 119   failed 0   pending 0   skipped 0
 ```
-*(CUDA-enabled build with nvcc 12.6, RTX 4070 SUPER — 2026-10-01)*
+*(CUDA-enabled build with nvcc 12.6, RTX 4070 SUPER — 2026-10-02)*
 
 ### Test suite breakdown
 
@@ -22,17 +22,18 @@ passed 118   failed 0   pending 0   skipped 0
 | `storage` | 4 | ✅ All passing |
 | `tensor` | 24 | ✅ All passing (GPU + CPU verified, const and half accessors) |
 | `allocator` | 5 | ✅ All 5 passing (PoolAllocator: alignment, recycling, peak tracking, 100k cycles, device memory) |
-| `kernels` | 44 | ✅ All 44 passing (14 kernels + contracts verified, including register-tiled GEMM and SwiGLU) |
+| `kernels` | 45 | ✅ All 45 passing (14 kernels + non-tile multiples register GEMM test) |
 
 ---
 
-## Phase 4 Completion: Production Foundation & Register Tiling
-- [x] **Flexible Architecture Compilation (ADR 0010):** Authored `docs/adr/0010-multi-architecture-cuda-compilation.md`. Added support for flexible architecture specification in `ENGINE_CUDA_ARCH` with native SASS generation, eliminating runtime JIT overhead.
-- [x] **RAII Stream & Event Wrappers:** `include/engine/cuda_stream.hpp`, `src/cuda_stream.cpp` providing move-only zero-overhead wrappers over `cudaStream_t` and `cudaEvent_t` with non-blocking default flags.
-- [x] **Pool Allocator & Memory Accounting:** `include/engine/pool_allocator.hpp`, `src/pool_allocator.cpp`. Slab pre-allocation, power-of-two size bucketing (256 B to 1 GiB), 256-byte alignment, current/peak memory tracking. Passed 100,000 cycles acceptance test with `num_driver_allocs == 1` ($< 20$ required).
-- [x] **Fused SwiGLU Activation:** `kernels/swiglu.cu`, `src/cpu_ref/swiglu_cpu.cpp`. Single-pass activation reducing DRAM traffic from $20N \to 12N$ bytes. Achieves **0.295 ms** ($1.52\times$ speedup over unfused SiLU+Mul) on $512 \times 11008$ prefill and **0.0051 ms** ($1.61\times$ speedup) on decode. FP16 SwiGLU achieves **0.031 ms** ($9.5\times$ over FP32).
-- [x] **2D Register-Tiled GEMM:** `kernels/matmul_register_tiled.cu` ($128 \times 128$ block, $8 \times 8$ register tile, transposed shared memory `s_A`, 128-bit `float4` loads). Increases shared-memory arithmetic intensity by $8\times$ ($0.25 \to 2.0\text{ FLOP/byte}$). Achieves **17.55 TFLOP/s** at $2048^3$ and **16.17 TFLOP/s** at $4096^3$ (**6.7x speedup** over `matmul_tiled` and reaching **73.0% of cuBLAS**).
-- [x] **Verification & Artifacts:** 118 / 118 tests passing, lab notebook predictions recorded first, results table and roofline updated.
+## Pre-Module 4 Verification & Metric Corrections
+- [x] **Decode `rmsnorm_linear` Baseline Reality:** Exposed strawman baseline; fair baseline `rmsnorm + gemv` achieves **0.149 ms (465 GB/s)**, beating 1D strip fusion (0.366 ms) by **$2.45\times$**. Updated dispatch and recorded in `docs/negative-results.md`.
+- [x] **`swiglu` Accounting Discrepancy Resolved:** Fused FP32 SwiGLU achieves **0.286 ms** (moving 67.6 MB at **236.4 GB/s / 46.9% peak BW**, yielding a **$1.55\times$ speedup** over unfused 0.444 ms). Erroneous 410 GB/s accounting claim removed.
+- [x] **`residual_rmsnorm` L2 Residency Disclosed:** $512 \times 4096$ working set (33.55 MB) resides in 48 MB L2; true cold DRAM streaming measured at $4096 \times 4096$ (268 MB) achieving **436.3 GB/s (86.56% peak BW)** in **0.615 ms**.
+- [x] **Prefill `rmsnorm_linear` GFLOP/s Corrected:** Updated from 16,170 to **17,353 GFLOP/s** for $512 \times 4096 \times 4096$ in 0.99 ms.
+- [x] **Non-Tile Multiple Tests for `matmul_register_tiled`:** Added `TEST(kernels, matmul_register_tiled_non_tile_multiples)` in `tests/test_kernels.cu`, testing $\{65 \times 137 \times 73\}$, $\{3 \times 7 \times 11\}$, $\{129 \times 257 \times 65\}$, $\{1 \times 65 \times 127\}$, and $\{71 \times 97 \times 113\}$ with 100% pass rate.
+- [x] **CI Verification Confirmed:** Verified that all 3 failing checks (`clang-format`, `linux-cuda-compile`, `windows-msvc`) are green in GitHub Actions run `36911092275`.
+- [x] **Attention Precision Architectural Decision (ADR-0011):** Formally decided to start Module 4 FlashAttention-2 natively in **FP16** with FP32 online softmax accumulator to minimize shared memory consumption.
 
 ---
 
