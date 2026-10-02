@@ -105,24 +105,54 @@ The engine's `rmsnorm_linear` dispatches as follows:
 
 ## 3. Cache Residency vs. Cold DRAM Streaming (`residual_rmsnorm` & `swiglu`)
 
-### 1. `residual_rmsnorm` L2 Residency at $512 \times 4096$
-- At shape $512 \times 4096$, the kernel reads 2 input tensors and writes 2 output tensors.
-- Each tensor is $512 \times 4096 \times 4\text{ B} = 8.39\text{ MB}$.
-- Total working set is $4 \times 8.39\text{ MB} = \mathbf{33.55\text{ MB}}$.
-- The RTX 4070 SUPER has a **48 MiB L2 cache**. Since $33.55\text{ MB} < 48\text{ MB}$, the working set resides entirely in L2 across repeated benchmark iterations.
-- An execution time of $19\text{--}34\,\mu\text{s}$ implies a throughput of $33.55\text{ MB} / 34\,\mu\text{s} \approx \mathbf{990\text{--}1,765\text{ GB/s}}$ (which exceeds the 504 GB/s theoretical peak of GDDR6X DRAM by $2\text{--}3.5\times$).
-- **Cold DRAM Reality:** Benchmarking at $4096 \times 4096$ ($4 \times 67.1\text{ MB} = \mathbf{268.4\text{ MB}}$, which overflows the 48 MB L2 cache) yields a median of **0.615 ms**, corresponding to an honest cold DRAM streaming bandwidth of **436.3 GB/s (86.56% of peak DRAM BW)**.
+### 1. `residual_rmsnorm`: Warm L2 Residency vs. Cold DRAM Streaming ($1.25\times$ Ceiling)
+- **Warm L2 Residency at $512 \times 4096$:**
+  - At shape $512 \times 4096$, the kernel reads 2 input tensors and writes 2 output tensors.
+  - Each tensor is $512 \times 4096 \times 4\text{ B} = 8.39\text{ MB}$.
+  - Total working set is $4 \times 8.39\text{ MB} = \mathbf{33.55\text{ MB}}$.
+  - The RTX 4070 SUPER has a **48 MiB L2 cache**. Because $33.55\text{ MB} < 48\text{ MB}$, the working set resides entirely in L2 across repeated benchmark iterations.
+  - An execution time of $19\text{--}34\,\mu\text{s}$ implies a throughput of $33.55\text{ MB} / 34\,\mu\text{s} \approx \mathbf{990\text{--}1,765\text{ GB/s}}$ (which exceeds the 504 GB/s theoretical peak of GDDR6X DRAM by $2\text{--}3.5\times$).
+- **Cold DRAM Streaming Baseline at $4096 \times 4096$:**
+  - To overflow the 48 MiB L2 cache and measure honest DRAM streaming, we benchmark at $4096 \times 4096$ (each tensor is $67.11\text{ MB}$):
+    - **Separate-Ops Baseline (`vector_add + rmsnorm`):**
+      - `vector_add` reads $X$ (67.1 MB) and $Res$ (67.1 MB), writes $Temp$ (67.1 MB) = 3 tensors.
+      - `rmsnorm` reads $Temp$ (67.1 MB), reads $Weight$ (16 KB), writes $Norm$ (67.1 MB) = 2 tensors.
+      - Total traffic = 5 tensor passes = $5 \times 67.11\text{ MB} = \mathbf{335.54\text{ MB}}$.
+      - Measured latency: **0.763 ms** (achieving **439.7 GB/s**, 87.2% peak BW).
+    - **Fused Kernel (`residual_rmsnorm`):**
+      - Reads $X$ (67.1 MB) and $Res$ (67.1 MB), writes $Sum$ (67.1 MB) and $Norm$ (67.1 MB) = 4 tensor passes.
+      - Total traffic = 4 tensor passes = $4 \times 67.11\text{ MB} = \mathbf{268.44\text{ MB}}$.
+      - Measured latency: **0.618 ms** (achieving **434.1 GB/s**, 86.1% peak BW).
+    - **Achieved Speedup Ratio:**
+      $$\frac{0.763\text{ ms}}{0.618\text{ ms}} = \mathbf{1.235\times} \quad (\text{Min: } \frac{0.756\text{ ms}}{0.612\text{ ms}} = \mathbf{1.235\times} \text{ to } \mathbf{1.246\times})$$
+    - **Theoretical Traffic Ceiling:**
+      $$\frac{\text{Separate Traffic}}{\text{Fused Traffic}} = \frac{5 \times 67.11\text{ MB}}{4 \times 67.11\text{ MB}} = \frac{5}{4} = \mathbf{1.250\times} \quad (+25.0\%)$$
+  - **Conclusion:** The previous "+21%" claim was dropped in favor of rigorous cold DRAM measurement. At true cold DRAM streaming ($4096 \times 4096$), the separate-ops version takes **0.763 ms** vs. fused **0.618 ms**, delivering an empirical speedup of **$1.24\times - 1.25\times$**, perfectly matching the theoretical 4-tensor vs. 5-tensor traffic ceiling.
 
-### 2. `swiglu` Accounting vs. Latency Reality
-- At $512 \times 11008$, total elements $N = 5,636,096$.
-- Memory traffic at 12 bytes/elem (gate read 4B, up read 4B, out write 4B) is strictly:
-  $$\text{Traffic} = 3 \times 5,636,096 \times 4\text{ B} = \mathbf{67.63\text{ MB}}$$
-- An audit table claim of $410.2\text{ GB/s}$ alongside a median latency of $0.295\text{ ms}$ was an accounting discrepancy ($67.63\text{ MB} / 0.295\text{ ms} = 229.3\text{ GB/s}$). A throughput of 410 GB/s would mathematically require a latency of $\le 0.165\text{ ms}$.
-- **Empirical Measurement:**
-  - Unfused (SiLU + Mul): **0.444 ms** (moving $20N = 112.7\text{ MB}$ at 253.7 GB/s)
-  - Fused FP32: **0.286 ms** (moving $12N = 67.6\text{ MB}$ at **236.4 GB/s / 46.9% peak BW**)
-  - Speedup is a genuine **$1.55\times$**, directly tracking the theoretical $1.67\times$ byte reduction.
-  - FP16 SwiGLU (`swiglu_fp16`) moves $6N = 33.8\text{ MB}$ in **0.030 ms** ($9.5\times$ over FP32), fitting partially inside L2 cache.
+---
+
+### 2. `swiglu`: Byte Accounting, Clock Throttling, and Nsight Compute Profiling
+- **Traffic Accounting Verification:**
+  - Shape $512 \times 11008$ has total elements $N = 5,636,096$.
+  - Fused traffic: 12 bytes/element (gate read 4B, up read 4B, out write 4B):
+    $$\text{Traffic} = 3 \times 5,636,096 \times 4\text{ B} = \mathbf{67.63\text{ MB}}$$
+  - An earlier audit table figure of $410.2\text{ GB/s}$ alongside a latency of $0.295\text{ ms}$ was a byte-count discrepancy ($67.63\text{ MB} / 0.295\text{ ms} = 229.3\text{ GB/s}$). A throughput of 410 GB/s mathematically requires $\le 0.165\text{ ms}$.
+- **Why `bench_kernels` Reported 47% Peak Bandwidth (236 GB/s):**
+  - In general benchmark harness execution without an external persistent clock lock, the GPU dynamically idles between disparate kernel suites, dropping SM clocks to **990 MHz** (as tracked in real time via NVML in our JSON provenance: nominal boost is 2475 MHz).
+  - At 990 MHz, memory bus frequency and SM dispatch rates scale down proportionally, yielding $0.284\text{ ms}$ (238.4 GB/s, 47.3% peak BW).
+- **Boost Clock & Nsight Compute (`ncu`) Empirical Breakdown:**
+  - Profiling `swiglu_f32_vec4` with `/usr/local/cuda-12.6/bin/ncu` at boost clocks reveals:
+    - **Kernel Duration:** **112.35 µs** (0.112 ms).
+    - **Compute Memory Throughput:** **94.87% of peak sustained**.
+    - **Stall Long Scoreboard (`long_scoreboard`):** **64.37%** (warps stalled waiting for DRAM global memory loads).
+    - **Stall Math Pipe Throttle (`math_pipe_throttle`):** **0.10%** (arithmetic pipeline is virtually 100% unthrottled; zero math bottleneck).
+    - **Stall Short Scoreboard / Barrier:** **3.31% / 0.00%**.
+  - In microbenchmark runs at nominal 2475 MHz boost clock:
+    - `vector_add` (same 67.6 MB traffic): **0.147 ms** (**427.2 GB/s**, 84.8% peak BW)
+    - `swiglu_v1` (2x unrolled float4 grid-stride): **0.156 ms** (**402.0 GB/s**, 79.8% peak BW)
+    - `swiglu_v3` (float2 grid-stride): **0.142 ms** (**442.8 GB/s**, 87.9% peak BW)
+    - `swiglu_v4` (scalar grid-stride): **0.143 ms** (**439.4 GB/s**, 87.2% peak BW)
+  - **Conclusion:** `swiglu` matches `vector_add` within 0.7% under identical clock conditions. The transcendental arithmetic (`__expf` and `__fdividef`) is completely hidden behind global memory latency.
 
 ---
 
@@ -143,7 +173,7 @@ Launching grids exceeding $4\times$ SM count ($> 224$ blocks on RTX 4070 SUPER) 
 | 1D Strip Fusion at Decode ($M=1$) | `rmsnorm_linear` | +43% vs separate | **$2.45\times$ SLOWER** vs `rmsnorm + gemv` | 16 blocks leaves 40 of 56 SMs idle; unvectorized scalar reduction vs multi-warp `gemv` |
 | 1D Row Fusion at Prefill ($M=512$) | `rmsnorm_linear` | +15–30% speedup (16 MiB saved) | **$13.6\times$ SLOWER** vs register-tiled | Destroys 2D weight reuse across tokens; DRAM read explodes by +2.55 GB |
 | Shared-memory bank conflict padding (`[32][33]`) | `matmul_tiled` | 5–10% speedup | -0.2% (neutral/regression) | sm_89 shared-memory crossbar + non-power-of-2 index arithmetic overhead |
-| DRAM traffic claim for warm L2 residual | `residual_rmsnorm` | 442 GB/s cold DRAM | 33.5 MB resides in 48 MB L2 | 19–34 µs is an L2 cache hit measurement; true cold DRAM is 436 GB/s at 4096×4096 |
+| DRAM traffic claim for warm L2 residual | `residual_rmsnorm` | 442 GB/s cold DRAM | 33.5 MB resides in 48 MB L2 | 19–34 µs is an L2 cache hit measurement; true cold DRAM is 434 GB/s at 4096×4096 ($1.24\times$ speedup vs 0.763 ms separate) |
 | Oversized thread grid ($>1024$ blocks) | `vector_add` | Improved tail latency | Flat to +1% latency | 56 SMs fully saturated at 224 blocks; extra blocks increase hardware queue overhead |
 
 

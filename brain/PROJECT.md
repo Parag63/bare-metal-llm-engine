@@ -20,7 +20,7 @@ only for *verification* (PyTorch/NumPy generate reference data) and *benchmarkin
 | Author | Parag Das (2303344) |
 | Type | B.Tech CSE Major Project |
 | Timeline | Jul 2026 – Jun 2027 |
-| Current Status | Modules 1–3 + Phase 4 Complete (Oct 2026) · 118/118 Tests Passing |
+| Current Status | Modules 1–3 + Phase 4 Complete (Oct 2026) · 119/119 Tests Passing |
 | Language | C++17 (engine), CUDA (kernels), Python (tools) |
 | Build | CMake ≥ 3.20 |
 | Target GPU | NVIDIA GeForce RTX 4070 SUPER (sm_89, 56 SMs, 504.0 GB/s peak BW) |
@@ -34,7 +34,7 @@ only for *verification* (PyTorch/NumPy generate reference data) and *benchmarkin
 | **Module 1: Tensor Library** | Jul – Aug 2026 | `Storage`/`Tensor` split, zero-copy slicing, shape/strides | ✅ Complete (559 lines, 100% tests) |
 | **Module 2: CUDA Kernel Ladder** | Aug – Sep 2026 | Kernels 1–6 (`vector_add` through `matmul_tiled`) | ✅ Complete (Up to 90.9% peak BW) |
 | **Module 3: Kernel Fusion & GEMV** | Sep – Oct 2026 | Kernels 7–9 (`gemv`, `rmsnorm_linear`, `residual_rmsnorm`) | ✅ Complete (94.0% peak BW, cuBLAS beaten on M=1) |
-| **Phase 4: Production & Ladder Refinement** | Oct 2026 | Register-tiled GEMM (73% of cuBLAS), PoolAllocator, Fused SwiGLU, sm_89 native tuning | ✅ Complete (118/118 tests, 17.5 TFLOP/s) |
+| **Phase 4: Production & Ladder Refinement** | Oct 2026 | Register-tiled GEMM (73% of cuBLAS), PoolAllocator, Fused SwiGLU, sm_89 native tuning | ✅ Complete (119/119 tests, 17.5 TFLOP/s) |
 | **Module 4: FlashAttention-2** | Oct – Nov 2026 | Tiled online softmax, shared memory PV, causal masking, GQA, RoPE | 🔄 Active (Oct 2026) |
 | **Module 5: Weight Quantization** | Nov – Dec 2026 | Packed INT4 / INT8 dequantization, GEMV AWQ/GPTQ kernels | 📅 Scheduled |
 | **Module 6: KV-Cache Optimization** | Jan – Feb 2027 | PagedAttention / ring-buffer zero-copy slicing, RoPE | 📅 Scheduled |

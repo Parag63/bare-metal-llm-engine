@@ -149,13 +149,13 @@ Suite breakdown:
    - Vectorized 128-bit global loads (`float4`) maximize DRAM bandwidth utilization.
 6. **Testing & Integration (`tests/CMakeLists.txt`, `tests/test_allocator.cpp`, `tests/test_cpu_ref.cpp`, `tests/test_kernels.cu`):**
    - Added `allocator` suite and integrated all Phase 4 kernels into test framework.
-   - 118 / 118 unit tests passing across all suites.
+   - 119 / 119 unit tests passing across all suites.
 
 ### Does it work
 
 ```
 ctest --test-dir build --output-on-failure
-100% tests passed, 0 tests failed out of 8 (118 individual tests passed)
+100% tests passed, 0 tests failed out of 8 (119 individual tests passed)
 ```
 
 Individual suite status:

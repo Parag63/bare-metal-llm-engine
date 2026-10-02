@@ -9,7 +9,7 @@ B.Tech CSE major project · Parag Das (2303344) · Jul 2026 – Jun 2027
 
 > **Status: Modules 1, 2 & 3 complete + Phase 4 Foundational Kernels. Moving to FlashAttention (Module 4).**
 > The tensor library, 14 hand-written CUDA kernels (including FP16 GEMV, fused SwiGLU, 2D register-tiled GEMM, embedding gather, and argmax), and the full
-> verification/benchmark infrastructure are implemented and verified. `passed 118  failed 0  pending 0` across
+> verification/benchmark infrastructure are implemented and verified. `passed 119  failed 0  pending 0` across
 > 8 test suites on the CUDA-enabled build (RTX 4070 SUPER, nvcc 12.6). Memory-bound
 > kernels achieve 85–94% of peak bandwidth (GEMV reaches 473.5 GB/s / 94.0% peak BW, beating cuBLAS by +13.7%);
 > 2D register-tiled matmul reaches 16,173 GFLOP/s at 4096³ (73.0% of cuBLAS).
@@ -217,12 +217,11 @@ files; `--target bench` runs the benchmark binaries.
 - [x] **Module 2 — CUDA Kernel Ladder & GEMV** (complete). Seven hand-written kernels from
   `vector_add` through `gemv` (decode specialization), with three-tier verification and GPU benchmarks.
   35 kernel tests, all passing. Memory-bound kernels reach up to 94.0% peak bandwidth.
-- [x] **Module 3 — Kernel Fusion** (complete). Fused RMSNorm + Linear projection (exercise 8)
-  and Fused Residual Add + RMSNorm (exercise 9). Eliminates intermediate DRAM roundtrips
-  and kernel launch overhead. Verified against golden reference data.
-- [x] **Phase 4 Deliverables — Foundational Kernels & Infrastructure** (complete). FP16 GEMV, Fused SwiGLU (>80% peak BW),
+- [x] **Module 3 — Kernel Fusion** (complete). Fused RMSNorm + Linear (dynamic winning-path dispatch via ADR-0006 addendum)
+  and Fused Residual Add + RMSNorm ($1.24\times$ speedup at cold DRAM). Verified against golden reference data.
+- [x] **Phase 4 Deliverables — Foundational Kernels & Infrastructure** (complete). FP16 GEMV, Fused SwiGLU (87.2% peak BW at boost clock),
   2D Register-Tiled GEMM (16.2 TFLOP/s), Embedding Lookup, Argmax Greedy Sampling, Stream-ordered Pool Allocator,
-  RAII CUDA Streams & Events, and Multi-Arch Compilation (ADR 0010). 118 / 118 unit tests passing across 8 suites.
+  RAII CUDA Streams & Events, and Multi-Arch Compilation (ADR 0010). 119 / 119 unit tests passing across 8 suites.
 - [ ] **Module 4 — FlashAttention-2** — tiled online softmax + GEMM fusion, avoiding materialisation
   of the full S = QK^T attention-score matrix; causal masking + GQA support; RoPE and SwiGLU.
 - [ ] **Module 5 — Quantization** — packed INT4 / INT8 weights with fused dequantisation GEMV kernels.

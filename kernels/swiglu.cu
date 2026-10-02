@@ -166,11 +166,14 @@ void swiglu(const float* gate, const float* up, float* out, std::int64_t n,
       (reinterpret_cast<uintptr_t>(up) % sizeof(float4) == 0) &&
       (reinterpret_cast<uintptr_t>(out) % sizeof(float4) == 0);
 
-  int device = 0;
-  CUDA_CHECK(cudaGetDevice(&device));
-  int num_sms = 0;
-  CUDA_CHECK(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, device));
-  const int64_t blocks_wanted = static_cast<int64_t>(num_sms) * 32;
+  static int cached_num_sms = 0;
+  if (cached_num_sms == 0) {
+    int device = 0;
+    CUDA_CHECK(cudaGetDevice(&device));
+    CUDA_CHECK(
+        cudaDeviceGetAttribute(&cached_num_sms, cudaDevAttrMultiProcessorCount, device));
+  }
+  const int64_t blocks_wanted = static_cast<int64_t>(cached_num_sms) * 32;
 
   if (is_aligned_vec4) {
     const int64_t num_vecs = n / 4;
@@ -200,11 +203,14 @@ void swiglu_fp16(const half* gate, const half* up, half* out, std::int64_t n,
                                (reinterpret_cast<uintptr_t>(up) % sizeof(uint4) == 0) &&
                                (reinterpret_cast<uintptr_t>(out) % sizeof(uint4) == 0);
 
-  int device = 0;
-  CUDA_CHECK(cudaGetDevice(&device));
-  int num_sms = 0;
-  CUDA_CHECK(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, device));
-  const int64_t blocks_wanted = static_cast<int64_t>(num_sms) * 32;
+  static int cached_num_sms_fp16 = 0;
+  if (cached_num_sms_fp16 == 0) {
+    int device = 0;
+    CUDA_CHECK(cudaGetDevice(&device));
+    CUDA_CHECK(cudaDeviceGetAttribute(&cached_num_sms_fp16,
+                                      cudaDevAttrMultiProcessorCount, device));
+  }
+  const int64_t blocks_wanted = static_cast<int64_t>(cached_num_sms_fp16) * 32;
 
   if (is_aligned_vec8) {
     const int64_t num_vecs = n / 8;

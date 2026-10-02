@@ -62,13 +62,13 @@ bare-metal-llm-engine/
 │   ├── swiglu.cu       # Phase 4 — ✅ implemented (fused SiLU + Mul, float4/uint4)
 │   ├── rmsnorm_linear.cu # Exercise 8 — ✅ implemented (fused RMSNorm + GEMM projection)
 │   └── residual_rmsnorm.cu # Exercise 9 — ✅ implemented (fused Residual Add + RMSNorm)
-├── tests/              # Test suites (118 tests total across 8 suites, 100% passing)
+├── tests/              # Test suites (119 tests total across 8 suites, 100% passing)
 │   ├── test_framework.hpp/cpp  # Custom test harness with TEST/TEST_PENDING
 │   ├── test_dtype.cpp          # DType tests
 │   ├── test_tensor.cpp         # Module 1 specification (tensor tests)
 │   ├── test_allocator.cpp      # Phase 4 PoolAllocator tests (100k cycles acceptance)
 │   ├── test_cpu_ref.cpp        # CPU oracle tests (25 tests)
-│   ├── test_kernels.cu         # CUDA kernel tests (44 tests)
+│   ├── test_kernels.cu         # CUDA kernel tests (45 tests)
 │   ├── golden.hpp/cpp          # Golden file loader
 │   └── golden/                 # Float64 reference data (gitignored, regenerated)
 ├── bench/              # Benchmark harness + benchmarks

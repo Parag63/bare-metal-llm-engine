@@ -6,9 +6,9 @@
 
 In modern transformer language models (LLaMA-7B, Mistral, TinyLlama), inference latency is
 dominated by memory bandwidth and launch overhead rather than peak arithmetic capability.
-On an NVIDIA RTX 4090, the theoretical balance point is approximately 82 FLOP/byte
-(82.6 TFLOP/s FP32 vs. 1,008 GB/s memory bandwidth). Any operation with an arithmetic
-intensity below this ratio is memory-bandwidth bound.
+On an NVIDIA GeForce RTX 4070 SUPER (Ada Lovelace, sm_89), the theoretical balance point is
+approximately 70.4 FLOP/byte (35.5 TFLOP/s FP32 vs. 504 GB/s GDDR6X memory bandwidth).
+Any operation with an arithmetic intensity below this ratio is memory-bandwidth bound.
 
 Every standard transformer layer in LLaMA-7B executes two structural sub-layer boundaries:
 1. **Pre-sublayer:** `RMSNorm → Linear` (hidden → RMSNorm → QKV projection, and hidden → RMSNorm → gate/up projection).
@@ -53,3 +53,34 @@ Both kernels adhere strictly to ADR 0003: they expose raw device pointers, expli
 - **Launch latency:** Reduces kernel launches by 64 launches per token across a 32-layer transformer, reclaiming up to ~320 µs of driver overhead per token during autoregressive decode.
 - **Shared memory footprint:** `rmsnorm_linear` allocates $(K + kBlockSize) \times 4$ bytes of dynamic shared memory. For LLaMA-7B ($K=4096, kBlockSize=256$), this requires 17.2 KiB per block, well within the default 48 KiB hardware limit on modern NVIDIA architectures (sm_89 provides up to 100 KiB).
 - **Verification integrity:** Because the CPU oracles (`src/cpu_ref/rmsnorm_linear_cpu.cpp`, `src/cpu_ref/residual_rmsnorm_cpu.cpp`) implement the exact mathematical equivalent using standard two-pass loops, the test suite can independently verify both fused correctness against PyTorch/NumPy reference data and assert equivalence against the composing separate kernels (`rmsnorm` + `matmul_tiled`).
+
+---
+
+## Addendum (October 2026): Empirical Defeat of 1D Strip Fusion and Dynamic Dispatch
+
+Subsequent empirical benchmarking and profiling with Nsight Compute revealed that the naive 1D strip fusion implementation (`rmsnorm_linear_kernel` / `rmsnorm_linear_fused_direct`) is defeated by separate specialized kernels at **both** operational shapes:
+
+1. **Prefill Defeat ($M=512$):**
+   - **Hypothesis:** Eliminating the 16 MiB intermediate normalized activation roundtrip was expected to produce a 15–30% speedup.
+   - **Measurement:** 1D fused took **13.56 ms** vs. **0.99 ms** for `rmsnorm + matmul_register_tiled` — a **$13.6\times$ defeat**.
+   - **Root Cause:** In 1D row fusion, each block processes one row independently to keep normalized activations in shared memory. This destroys 2D register tiling across tokens ($M$) and forces the weight matrix $W$ to be reloaded from DRAM for every token. As measured by Nsight Compute (`ncu`), DRAM read traffic exploded from 0.82 GB to 3.37 GB (+2.55 GB reload penalty). The 16 MiB activation savings is dwarfed $160\times$ over by the weight reload penalty.
+
+2. **Decode Defeat ($M=1$):**
+   - **Hypothesis:** An initial audit claimed a "+43% win" for decode. However, this compared against a strawman baseline (`rmsnorm + matmul_tiled` at $M=1$, where $31/32$ threads are idle padding, running at 0.52 ms).
+   - **Measurement:** Against the fair baseline (`rmsnorm + gemv`), separate execution runs in **0.149 ms** (465 GB/s, 92.3% peak BW), whereas 1D fused runs in **0.366 ms** (182 GB/s) — a **$2.45\times$ defeat**.
+   - **Root Cause:** At $M=1$ and $N=4096$, 1D strip fusion launches only $\lceil 4096 / 256 \rceil = 16$ blocks. On the RTX 4070 SUPER (56 SMs), 40 SMs (71% of the GPU) sit completely idle. Furthermore, each thread performs an unvectorized scalar loop over $K$. In contrast, `gemv` launches 64 blocks of 8 warps, uses `float2` vector loads, and performs cooperative multi-warp tree reductions across $K$.
+
+### Production Resolution: Dynamic Winning-Path Dispatch
+
+Recognizing this empirical negative result, the public engine entry point `engine::cuda::rmsnorm_linear` does not execute the defeated 1D fused kernel. Instead, it dynamically dispatches to the winning paths:
+- **$M = 1$ (Decode):** Dispatches to `rmsnorm` followed by `gemv` (0.149 ms, 465 GB/s).
+- **$M > 1$ (Prefill):** Dispatches to `rmsnorm` followed by `matmul_register_tiled` (0.99 ms, 17.35 TFLOP/s).
+- **Zero Allocation Overhead:** Intermediate workspaces are allocated from the high-throughput `PoolAllocator(Device::CUDA)` slab allocator, eliminating `cudaMalloc` driver roundtrips.
+
+### Residual RMSNorm Cold DRAM Speedup Verification
+
+For `residual_rmsnorm`, intermediate activations do not reload weights. In cold DRAM streaming at $4096 \times 4096$ (268.4 MB total working set, exceeding the 48 MB L2 cache):
+- **Separate (`vector_add + rmsnorm`):** 5 tensor passes ($335.5\text{ MB}$) in **0.763 ms** (439.7 GB/s).
+- **Fused (`residual_rmsnorm`):** 4 tensor passes ($268.4\text{ MB}$) in **0.618 ms** (434.1 GB/s).
+- **Achieved Speedup:** $0.763 / 0.618 = \mathbf{1.235\times}$ (measured) / $\mathbf{1.246\times}$ (best min), perfectly matching the theoretical memory traffic ceiling of $5/4 = \mathbf{1.25\times}$ (+25%).
+

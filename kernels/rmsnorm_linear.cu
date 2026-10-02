@@ -32,6 +32,7 @@
 
 #include <engine/check.hpp>
 #include <engine/kernels.hpp>
+#include <engine/pool_allocator.hpp>
 
 #include <cmath>
 
@@ -189,19 +190,17 @@ void rmsnorm_linear(const float* in, const float* rms_weight, const float* W, fl
   //    for every row, adding 2.29 GB of reload traffic (13.6x slower than register-tiled GEMM).
   //    Therefore, dispatch M > 1 to rmsnorm + matmul_register_tiled.
   if (M == 1) {
-    float* temp = nullptr;
     const std::size_t temp_bytes = static_cast<std::size_t>(K) * sizeof(float);
-    CUDA_CHECK(cudaMallocAsync(&temp, temp_bytes, stream));
+    float* temp = static_cast<float*>(pool_allocator(Device::CUDA).allocate(temp_bytes));
     rmsnorm(in, rms_weight, temp, 1, K, eps, stream);
     gemv(W, temp, out, N, K, stream);
-    CUDA_CHECK(cudaFreeAsync(temp, stream));
+    pool_allocator(Device::CUDA).deallocate(temp);
   } else {
-    float* temp = nullptr;
     const std::size_t temp_bytes = static_cast<std::size_t>(M * K) * sizeof(float);
-    CUDA_CHECK(cudaMallocAsync(&temp, temp_bytes, stream));
+    float* temp = static_cast<float*>(pool_allocator(Device::CUDA).allocate(temp_bytes));
     rmsnorm(in, rms_weight, temp, M, K, eps, stream);
     matmul_register_tiled(temp, W, out, M, N, K, stream);
-    CUDA_CHECK(cudaFreeAsync(temp, stream));
+    pool_allocator(Device::CUDA).deallocate(temp);
   }
 }
 

@@ -160,6 +160,19 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaDeviceSynchronize());
     std::printf("Executed rmsnorm_linear_fused_1\n");
 
+  } else if (name == "swiglu_512") {
+    const std::int64_t n = 512 * 11008;
+    DeviceBuffer<float> gate(random_host(static_cast<std::size_t>(n), 1u));
+    DeviceBuffer<float> up(random_host(static_cast<std::size_t>(n), 2u));
+    DeviceBuffer<float> out(static_cast<std::size_t>(n));
+
+    flush_l2(l2_evict);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    engine::cuda::swiglu(gate.get(), up.get(), out.get(), n);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    std::printf("Executed swiglu_512\n");
+
   } else {
     std::fprintf(stderr, "Unknown case: %s\n", name.c_str());
     return 2;
