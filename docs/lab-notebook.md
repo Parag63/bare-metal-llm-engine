@@ -111,6 +111,21 @@ Measured at 2670 MHz SM / 10251 MHz mem (RTX 4070 SUPER, `RelWithDebInfo`, `reps
 
 - **Prediction vs Measurement (Phase 3):** Notice `S=2048` measured **19.39 ms** vs our 4.5 ms DRAM-only lower bound: untiled warp-dot-product `QK^T` (`Q` shared, unvectorized `K`) and single-row `PV` (`1` block per `(h, i)` streaming `2048` keys) add SIMT compute and `4.3x` unamortized memory overhead (~0.89 TFLOP/s effective) on top of the 512 MiB score-matrix materialization. Scaling from `S=512` to `S=2048` is cleanly $4.0\times$ per $2\times$ sequence length ($1.25 \to 4.92 \to 19.39$ ms), confirming strict $O(S^2)$ work & workspace scaling and giving a clean GPU-side numerical oracle for FlashAttention-2.
 
+### Phase 4 Measured Results — In-Place RoPE (`rope`)
+
+Implemented in [kernels/rope.cu](../kernels/rope.cu): single fused launch across `Q` and `K`, templated on `<kHeadDim, kRotateHalf>` so `half_d` indexing compiles to bit-shifts with zero branch on `RopeConvention::RotateHalf` vs `AdjacentPair`, reading precomputed FP32 `[max_seq, D/2]` tables (`pos_offset + t`), computing rotations in FP32 and storing in-place as FP16. Passed all 7 golden cases (`pos = 0, 137, 2047, 99998..100001`, both conventions) and all contracts (`s == 0` no-op, `n_kv_heads == 0 && k == nullptr` valid, invalid params throw).
+
+Measured at 2805 MHz SM / 10251 MHz mem (RTX 4070 SUPER, `RelWithDebInfo`, `reps=50`):
+
+| Configuration | Traffic (B) | Median (ms) | IQR (ms) | Min (ms) | Achieved BW | % Peak BW | Regime |
+|---|---:|---:|---:|---:|---:|---:|---|
+| Decode `S=1` TinyLlama (`32/4, D=64`) | 9.25 KiB | 0.0031 | 0.0010 | 0.0028 | — | — | Launch-latency bound |
+| Decode `S=1` Llama-2-7B (`32/32, D=128`) | 32.5 KiB | 0.0037 | 0.0027 | 0.0029 | — | — | Launch-latency bound |
+| Prefill `S=2048` TinyLlama (`32/4, D=64`) | 18.5 MiB | 0.045 | 0.0028 | 0.040 | 431.8 GB/s | 85.7% | Cold DRAM BW bound |
+| Prefill `S=2048` Llama-2-7B (`32/32, D=128`) | 65.0 MiB | 0.159 | 0.0040 | 0.143 | 429.4 GB/s | 85.2% | Cold DRAM BW bound |
+
+- **Prediction vs Measurement (Phase 4):** Decode latency (**3.1 µs / 3.7 µs**) landed inside our **3–5 µs** launch-floor prediction, and cold prefill (**45 µs / 431.8 GB/s** = 85.7% peak BW at `S=2048` TinyLlama) hit right inside our **43–55 µs** target window. *(Note: high single-launch `(max-min)/median` spread at sub-50 µs reflects Windows WDDM timer/scheduler outliers while IQR stays 1.0–4.0 µs.)*
+
 ---
 
 ## Week 09 — 2026-10-02 · Pre-Module 4 Mathematical & Microarchitectural Audit: Baseline Realities, Cache Residency, and Precision Decisions

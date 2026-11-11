@@ -1856,7 +1856,7 @@ TEST(kernels, attention_naive_contracts_and_edge_cases) {
   verify_prefill_attention_contracts(ctx, engine::cuda::attention_naive, "naive");
 }
 
-TEST_PENDING(kernels, rope_matches_reference) {
+TEST(kernels, rope_matches_reference) {
   REQUIRE_CUDA_DEVICE();
   for (const auto& c : kRopeCases) {
     const std::string stem = std::string("rope__") + c.name;
@@ -1892,7 +1892,7 @@ TEST_PENDING(kernels, rope_matches_reference) {
   }
 }
 
-TEST_PENDING(kernels, rope_contracts_and_edge_cases) {
+TEST(kernels, rope_contracts_and_edge_cases) {
   REQUIRE_CUDA_DEVICE();
   const engine::half h_val = engine::float_to_half(2.5f);
   DeviceBuffer<engine::half> d_q(std::vector<engine::half>(64, h_val));

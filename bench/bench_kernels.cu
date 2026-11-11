@@ -909,6 +909,70 @@ void bench_attention_naive(Table& t, int reps) {
   }
 }
 
+void bench_rope(Table& t, int reps) {
+  struct RopeBenchCase {
+    std::int64_t s;
+    std::int64_t hq;
+    std::int64_t hkv;
+    std::int64_t d_head;
+    const char* label;
+  };
+  const RopeBenchCase cases[] = {
+      {1, 32, 4, 64, "decode S=1 TinyLlama (32/4, D=64)"},
+      {1, 32, 32, 128, "decode S=1 Llama2-7B (32/32, D=128)"},
+      {2048, 32, 4, 64, "prefill S=2048 TinyLlama (32/4, D=64)"},
+      {2048, 32, 32, 128, "prefill S=2048 Llama2-7B (32/32, D=128)"},
+  };
+
+  for (const RopeBenchCase& c : cases) {
+    const std::size_t q_elems = static_cast<std::size_t>(c.s * c.hq * c.d_head);
+    const std::size_t k_elems = static_cast<std::size_t>(c.s * c.hkv * c.d_head);
+    const std::size_t tab_elems = static_cast<std::size_t>(c.s * (c.d_head / 2));
+
+    const auto h_q = random_host_half(q_elems, 41u);
+    const auto h_k = random_host_half(k_elems, 42u);
+    const auto h_cos = random_host(tab_elems, 43u);
+    const auto h_sin = random_host(tab_elems, 44u);
+
+    const std::size_t set_bytes =
+        (q_elems + k_elems) * sizeof(engine::half) + tab_elems * sizeof(float) * 2;
+    const std::size_t kColdBytes = std::size_t{256} * 1024 * 1024;
+    const std::size_t num_buffers =
+        (c.s > 1)
+            ? std::min<std::size_t>(
+                  32, std::max<std::size_t>(4, (kColdBytes + set_bytes - 1) / set_bytes))
+            : std::size_t{1};
+
+    std::vector<DeviceBuffer<engine::half>> d_qs, d_ks;
+    d_qs.reserve(num_buffers);
+    d_ks.reserve(num_buffers);
+    for (std::size_t b = 0; b < num_buffers; ++b) {
+      d_qs.emplace_back(h_q);
+      d_ks.emplace_back(h_k);
+    }
+    DeviceBuffer<float> d_cos(h_cos);
+    DeviceBuffer<float> d_sin(h_sin);
+
+    const double flops = 6.0 * d(c.s) * d(c.hq + c.hkv) * d(c.d_head / 2);
+    // In-place read+write on Q and K plus reads of cos/sin rows.
+    const double bytes =
+        2.0 * d(q_elems + k_elems) * static_cast<double>(sizeof(engine::half)) +
+        2.0 * d(tab_elems) * static_cast<double>(sizeof(float));
+
+    std::size_t iter = 0;
+    t.measure_gpu(
+        "rope (RotateHalf)", c.label, flops, bytes,
+        [&] {
+          const std::size_t idx = iter % num_buffers;
+          ++iter;
+          engine::cuda::rope(d_qs[idx].get(), d_ks[idx].get(), d_cos.get(), d_sin.get(),
+                             c.s, c.hq, c.hkv, c.d_head, 0,
+                             engine::RopeConvention::RotateHalf);
+        },
+        /*warmup=*/10, reps);
+  }
+}
+
 void warmup_gpu(double seconds) {
   if (seconds <= 0.0) return;
   constexpr std::int64_t N = 1024;
@@ -994,6 +1058,7 @@ int main(int argc, char** argv) {
   if (want("missing")) bench_missing_kernels(t, reps);
   if (want("swiglu")) bench_swiglu(t, reps);
   if (want("attention_naive")) bench_attention_naive(t, reps);
+  if (want("rope")) bench_rope(t, reps);
 
   if (json_output) {
     t.print_json(std::cout);
