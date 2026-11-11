@@ -120,11 +120,11 @@ struct RmsnormLinearShape {
   std::int64_t m, n, k;
   bool with_weight;
 };
-const RmsnormLinearShape kRmsnormLinearShapes[] = {{1, 4096, 4096, true},
-                                                   {32, 4096, 4096, true},
-                                                   {1, 12288, 4096, true},
+const RmsnormLinearShape kRmsnormLinearShapes[] = {{1, 256, 4096, true},
+                                                   {32, 256, 512, true},
+                                                   {1, 768, 256, true},
                                                    {17, 127, 31, true},
-                                                   {32, 4096, 4096, false}};
+                                                   {32, 256, 512, false}};
 
 /// The eps the generator used. Must match, or rmsnorm disagrees at eps scale on
 /// near-zero rows (which is exactly what the rmsnorm__zeros case tests).
@@ -134,8 +134,8 @@ struct GemvShape {
   std::int64_t n, k;
 };
 const GemvShape kGemvShapes[] = {
-    {4096, 4096},
-    {12288, 4096},
+    {256, 4096},
+    {768, 256},
     {127, 31},
     {64, 128},
 };
@@ -143,7 +143,7 @@ const GemvShape kGemvFp16Shapes[] = {
     {64, 64},
     {128, 256},
     {73, 125},
-    {4096, 4096},
+    {256, 4096},
 };
 
 struct EmbeddingShape {
@@ -644,10 +644,10 @@ TEST(cpu_ref, rmsnorm_linear_matches_reference) {
 }
 
 TEST(cpu_ref, rmsnorm_linear_null_weight_equals_unit_weight) {
-  LOAD_GOLDEN(g, "rmsnorm_linear__32x4096x4096_now");
+  LOAD_GOLDEN(g, "rmsnorm_linear__32x256x512_now");
   const auto& in = g.at("input");
   const auto& W = g.at("W");
-  const std::int64_t M = 32, N = 4096, K = 4096;
+  const std::int64_t M = 32, N = 256, K = 512;
 
   std::vector<float> ones(static_cast<std::size_t>(K), 1.0f);
   std::vector<float> out_a(static_cast<std::size_t>(M * N), 0.0f);

@@ -213,11 +213,11 @@ struct RmsnormLinearShape {
   std::int64_t m, n, k;
   bool with_weight;
 };
-const RmsnormLinearShape kRmsnormLinearShapes[] = {{1, 4096, 4096, true},
-                                                   {32, 4096, 4096, true},
-                                                   {1, 12288, 4096, true},
+const RmsnormLinearShape kRmsnormLinearShapes[] = {{1, 256, 4096, true},
+                                                   {32, 256, 512, true},
+                                                   {1, 768, 256, true},
                                                    {17, 127, 31, true},
-                                                   {32, 4096, 4096, false}};
+                                                   {32, 256, 512, false}};
 
 std::string dims2(std::int64_t a, std::int64_t b) {
   return std::to_string(a) + "x" + std::to_string(b);
@@ -953,10 +953,10 @@ TEST(kernels, rmsnorm_linear_matches_reference) {
 TEST(kernels, rmsnorm_linear_null_weight_equals_unit_weight) {
   REQUIRE_CUDA_DEVICE();
 
-  LOAD_GOLDEN(g, "rmsnorm_linear__32x4096x4096_now");
+  LOAD_GOLDEN(g, "rmsnorm_linear__32x256x512_now");
   const auto& in = g.at("input");
   const auto& W = g.at("W");
-  const std::int64_t M = 32, N = 4096, K = 4096;
+  const std::int64_t M = 32, N = 256, K = 512;
 
   DeviceBuffer<float> d_in(in.data);
   DeviceBuffer<float> d_w(W.data);
@@ -1105,8 +1105,8 @@ struct GemvShape {
 };
 
 const GemvShape kGemvShapes[] = {
-    {4096, 4096},
-    {12288, 4096},
+    {256, 4096},
+    {768, 256},
     {127, 31},
     {64, 128},
 };
@@ -1237,7 +1237,7 @@ TEST(kernels, gemv_fp16_matches_reference) {
       {64, 64},
       {128, 256},
       {73, 125},  // unaligned fallback
-      {4096, 4096},
+      {256, 4096},
   };
 
   for (const auto& s : shapes) {

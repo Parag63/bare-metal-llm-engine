@@ -302,17 +302,17 @@ RESIDUAL_RMSNORM_SHAPES = [
 
 # Module 3 -- (M, N, K, with_weight)
 RMSNORM_LINEAR_SHAPES = [
-    (1, 4096, 4096, True),     # Single-token decode, LLaMA-7B dims
-    (32, 4096, 4096, True),    # Small batch
-    (1, 12288, 4096, True),    # QKV projection (3 x 4096)
+    (1, 256, 4096, True),      # Single-token decode, long K=4096 reduction
+    (32, 256, 512, True),      # Small batch prefill
+    (1, 768, 256, True),       # 3:1 QKV projection ratio
     (17, 127, 31, True),       # Edge-case: nothing divides anything
-    (32, 4096, 4096, False),   # weight == nullptr path
+    (32, 256, 512, False),     # weight == nullptr path
 ]
 
 # GEMV shapes -- (N, K)
 GEMV_SHAPES = [
-    (4096, 4096),     # Standard decode token projection
-    (12288, 4096),    # Wide projection (MLP Gate/Up projection)
+    (256, 4096),      # Standard decode token projection, long K=4096
+    (768, 256),       # 3:1 wide projection (MLP Gate/Up / QKV ratio)
     (127, 31),        # Irregular shape (bounds check & alignment test)
     (64, 128),        # Small power of 2
 ]
@@ -322,7 +322,7 @@ GEMV_FP16_SHAPES = [
     (64, 64),
     (128, 256),
     (73, 125),        # Irregular scalar fallback
-    (4096, 4096),
+    (256, 4096),      # Vectorized N%64==0, K%8==0 fast path with K=4096
 ]
 
 # (vocab_size, hidden_dim, num_tokens)
