@@ -1972,7 +1972,7 @@ TEST(kernels, attention_prefill_contracts_and_edge_cases) {
   verify_prefill_attention_contracts(ctx, engine::cuda::attention_prefill, "flash");
 }
 
-TEST_PENDING(kernels, attention_decode_matches_reference) {
+TEST(kernels, attention_decode_matches_reference) {
   REQUIRE_CUDA_DEVICE();
   for (const auto& c : kAttentionCases) {
     if (c.s_q != 1) continue;
@@ -1997,7 +1997,7 @@ TEST_PENDING(kernels, attention_decode_matches_reference) {
   }
 }
 
-TEST_PENDING(kernels, attention_decode_splits_and_contracts) {
+TEST(kernels, attention_decode_splits_and_contracts) {
   REQUIRE_CUDA_DEVICE();
   // Odd kv_len=513, D=128, GQA 4:1 across splits=1 vs splits=8 and edge kv_len < splits.
   LOAD_GOLDEN(g, "attention__s1_kv513_h8_kv2_d128_decode");
@@ -2044,6 +2044,63 @@ TEST_PENDING(kernels, attention_decode_splits_and_contracts) {
   CHECK_CASE("decode kv_len=3 < split_kv=16", f3.data(), exp3.data(), f3.size(),
              attention_rtol(), attention_atol(3));
   for (engine::half h : d_out0.download()) EXPECT_EQ(engine::half_to_float(h), 0.0f);
+
+  // kv_len == 1 exact single-key decode & per-head GQA ablation mode check.
+  DeviceBuffer<engine::half> d_out1(q.size()), d_no_share(q.size());
+  std::vector<engine::half> h_ref1(q.size());
+  engine::cpu::attention(q.data(), k.data(), v.data(), h_ref1.data(), 1, 1, hq, hkv, D,
+                         kv_len * D, scale, 0, false);
+  d_out1.zero();
+  d_no_share.zero();
+  engine::cuda::attention_decode(d_q.get(), d_k.get(), d_v.get(), d_out1.get(), 1, hq,
+                                 hkv, D, kv_len * D, scale, /*split_kv=*/0);
+  engine::cuda::detail::attention_decode_with_mode(
+      d_q.get(), d_k.get(), d_v.get(), d_no_share.get(), kv_len, hq, hkv, D, kv_len * D,
+      scale, /*split_kv=*/8, /*share_gqa_kv=*/false, nullptr);
+  CUDA_CHECK(cudaDeviceSynchronize());
+  CHECK_CASE("decode kv_len=1", to_float_vec(d_out1.download()).data(),
+             to_float_vec(h_ref1).data(), q.size(), attention_rtol(), attention_atol(1));
+  CHECK_CASE("decode per-head split_kv=8 vs golden",
+             to_float_vec(d_no_share.download()).data(), exp.data.data(), q.size(),
+             attention_rtol(), attention_atol(kv_len));
+
+  // Multi-stream ScopedPoolBuffer reuse across concurrent Split-KV decode launches.
+  cudaStream_t stream_a = nullptr, stream_b = nullptr;
+  CUDA_CHECK(cudaStreamCreateWithFlags(&stream_a, cudaStreamNonBlocking));
+  CUDA_CHECK(cudaStreamCreateWithFlags(&stream_b, cudaStreamNonBlocking));
+  DeviceBuffer<engine::half> d_out_a(q.size()), d_out_b(q.size());
+  d_out_a.zero();
+  d_out_b.zero();
+  std::vector<engine::half> h_ref257(q.size());
+  engine::cpu::attention(q.data(), k.data(), v.data(), h_ref257.data(), 1, 257, hq, hkv,
+                         D, kv_len * D, scale, 0, false);
+  for (int rep = 0; rep < 4; ++rep) {
+    engine::cuda::attention_decode(d_q.get(), d_k.get(), d_v.get(), d_out_a.get(), kv_len,
+                                   hq, hkv, D, kv_len * D, scale, /*split_kv=*/8,
+                                   stream_a);
+    engine::cuda::attention_decode(d_q.get(), d_k.get(), d_v.get(), d_out_b.get(), 257,
+                                   hq, hkv, D, kv_len * D, scale, /*split_kv=*/8,
+                                   stream_b);
+  }
+  CUDA_CHECK(cudaStreamSynchronize(stream_a));
+  CUDA_CHECK(cudaStreamSynchronize(stream_b));
+  CUDA_CHECK(cudaStreamDestroy(stream_a));
+  CUDA_CHECK(cudaStreamDestroy(stream_b));
+  CHECK_CASE("decode multi-stream A", to_float_vec(d_out_a.download()).data(),
+             exp.data.data(), q.size(), attention_rtol(), attention_atol(kv_len));
+  CHECK_CASE("decode multi-stream B", to_float_vec(d_out_b.download()).data(),
+             to_float_vec(h_ref257).data(), q.size(), attention_rtol(),
+             attention_atol(257));
+
+  // Parameter contract rejections.
+  engine::half* p = d_q.get();
+  EXPECT_THROWS(
+      engine::cuda::attention_decode(nullptr, p, p, p, 4, hq, hkv, D, 4 * D, scale));
+  EXPECT_THROWS(engine::cuda::attention_decode(p, p, p, p, 4, 6, 4, D, 4 * D, scale));
+  EXPECT_THROWS(
+      engine::cuda::attention_decode(p, p, p, p, 4, hq, hkv, 32, 4 * 32, scale));
+  EXPECT_THROWS(
+      engine::cuda::attention_decode(p, p, p, p, 4, hq, hkv, D, 4 * D, scale, -1));
 }
 
 #endif  // ENGINE_HAS_CUDA

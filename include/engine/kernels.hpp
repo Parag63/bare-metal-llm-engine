@@ -165,6 +165,13 @@ void attention_prefill_with_mode(const half* q, const half* k, const half* v, ha
                                  std::int64_t head_dim, std::int64_t kv_head_stride,
                                  float scale, std::int64_t q_pos_offset, bool is_causal,
                                  float* out_lse, bool share_gqa_kv, cudaStream_t stream);
+
+/// Explicitly toggle GQA group sharing in FlashDecoding (for ablations).
+void attention_decode_with_mode(const half* q, const half* k, const half* v, half* out,
+                                std::int64_t kv_len, std::int64_t n_heads,
+                                std::int64_t n_kv_heads, std::int64_t head_dim,
+                                std::int64_t kv_head_stride, float scale, int split_kv,
+                                bool share_gqa_kv, cudaStream_t stream);
 }  // namespace detail
 
 /// Single-token decode attention with Split-KV FlashDecoding (ADR-0013).

@@ -155,6 +155,43 @@ Implemented in [kernels/attention_prefill.cu](../kernels/attention_prefill.cu): 
   - Crossover against naive already holds at the smallest measured point (`S=128`: **5.4×** faster) because even at 2 MiB score footprint, `attention_naive` suffers three kernel launches and untiled SIMT `PV` streaming.
   - GQA group sharing (`M_thr=4` rows/thread across 8 heads sharing `K/V` in SMEM) adds **+13.2% at `S=2048`** and **+20.7% at `S=4096`**, lifting register reuse from 2.67 to 4.0 FMAs per SMEM word while cutting total global KV tile fetches across the grid by $2\times$ (`512` vs `1024` block sweeps of $K/V$ at `S=2048`).
 
+#### Phase 6 — FlashDecoding Split-KV & GQA Broadcast (`kernels/attention_decode.cu`)
+
+Implemented in [kernels/attention_decode.cu](../kernels/attention_decode.cu) and documented in [ADR 0013](adr/0013-flashdecoding-split-kv.md):
+
+1. **Architecture evolution (`kGChunk=8` occupancy trap -> warp-per-head SMEM-KV):**
+   - Initial GQA design (`kGChunk=8`, all 8 Q heads per thread) used **134–138 registers/thread** (`1` active block/SM = 16.7% occupancy) plus 8 sequential cross-warp reductions, plateauing at **0.096 ms (174.4 GB/s)** at TinyLlama `L=16384` and losing to `no GQA share` at `L=2048` (`0.037 vs 0.023 ms`).
+   - Replaced with `flash_decode_gqa_warp_kernel<kHeadDim, G>` (`G in {2, 4, 8}`): `G` warps cooperatively cache a `K/V` tile (`32` keys, `8192 B` SMEM for `G=8, D=64`) via `LDG.128`, each warp keeps `1` Q head in registers and emits directly with zero cross-warp SMEM reduction (`53–54 regs`, `4 blocks/SM = 66.7% occupancy`, **0 B stack / 0 B spills**), cutting TinyLlama `L=16384` **1.92×** (`0.096 -> 0.050 ms`).
+   - MHA (`G=1`) and non-`{2,4,8}` groups use `flash_decode_split_kernel` (`67–70 regs`, **0 B stack / 0 B spills**). Partial `(m, l, O)` buffers use `ScopedPoolBuffer` with `flash_decode_reduce_kernel` (`33 regs`).
+
+2. **Split-KV Sweep on TinyLlama (`H_q=32, H_kv=4, D=64`, cold 256 MiB KV slab, 2790 MHz SM [2745–2805], 10251 MHz mem):**
+
+| `kv_len` | `splits=1` | `splits=8` | `splits=14` | `splits=16` | `splits=28` | `splits=32` | `splits=42` | `splits=56` | Optimal BW (% peak) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `128` | 0.0100 ms | 0.0082 ms | 0.0092 ms | 0.0092 ms | 0.012 ms | 0.012 ms | 0.013 ms | 0.017 ms | 17.13 GB/s (3.4%) |
+| `512` | 0.029 ms | **0.011 ms** | 0.012 ms | 0.012 ms | 0.013 ms | 0.013 ms | 0.015 ms | 0.017 ms | 47.27 GB/s (9.4%) |
+| `2048` | 0.101 ms | 0.020 ms | **0.016 ms** | **0.016 ms** | 0.018 ms | 0.018 ms | 0.019 ms | 0.021 ms | 128.5 GB/s (25.5%) |
+| `8192` | 0.392 ms | 0.057 ms | 0.039 ms | 0.039 ms | **0.032 ms** | **0.032 ms** | 0.033 ms | 0.035 ms | **265.3 GB/s (52.6%)** |
+| `16384` | 0.779 ms | 0.105 ms | 0.067 ms | 0.069 ms | **0.050 ms** | 0.051 ms | 0.051 ms | 0.054 ms | **334.5 GB/s (66.4%)** |
+| `32768` | 1.56 ms | 0.204 ms | 0.125 ms | 0.128 ms | **0.088 ms** | 0.090 ms | **0.088 ms** | 0.090 ms | **381.5 GB/s (75.7%)** |
+
+3. **Decode FlashDecoding vs Single-Pass (`splits=1`) & No-GQA-Share Ablation (`relwithdebinfo`, 2805 MHz SM [2790–2805], 10251 MHz mem):**
+
+| Workload | KV Cache | FlashDecoding (`auto`) | `splits=1` | `no GQA share` | Ideal BW (% peak) | Speedup vs `splits=1` |
+|---|---|---:|---:|---:|---:|---:|
+| TinyLlama `L=512` (`32/4, D=64`) | 0.5 MiB | 0.013 ms | 0.028 ms | 0.011 ms | 41.24 GB/s (8.18%) | **2.2×** |
+| TinyLlama `L=2048` (`32/4, D=64`) | 2.0 MiB | **0.017 ms** | 0.102 ms | 0.018 ms | 122.4 GB/s (24.28%) | **6.0×** |
+| TinyLlama `L=8192` (`32/4, D=64`) | 8.0 MiB | **0.032 ms** | 0.393 ms | 0.052 ms | 265.3 GB/s (52.64%) | **12.3×** (1.63× vs unshared) |
+| TinyLlama `L=16384` (`32/4, D=64`) | 16.0 MiB | **0.050 ms** | 0.781 ms | 0.095 ms | **335.4 GB/s (66.54%)** | **15.6×** (1.90× vs unshared) |
+| TinyLlama `L=32768` (`32/4, D=64`) | 32.0 MiB | **0.088 ms** | 1.56 ms | 0.185 ms | **381.1 GB/s (75.61%)** | **17.7×** (2.10× vs unshared) |
+| Llama-2-7B `L=512` (`32/32, D=128`) | 8.0 MiB | **0.023 ms** | 0.023 ms | n/a (`G=1`) | **362.0 GB/s (71.83%)** | 1.00× (`min_keys=512` avoids over-split) |
+| Llama-2-7B `L=2048` (`32/32, D=128`) | 32.0 MiB | **0.078 ms** | 0.078 ms | n/a (`G=1`) | **431.4 GB/s (85.58%)** | 1.00× |
+| Llama-2-7B `L=8192` (`32/32, D=128`) | 128.0 MiB | **0.290 ms** | 0.298 ms | n/a (`G=1`) | **463.6 GB/s (91.97%)** | 1.03× |
+
+- **Prediction vs Measurement (Phase 6):**
+  - **Llama-2-7B** exceeds the `>= 80%` DRAM peak target at both `L=2048` (**85.58% / 431.4 GB/s**) and `L=8192` (**91.97% / 463.6 GB/s**).
+  - **TinyLlama** reaches **75.61% (381.1 GB/s)** at `L=32768` (**17.7×** faster than single-pass `1.56 ms`), because `H_kv=4` moves only 8–32 MiB KV (theoretical DRAM transfer at `504 GB/s` is only 16.5–66 µs, so fixed ~10 µs split+reduce overhead caps 8–16 MiB at 52.6–66.5% even with `4` blocks/SM occupancy and `2.10×` GQA win over unshared).
+
 ---
 
 ## Week 09 — 2026-10-02 · Pre-Module 4 Mathematical & Microarchitectural Audit: Baseline Realities, Cache Residency, and Precision Decisions

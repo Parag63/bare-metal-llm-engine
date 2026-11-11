@@ -1011,6 +1011,150 @@ void bench_rope(Table& t, int reps) {
   }
 }
 
+void bench_decode_sweep(Table& t, int reps) {
+  const std::int64_t lengths[] = {128, 512, 2048, 8192, 16384, 32768};
+  const int splits[] = {1, 2, 4, 8, 14, 16, 28, 32, 42, 56};
+  const std::int64_t hq = 32, hkv = 4, d_head = 64;
+  const float scale = 1.0f / std::sqrt(static_cast<float>(d_head));
+
+  for (std::int64_t kv_len : lengths) {
+    const std::size_t slot_half_elems = static_cast<std::size_t>(hkv * kv_len * d_head);
+    const std::size_t slot_elems = slot_half_elems * 2;
+    const std::size_t slot_bytes = slot_elems * sizeof(engine::half);
+    const std::size_t kColdBytes = std::size_t{256} * 1024 * 1024;
+    const std::size_t num_slots =
+        std::max<std::size_t>(2, (kColdBytes + slot_bytes - 1) / slot_bytes);
+
+    std::vector<engine::half> h_kv = random_host_half(slot_elems, 61u);
+    std::vector<engine::half> h_slab(num_slots * slot_elems);
+    for (std::size_t s = 0; s < num_slots; ++s) {
+      std::copy(h_kv.begin(), h_kv.end(),
+                h_slab.begin() + static_cast<std::ptrdiff_t>(s * slot_elems));
+    }
+    DeviceBuffer<engine::half> d_kv_slab(h_slab);
+    DeviceBuffer<engine::half> d_q(
+        random_host_half(static_cast<std::size_t>(hq * d_head), 62u));
+    DeviceBuffer<engine::half> d_out(static_cast<std::size_t>(hq * d_head));
+
+    const double flops = 4.0 * d(hq) * d(kv_len) * d(d_head);
+    const double ideal_bytes =
+        static_cast<double>(sizeof(engine::half)) *
+        (2.0 * d(hkv) * d(kv_len) * d(d_head) + 2.0 * d(hq) * d(d_head));
+
+    for (int sp : splits) {
+      char label[96];
+      std::snprintf(label, sizeof(label), "TinyLlama L=%lld splits=%d",
+                    static_cast<long long>(kv_len), sp);
+      std::size_t iter = 0;
+      t.measure_gpu(
+          "attention_decode (sweep)", label, flops, ideal_bytes,
+          [&] {
+            const std::size_t slot = iter % num_slots;
+            ++iter;
+            const engine::half* k_ptr = d_kv_slab.get() + slot * slot_elems;
+            const engine::half* v_ptr = k_ptr + slot_half_elems;
+            engine::cuda::attention_decode(d_q.get(), k_ptr, v_ptr, d_out.get(), kv_len,
+                                           hq, hkv, d_head, kv_len * d_head, scale, sp);
+          },
+          /*warmup=*/8, reps);
+    }
+  }
+}
+
+void bench_attention_decode(Table& t, int reps) {
+  struct DecodeCase {
+    std::int64_t kv_len;
+    std::int64_t hq;
+    std::int64_t hkv;
+    std::int64_t d_head;
+    const char* arch;
+  };
+  const DecodeCase cases[] = {
+      {512, 32, 4, 64, "TinyLlama"},    {2048, 32, 4, 64, "TinyLlama"},
+      {8192, 32, 4, 64, "TinyLlama"},   {16384, 32, 4, 64, "TinyLlama"},
+      {32768, 32, 4, 64, "TinyLlama"},  {512, 32, 32, 128, "Llama2-7B"},
+      {2048, 32, 32, 128, "Llama2-7B"}, {8192, 32, 32, 128, "Llama2-7B"},
+  };
+
+  for (const DecodeCase& c : cases) {
+    const std::size_t half_kv_elems =
+        static_cast<std::size_t>(c.hkv * c.kv_len * c.d_head);
+    const std::size_t slot_elems = half_kv_elems * 2;
+    const std::size_t slot_bytes = slot_elems * sizeof(engine::half);
+    const std::size_t kColdBytes = std::size_t{256} * 1024 * 1024;
+    const std::size_t num_slots =
+        std::max<std::size_t>(2, (kColdBytes + slot_bytes - 1) / slot_bytes);
+
+    std::vector<engine::half> h_kv = random_host_half(slot_elems, 71u);
+    std::vector<engine::half> h_slab(num_slots * slot_elems);
+    for (std::size_t s = 0; s < num_slots; ++s) {
+      std::copy(h_kv.begin(), h_kv.end(),
+                h_slab.begin() + static_cast<std::ptrdiff_t>(s * slot_elems));
+    }
+    DeviceBuffer<engine::half> d_kv_slab(h_slab);
+    DeviceBuffer<engine::half> d_q(
+        random_host_half(static_cast<std::size_t>(c.hq * c.d_head), 72u));
+    DeviceBuffer<engine::half> d_out(static_cast<std::size_t>(c.hq * c.d_head));
+
+    const float scale = 1.0f / std::sqrt(static_cast<float>(c.d_head));
+    const double flops = 4.0 * d(c.hq) * d(c.kv_len) * d(c.d_head);
+    const double ideal_bytes =
+        static_cast<double>(sizeof(engine::half)) *
+        (2.0 * d(c.hkv) * d(c.kv_len) * d(c.d_head) + 2.0 * d(c.hq) * d(c.d_head));
+
+    char label[96];
+    std::snprintf(label, sizeof(label), "%s L=%lld H=%lld/%lld D=%lld (%s KV)", c.arch,
+                  static_cast<long long>(c.kv_len), static_cast<long long>(c.hq),
+                  static_cast<long long>(c.hkv), static_cast<long long>(c.d_head),
+                  mib(slot_bytes).c_str());
+
+    std::size_t iter_auto = 0;
+    t.measure_gpu(
+        "attention_decode (FlashDecoding)", label, flops, ideal_bytes,
+        [&] {
+          const std::size_t slot = iter_auto % num_slots;
+          ++iter_auto;
+          const engine::half* k_ptr = d_kv_slab.get() + slot * slot_elems;
+          const engine::half* v_ptr = k_ptr + half_kv_elems;
+          engine::cuda::attention_decode(d_q.get(), k_ptr, v_ptr, d_out.get(), c.kv_len,
+                                         c.hq, c.hkv, c.d_head, c.kv_len * c.d_head,
+                                         scale, /*split_kv=*/0);
+        },
+        /*warmup=*/8, reps);
+
+    std::size_t iter_s1 = 0;
+    t.measure_gpu(
+        "attention_decode (splits=1)", label, flops, ideal_bytes,
+        [&] {
+          const std::size_t slot = iter_s1 % num_slots;
+          ++iter_s1;
+          const engine::half* k_ptr = d_kv_slab.get() + slot * slot_elems;
+          const engine::half* v_ptr = k_ptr + half_kv_elems;
+          engine::cuda::attention_decode(d_q.get(), k_ptr, v_ptr, d_out.get(), c.kv_len,
+                                         c.hq, c.hkv, c.d_head, c.kv_len * c.d_head,
+                                         scale, /*split_kv=*/1);
+        },
+        /*warmup=*/8, reps);
+
+    if (c.hq > c.hkv) {
+      std::size_t iter_ns = 0;
+      t.measure_gpu(
+          "attention_decode (no GQA share)", label, flops, ideal_bytes,
+          [&] {
+            const std::size_t slot = iter_ns % num_slots;
+            ++iter_ns;
+            const engine::half* k_ptr = d_kv_slab.get() + slot * slot_elems;
+            const engine::half* v_ptr = k_ptr + half_kv_elems;
+            engine::cuda::detail::attention_decode_with_mode(
+                d_q.get(), k_ptr, v_ptr, d_out.get(), c.kv_len, c.hq, c.hkv, c.d_head,
+                c.kv_len * c.d_head, scale, /*split_kv=*/0, /*share_gqa_kv=*/false,
+                nullptr);
+          },
+          /*warmup=*/8, reps);
+    }
+  }
+}
+
 void warmup_gpu(double seconds) {
   if (seconds <= 0.0) return;
   constexpr std::int64_t N = 1024;
@@ -1098,6 +1242,8 @@ int main(int argc, char** argv) {
   if (want("attention_prefill") || want("attention_naive")) {
     bench_attention_prefill(t, reps, /*include_large=*/!quick);
   }
+  if (want("attention_decode")) bench_attention_decode(t, reps);
+  if (filter == "decode_sweep") bench_decode_sweep(t, reps);
   if (want("rope")) bench_rope(t, reps);
 
   if (json_output) {
