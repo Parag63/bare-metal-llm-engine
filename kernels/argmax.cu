@@ -24,67 +24,22 @@ namespace {
 constexpr int ARGMAX_THREADS = 512;
 constexpr int ARGMAX_WARPS = ARGMAX_THREADS / 32;  // 16 warps
 
-__global__ void argmax_f32_kernel(const float* __restrict__ logits,
-                                  int32_t* __restrict__ out_token, int64_t vocab_size) {
-  __shared__ float s_val[ARGMAX_WARPS];
-  __shared__ int32_t s_idx[ARGMAX_WARPS];
+template <typename T>
+__device__ __forceinline__ float load_logit_f32(const T* logits, int64_t idx);
 
-  const int tid = threadIdx.x;
-  const int lane = tid % 32;
-  const int warp = tid / 32;
-
-  float best_val = -1e38f;
-  int32_t best_idx = 0x7fffffff;
-
-  for (int64_t i = tid; i < vocab_size; i += ARGMAX_THREADS) {
-    const float v = logits[i];
-    if (v > best_val || (v == best_val && static_cast<int32_t>(i) < best_idx)) {
-      best_val = v;
-      best_idx = static_cast<int32_t>(i);
-    }
-  }
-
-// Intra-warp reduction using register shuffles
-#pragma unroll
-  for (int offset = 16; offset > 0; offset /= 2) {
-    const float other_val = __shfl_down_sync(0xffffffff, best_val, offset);
-    const int32_t other_idx = __shfl_down_sync(0xffffffff, best_idx, offset);
-    if (other_val > best_val || (other_val == best_val && other_idx < best_idx)) {
-      best_val = other_val;
-      best_idx = other_idx;
-    }
-  }
-
-  if (lane == 0) {
-    s_val[warp] = best_val;
-    s_idx[warp] = best_idx;
-  }
-
-  __syncthreads();
-
-  // Warp 0 reduces partial maximums across all 16 warps
-  if (warp == 0) {
-    float warp_val = (lane < ARGMAX_WARPS) ? s_val[lane] : -1e38f;
-    int32_t warp_idx = (lane < ARGMAX_WARPS) ? s_idx[lane] : 0x7fffffff;
-
-#pragma unroll
-    for (int offset = 8; offset > 0; offset /= 2) {
-      const float other_val = __shfl_down_sync(0xffffffff, warp_val, offset);
-      const int32_t other_idx = __shfl_down_sync(0xffffffff, warp_idx, offset);
-      if (other_val > warp_val || (other_val == warp_val && other_idx < warp_idx)) {
-        warp_val = other_val;
-        warp_idx = other_idx;
-      }
-    }
-
-    if (lane == 0) {
-      *out_token = warp_idx;
-    }
-  }
+template <>
+__device__ __forceinline__ float load_logit_f32<float>(const float* logits, int64_t idx) {
+  return logits[idx];
 }
 
-__global__ void argmax_fp16_kernel(const half* __restrict__ logits,
-                                   int32_t* __restrict__ out_token, int64_t vocab_size) {
+template <>
+__device__ __forceinline__ float load_logit_f32<half>(const half* logits, int64_t idx) {
+  return __half2float(logits[idx]);
+}
+
+template <typename T>
+__global__ void argmax_kernel(const T* __restrict__ logits,
+                              int32_t* __restrict__ out_token, int64_t vocab_size) {
   __shared__ float s_val[ARGMAX_WARPS];
   __shared__ int32_t s_idx[ARGMAX_WARPS];
 
@@ -92,11 +47,13 @@ __global__ void argmax_fp16_kernel(const half* __restrict__ logits,
   const int lane = tid % 32;
   const int warp = tid / 32;
 
-  float best_val = -1e38f;
-  int32_t best_idx = 0x7fffffff;
+  // Initialize from element 0 rather than a finite sentinel so all -inf (or
+  // < -1e38f) logits resolve to index 0 with lowest-index tie-breaking.
+  float best_val = load_logit_f32(logits, 0);
+  int32_t best_idx = 0;
 
   for (int64_t i = tid; i < vocab_size; i += ARGMAX_THREADS) {
-    const float v = __half2float(logits[i]);
+    const float v = load_logit_f32(logits, i);
     if (v > best_val || (v == best_val && static_cast<int32_t>(i) < best_idx)) {
       best_val = v;
       best_idx = static_cast<int32_t>(i);
@@ -123,8 +80,8 @@ __global__ void argmax_fp16_kernel(const half* __restrict__ logits,
 
   // Warp 0 reduces partial maximums across all 16 warps
   if (warp == 0) {
-    float warp_val = (lane < ARGMAX_WARPS) ? s_val[lane] : -1e38f;
-    int32_t warp_idx = (lane < ARGMAX_WARPS) ? s_idx[lane] : 0x7fffffff;
+    float warp_val = (lane < ARGMAX_WARPS) ? s_val[lane] : s_val[0];
+    int32_t warp_idx = (lane < ARGMAX_WARPS) ? s_idx[lane] : s_idx[0];
 
 #pragma unroll
     for (int offset = 8; offset > 0; offset /= 2) {
@@ -150,7 +107,7 @@ void argmax(const float* logits, std::int32_t* out_token, std::int64_t vocab_siz
   ENGINE_CHECK(out_token != nullptr, "argmax: out_token is null");
   ENGINE_CHECK(vocab_size > 0, "argmax: vocab_size must be positive");
 
-  argmax_f32_kernel<<<1, ARGMAX_THREADS, 0, stream>>>(logits, out_token, vocab_size);
+  argmax_kernel<float><<<1, ARGMAX_THREADS, 0, stream>>>(logits, out_token, vocab_size);
   CUDA_CHECK_KERNEL();
 }
 
@@ -160,7 +117,7 @@ void argmax_fp16(const half* logits, std::int32_t* out_token, std::int64_t vocab
   ENGINE_CHECK(out_token != nullptr, "argmax_fp16: out_token is null");
   ENGINE_CHECK(vocab_size > 0, "argmax_fp16: vocab_size must be positive");
 
-  argmax_fp16_kernel<<<1, ARGMAX_THREADS, 0, stream>>>(logits, out_token, vocab_size);
+  argmax_kernel<half><<<1, ARGMAX_THREADS, 0, stream>>>(logits, out_token, vocab_size);
   CUDA_CHECK_KERNEL();
 }
 

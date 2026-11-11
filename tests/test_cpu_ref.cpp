@@ -27,6 +27,7 @@
 
 #include <cmath>
 #include <filesystem>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -795,6 +796,20 @@ TEST(cpu_ref, argmax_fp16_finds_maximum_and_tiebreaks) {
   std::int32_t best =
       engine::cpu::argmax_fp16(logits.data(), static_cast<std::int64_t>(logits.size()));
   EXPECT_EQ(best, 2);
+}
+
+TEST(cpu_ref, argmax_all_neg_inf_returns_zero) {
+  const float neg_inf = -std::numeric_limits<float>::infinity();
+  std::vector<float> f32_logits(64, neg_inf);
+  EXPECT_EQ(engine::cpu::argmax(f32_logits.data(), 64), 0);
+
+  // Finite negative value below -1e38f still beats -inf and tie-breaks cleanly.
+  f32_logits[19] = -2e38f;
+  f32_logits[42] = -2e38f;
+  EXPECT_EQ(engine::cpu::argmax(f32_logits.data(), 64), 19);
+
+  std::vector<engine::half> f16_logits(64, engine::float_to_half(neg_inf));
+  EXPECT_EQ(engine::cpu::argmax_fp16(f16_logits.data(), 64), 0);
 }
 
 TEST(cpu_ref, swiglu_matches_mathematical_definition) {

@@ -1268,6 +1268,63 @@ TEST(kernels, argmax_fp16_matches_cpu_ref) {
   EXPECT_EQ(host[0], exp);
 }
 
+TEST(kernels, argmax_all_neg_inf_returns_zero) {
+  REQUIRE_CUDA_DEVICE();
+
+  const float neg_inf = -std::numeric_limits<float>::infinity();
+  const std::int64_t vocab_size = 1025;  // spans > 1 stride across all 512 threads
+
+  // All -inf logits must return index 0 (never the old 0x7fffffff sentinel).
+  {
+    std::vector<float> logits(static_cast<std::size_t>(vocab_size), neg_inf);
+    DeviceBuffer<float> d_logits(logits);
+    DeviceBuffer<std::int32_t> d_out(std::vector<std::int32_t>{-1});
+    engine::cuda::argmax(d_logits.get(), d_out.get(), vocab_size);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    EXPECT_EQ(d_out.download()[0], 0);
+  }
+
+  // -inf mixed with finite values < -1e38f must still select the lowest-index winner.
+  {
+    std::vector<float> logits(static_cast<std::size_t>(vocab_size), neg_inf);
+    logits[700] = -2e38f;
+    logits[900] = -2e38f;
+    DeviceBuffer<float> d_logits(logits);
+    DeviceBuffer<std::int32_t> d_out(std::vector<std::int32_t>{-1});
+    engine::cuda::argmax(d_logits.get(), d_out.get(), vocab_size);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    EXPECT_EQ(d_out.download()[0], 700);
+  }
+
+  // Single-element -inf edge case.
+  {
+    DeviceBuffer<float> d_logits(std::vector<float>{neg_inf});
+    DeviceBuffer<std::int32_t> d_out(std::vector<std::int32_t>{-1});
+    engine::cuda::argmax(d_logits.get(), d_out.get(), 1);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    EXPECT_EQ(d_out.download()[0], 0);
+  }
+
+  // FP16 all -inf and mixed -inf / finite negative tie-breaking.
+  {
+    const engine::half h_neg_inf = engine::float_to_half(neg_inf);
+    std::vector<engine::half> logits(static_cast<std::size_t>(vocab_size), h_neg_inf);
+    DeviceBuffer<engine::half> d_logits(logits);
+    DeviceBuffer<std::int32_t> d_out(std::vector<std::int32_t>{-1});
+    engine::cuda::argmax_fp16(d_logits.get(), d_out.get(), vocab_size);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    EXPECT_EQ(d_out.download()[0], 0);
+
+    d_out.upload(std::vector<std::int32_t>{-1});
+    logits[611] = engine::float_to_half(-50000.0f);
+    logits[950] = engine::float_to_half(-50000.0f);
+    d_logits.upload(logits);
+    engine::cuda::argmax_fp16(d_logits.get(), d_out.get(), vocab_size);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    EXPECT_EQ(d_out.download()[0], 611);
+  }
+}
+
 //===----------------------------------------------------------------------===//
 // Phase 4 -- Fused SwiGLU activation tests
 //===----------------------------------------------------------------------===//
