@@ -191,6 +191,8 @@ kernel in the project, and the only one where being clever about arithmetic wins
 | [0009](docs/adr/0009-negative-results-reporting.md) | Negative results reporting — empirical documentation of non-optimizations and microarchitectural boundaries |
 | [0010](docs/adr/0010-multi-architecture-cuda-compilation.md) | Multi-architecture CUDA compilation — flexible architecture lists in `ENGINE_CUDA_ARCH` with native SASS generation |
 | [0011](docs/adr/0011-flashattention2-fp16-precision.md) | Attention Precision — start Module 4 FlashAttention-2 in FP16 with FP32 online softmax accumulator to minimize shared memory |
+| [0012](docs/adr/0012-attention-layouts-and-api.md) | Attention layouts & raw API — token-major Q/Out, head-major strided KV cache, RoPE conventions, and edge contracts |
+| [0013](docs/adr/0013-flashdecoding-split-kv.md) | FlashDecoding split-KV (stub) — split-KV parallelism across SMs and GQA head sharing during decode |
 
 ## Build options
 

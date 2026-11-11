@@ -21,6 +21,8 @@
 | [ADR-0009](../docs/adr/0009-negative-results-reporting.md) | Negative results reporting | Explicitly document optimizations that failed or degraded performance to preserve empirical boundaries |
 | [ADR-0010](../docs/adr/0010-multi-architecture-cuda-compilation.md) | Flexible CUDA architecture compilation | Support flexible architecture specification with native SASS generation without PTX JIT overhead |
 | [ADR-0011](../docs/adr/0011-flashattention2-fp16-precision.md) | FlashAttention-2 FP16 precision | Attention starts natively in FP16 with FP32 online softmax accumulator to minimize shared memory |
+| [ADR-0012](../docs/adr/0012-attention-layouts-and-api.md) | Attention layouts & raw API | Token-major Q/Out `[S, H_q, D]`, head-major KV cache `[H_kv, S_max, D]` with `kv_head_stride`, RoPE conventions |
+| [ADR-0013](../docs/adr/0013-flashdecoding-split-kv.md) | FlashDecoding split-KV (stub) | Decode split-KV partitioning heuristic and GQA group-sharing across SMs (to be finalized in Phase 6) |
 
 ## Informal Decisions
 

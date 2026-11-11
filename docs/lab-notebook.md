@@ -65,6 +65,38 @@ Build type: RelWithDebInfo / Release
 ### Next week
 ```
 
+## Week 10 — 2026-11-11 · Module 4: Attention, RoPE, FlashAttention-2, and FlashDecoding
+
+**Objective / module:** Implement complete transformer attention and positional encoding in native FP16 (ADR-0011) with FP32 accumulation and online softmax: prefill naive baseline (`attention_naive`), RoPE (`rope`), FlashAttention-2 tiled prefill (`attention_prefill`), and FlashDecoding split-KV (`attention_decode`), conforming to layouts and contracts in ADR-0012.
+
+### Phase 1 Pre-Measurement Predictions (recorded before writing/benchmarking kernels)
+
+Hardware baseline (RTX 4070 SUPER, `sm_89`, 56 SMs, 48 MiB L2, 504.0 GB/s peak GDDR6X BW, cold DRAM GEMV 465.9 GB/s):
+
+1. **Prefill Causal FLOPs & GQA KV Traffic:**
+   - Causal attention FLOPs across `QK^T` and `PV` count only the lower triangle ($j \le i$):
+     $$F_{\text{causal}} = 2 \cdot 2 \cdot H_q \cdot \frac{S(S+1)}{2} \cdot D \approx 2 H_q S^2 D$$
+     (half of dense $4 H_q S^2 D$). At $S = 2048$: TinyLlama ($H_q=32, H_{kv}=4, D=64$) performs **17.18 GFLOP**; Llama-2-7B ($H_q=32, H_{kv}=32, D=128$) performs **34.36 GFLOP**. Note GQA reduces KV DRAM traffic by $H_q / H_{kv} = 8\times$ (**4.0 MiB** K+V vs 32.0 MiB if unshared across reads), not arithmetic FLOPs.
+2. **Naive Attention (`attention_naive`) Score Buffer & L2 Spill Cliff:**
+   - Materializes `[H_q, S, S]` FP32 attention scores between `QK^T` -> `softmax_rows` -> `PV`:
+     - At $S = 512, H_q = 32$: scores buffer = $32 \times 512^2 \times 4\text{ B} = \mathbf{32.0\text{ MiB}}$ (fits inside 48 MiB L2!). Naive DRAM traffic stays largely on-chip -> predicted **0.25–0.45 ms**.
+     - At $S = 2048, H_q = 32$: scores buffer = $32 \times 2048^2 \times 4\text{ B} = \mathbf{512.0\text{ MiB}}$ (10.7× L2!). Across three kernel boundaries (`QK^T` write 512 MiB + `softmax_rows` read/write 1024 MiB + `PV` read 512 MiB), scores alone force **~2.05 GiB** of cold DRAM traffic; at ~450 GB/s effective BW, naive latency jumps to **~4.5 ms** (and at $S = 4096$, scores reach **2.00 GiB** -> **~18 ms**).
+3. **FlashAttention-2 Prefill (`attention_prefill`, CUDA-core v1):**
+   - Eliminates the `[H_q, S, S]` DRAM buffer completely and skips strictly masked upper-triangle $K/V$ tiles. Total DRAM reads/writes drop from ~2.08 GiB to ~24 MiB at $S = 2048, D=64$ (85× less DRAM traffic).
+   - Because v1 uses FP32 SIMT CUDA cores (FMAs, not `wmma` Tensor Cores), throughput is bounded by SIMT arithmetic + shared-memory bank/sync latency rather than DRAM: at TinyLlama $S = 2048, D = 64$, expecting ~10–18 TFLOP/s effective over active causal tiles -> **~1.0–1.7 ms** (**2.5–4.5× faster than naive** at $S = 2048$, crossover between $S = 512$ and $S = 1024$).
+4. **Decode Attention (`attention_decode`, `s_q = 1`, rotating cold KV buffers):**
+   - Purely memory-bound (AI $\approx 1.0\text{ FLOP/byte}$ in FP16 K+V). Working set per step at $D = 64, H_{kv} = 4$: $2 \times 4 \times L \times 64 \times 2 = 1024 L\text{ bytes}$ (**2.0 MiB** at $L = 2048$, **8.0 MiB** at $L = 8192$). At Llama-2-7B ($D = 128, H_{kv} = 32$): **32.0 MiB** at $L = 2048$, **128.0 MiB** at $L = 8192$.
+   - Cold DRAM streaming times assuming 75–85% of 504 GB/s (378–428 GB/s) when SM occupancy saturates:
+     - TinyLlama $L = 2048$ (2 MiB cold): launch/split-reduce floor dominates -> **~10–18 µs**.
+     - TinyLlama $L = 8192$ (8 MiB cold): **~22–32 µs** with FlashDecoding vs **~60–120 µs** with `splits=1` (where 4 KV heads or 32 Q heads underfill 56 SMs).
+     - Llama-2-7B $L = 8192$ (128 MiB cold): **~300–350 µs** (~370–425 GB/s).
+5. **RoPE (`kernels/rope.cu`):**
+   - Launch-bound at decode $S = 1$ (9.2 KiB moved -> **~3–5 µs**). Memory-bound at prefill $S = 2048$ (18.9 MiB moved -> **~43–55 µs**).
+
+*(Empirical tables and discrepancies vs prediction will be appended below as Phases 3–8 complete — never editing the predictions above.)*
+
+---
+
 ## Week 09 — 2026-10-02 · Pre-Module 4 Mathematical & Microarchitectural Audit: Baseline Realities, Cache Residency, and Precision Decisions
 
 **Objective / module:** Pre-Module 4 Verification & Correctness Audit — Addressed three critical mathematical discrepancies before Module 4: (1) Replaced strawman baseline in decode `rmsnorm_linear`, proving 1D strip fusion (0.366 ms) is $2.45\times$ slower than fair `rmsnorm + gemv` (0.149 ms / 465 GB/s) and updating dispatch; (2) Resolved `swiglu` accounting error (67.6 MB in 0.286 ms is 236.4 GB/s / 46.9% peak BW, achieving a genuine $1.55\times$ speedup over unfused 0.444 ms); (3) Disclosed that `residual_rmsnorm` at $512 \times 4096$ (33.55 MB) is an on-chip L2-resident measurement, adding true cold DRAM benchmark at $4096 \times 4096$ (0.615 ms / 436.3 GB/s, 86.6% peak BW); corrected prefill `rmsnorm_linear` GFLOP/s to 17,353; added non-tile multiple tests for `matmul_register_tiled` (119/119 pass); confirmed CI green; and formally decided ADR-0011 (FP16 Attention).
