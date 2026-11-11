@@ -208,14 +208,15 @@ def format_full_markdown(data: dict) -> str:
     env = data.get("environment", {})
 
     lines = [
-        "| kernel | size | median (ms) | min (ms) | spread | GFLOP/s | GB/s | % peak BW | AI (FLOP/B) |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| kernel | size | median (ms) | IQR (ms) | min (ms) | spread | GFLOP/s | GB/s | % peak BW | AI (FLOP/B) |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
 
     for r in results:
         if not r.get("implemented", True):
-            lines.append(f"| `{r.get('name')}` | {r.get('size')} | -- | -- | -- | -- | -- | -- | -- |")
+            lines.append(f"| `{r.get('name')}` | {r.get('size')} | -- | -- | -- | -- | -- | -- | -- | -- |")
             continue
+        iqr_s = f"{r['iqr_ms']:.3f}" if "iqr_ms" in r else "--"
         gflops_s = f"{r.get('gflops', 0.0):.1f}" if r.get("flops", 0) > 0 else "--"
         gbps_s = f"{r.get('gbps', 0.0):.1f}" if r.get("bytes", 0) > 0 else "--"
         pct_bw_s = f"{r.get('pct_peak_bw', 0.0):.1f}%" if r.get("bytes", 0) > 0 else "--"
@@ -223,14 +224,21 @@ def format_full_markdown(data: dict) -> str:
         spread_s = f"{r.get('spread_pct', 0.0):.1f}%"
         lines.append(
             f"| `{r.get('name')}` | {r.get('size')} | {r.get('median_ms', 0.0):.3f} | "
-            f"{r.get('min_ms', 0.0):.3f} | {spread_s} | {gflops_s} | {gbps_s} | {pct_bw_s} | {ai_s} |"
+            f"{iqr_s} | {r.get('min_ms', 0.0):.3f} | {spread_s} | {gflops_s} | {gbps_s} | {pct_bw_s} | {ai_s} |"
         )
 
     lines.append("")
     lines.append(f"Hardware: {env.get('device', 'Unknown')}")
     lines.append(f"Driver: {env.get('driver_version', 'Unknown')}")
     if env.get("clock_rate_mhz"):
-        lines.append(f"GPU clock rate: {env.get('clock_rate_mhz')} MHz")
+        sm_min = env.get("live_sm_clock_min_mhz")
+        sm_max = env.get("live_sm_clock_max_mhz")
+        if sm_min and sm_max and sm_min != sm_max:
+            lines.append(f"GPU SM clock: {env.get('clock_rate_mhz')} MHz (range {sm_min}-{sm_max} MHz)")
+        else:
+            lines.append(f"GPU clock rate: {env.get('clock_rate_mhz')} MHz")
+    if env.get("live_mem_clock_mhz"):
+        lines.append(f"GPU memory clock: {env.get('live_mem_clock_mhz')} MHz")
     lines.append(f"Peak DRAM bandwidth (theoretical): {env.get('peak_bandwidth_gbs', 0.0):.1f} GB/s")
     lines.append(f"Build: {env.get('build_description', 'Unknown')}")
     return "\n".join(lines)

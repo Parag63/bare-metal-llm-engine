@@ -15,7 +15,9 @@
 #include <engine/config.hpp>
 
 #include <cstdio>
+#include <mutex>
 #include <sstream>
+#include <unordered_map>
 
 #if ENGINE_HAS_CUDA
 #include <cuda_runtime.h>
@@ -87,63 +89,124 @@ int cuda_clock_rate_khz() {
   return prop.clockRate;
 }
 
-static int cuda_live_clock_mhz(int clock_type) {
-  if (cuda_device_count() == 0) return 0;
+namespace {
 
-  using nvmlReturn_t = int;
-  using nvmlDevice_t = void*;
-
-  using pfn_nvmlInit_v2 = nvmlReturn_t (*)();
-  using pfn_nvmlDeviceGetHandleByIndex_v2 = nvmlReturn_t (*)(unsigned int, nvmlDevice_t*);
-  using pfn_nvmlDeviceGetClockInfo = nvmlReturn_t (*)(nvmlDevice_t, int, unsigned int*);
-  using pfn_nvmlShutdown = nvmlReturn_t (*)();
-
+class NvmlSession {
+ public:
+  NvmlSession() {
 #if defined(_WIN32)
-  HMODULE lib = LoadLibraryA("nvml.dll");
-  if (!lib) return (clock_type == 1) ? (cuda_clock_rate_khz() / 1000) : 0;
-  auto fn_init = reinterpret_cast<pfn_nvmlInit_v2>(GetProcAddress(lib, "nvmlInit_v2"));
-  auto fn_get_handle = reinterpret_cast<pfn_nvmlDeviceGetHandleByIndex_v2>(
-      GetProcAddress(lib, "nvmlDeviceGetHandleByIndex_v2"));
-  auto fn_get_clock = reinterpret_cast<pfn_nvmlDeviceGetClockInfo>(
-      GetProcAddress(lib, "nvmlDeviceGetClockInfo"));
-  auto fn_shutdown =
-      reinterpret_cast<pfn_nvmlShutdown>(GetProcAddress(lib, "nvmlShutdown"));
+    lib_ = LoadLibraryA("nvml.dll");
 #else
-  void* lib = dlopen("libnvidia-ml.so.1", RTLD_LAZY);
-  if (!lib) lib = dlopen("libnvidia-ml.so", RTLD_LAZY);
-  if (!lib) return (clock_type == 1) ? (cuda_clock_rate_khz() / 1000) : 0;
-  auto fn_init = reinterpret_cast<pfn_nvmlInit_v2>(dlsym(lib, "nvmlInit_v2"));
-  auto fn_get_handle = reinterpret_cast<pfn_nvmlDeviceGetHandleByIndex_v2>(
-      dlsym(lib, "nvmlDeviceGetHandleByIndex_v2"));
-  auto fn_get_clock =
-      reinterpret_cast<pfn_nvmlDeviceGetClockInfo>(dlsym(lib, "nvmlDeviceGetClockInfo"));
-  auto fn_shutdown = reinterpret_cast<pfn_nvmlShutdown>(dlsym(lib, "nvmlShutdown"));
+    lib_ = dlopen("libnvidia-ml.so.1", RTLD_LAZY);
+    if (!lib_) lib_ = dlopen("libnvidia-ml.so", RTLD_LAZY);
 #endif
+    if (!lib_) return;
 
-  int result_clock = 0;
-  if (fn_init && fn_get_handle && fn_get_clock) {
-    if (fn_init() == 0) {
-      int dev = 0;
-      if (cudaGetDevice(&dev) == cudaSuccess) {
-        nvmlDevice_t handle = nullptr;
-        if (fn_get_handle(static_cast<unsigned int>(dev), &handle) == 0) {
-          unsigned int clock_mhz = 0;
-          if (fn_get_clock(handle, clock_type, &clock_mhz) == 0) {
-            result_clock = static_cast<int>(clock_mhz);
-          }
-        }
-      }
-      if (fn_shutdown) fn_shutdown();
+    fn_init_ = load_sym<pfn_nvmlInit_v2>("nvmlInit_v2");
+    fn_shutdown_ = load_sym<pfn_nvmlShutdown>("nvmlShutdown");
+    fn_get_handle_pci_ = load_sym<pfn_pci_handle>("nvmlDeviceGetHandleByPciBusId_v2");
+    fn_get_handle_idx_ = load_sym<pfn_idx_handle>("nvmlDeviceGetHandleByIndex_v2");
+    fn_get_clock_ = load_sym<pfn_nvmlDeviceGetClockInfo>("nvmlDeviceGetClockInfo");
+    if (fn_init_ && fn_get_clock_ && (fn_get_handle_pci_ || fn_get_handle_idx_)) {
+      initialized_ = (fn_init_() == 0);
     }
   }
 
+  ~NvmlSession() {
+    if (initialized_ && fn_shutdown_) {
+      fn_shutdown_();
+    }
 #if defined(_WIN32)
-  FreeLibrary(lib);
+    if (lib_) FreeLibrary(lib_);
 #else
-  dlclose(lib);
+    if (lib_) dlclose(lib_);
 #endif
+  }
 
-  return result_clock;
+  NvmlSession(const NvmlSession&) = delete;
+  NvmlSession& operator=(const NvmlSession&) = delete;
+
+  int query_clock_mhz(int dev, int clock_type) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!initialized_) return 0;
+
+    nvmlDevice_t handle = nullptr;
+    auto it = handles_.find(dev);
+    if (it != handles_.end()) {
+      handle = it->second;
+    } else {
+      if (fn_get_handle_pci_) {
+        char pci_id[64] = {};
+        const int pci_len = static_cast<int>(sizeof(pci_id));
+        if (cudaDeviceGetPCIBusId(pci_id, pci_len, dev) == cudaSuccess) {
+          if (fn_get_handle_pci_(pci_id, &handle) != 0) {
+            handle = nullptr;
+          }
+        }
+      }
+      if (!handle && fn_get_handle_idx_) {
+        if (fn_get_handle_idx_(static_cast<unsigned int>(dev), &handle) != 0) {
+          handle = nullptr;
+        }
+      }
+      if (handle) {
+        handles_[dev] = handle;
+      }
+    }
+
+    if (!handle) return 0;
+    unsigned int clock_mhz = 0;
+    if (fn_get_clock_(handle, clock_type, &clock_mhz) != 0) return 0;
+    return static_cast<int>(clock_mhz);
+  }
+
+ private:
+  template <typename Fn>
+  Fn load_sym(const char* name) {
+#if defined(_WIN32)
+    return reinterpret_cast<Fn>(GetProcAddress(lib_, name));
+#else
+    return reinterpret_cast<Fn>(dlsym(lib_, name));
+#endif
+  }
+
+  using nvmlReturn_t = int;
+  using nvmlDevice_t = void*;
+  using pfn_nvmlInit_v2 = nvmlReturn_t (*)();
+  using pfn_nvmlShutdown = nvmlReturn_t (*)();
+  using pfn_pci_handle = nvmlReturn_t (*)(const char*, nvmlDevice_t*);
+  using pfn_idx_handle = nvmlReturn_t (*)(unsigned int, nvmlDevice_t*);
+  using pfn_nvmlDeviceGetClockInfo = nvmlReturn_t (*)(nvmlDevice_t, int, unsigned int*);
+
+#if defined(_WIN32)
+  HMODULE lib_ = nullptr;
+#else
+  void* lib_ = nullptr;
+#endif
+  pfn_nvmlInit_v2 fn_init_ = nullptr;
+  pfn_nvmlShutdown fn_shutdown_ = nullptr;
+  pfn_pci_handle fn_get_handle_pci_ = nullptr;
+  pfn_idx_handle fn_get_handle_idx_ = nullptr;
+  pfn_nvmlDeviceGetClockInfo fn_get_clock_ = nullptr;
+  bool initialized_ = false;
+  std::mutex mutex_;
+  std::unordered_map<int, nvmlDevice_t> handles_;
+};
+
+NvmlSession& nvml_session() {
+  static NvmlSession session;
+  return session;
+}
+
+}  // namespace
+
+static int cuda_live_clock_mhz(int clock_type) {
+  if (cuda_device_count() == 0) return 0;
+  int dev = 0;
+  if (cudaGetDevice(&dev) != cudaSuccess) return 0;
+  const int live = nvml_session().query_clock_mhz(dev, clock_type);
+  if (live > 0) return live;
+  return (clock_type == 1) ? (cuda_clock_rate_khz() / 1000) : 0;
 }
 
 int cuda_live_sm_clock_mhz() {

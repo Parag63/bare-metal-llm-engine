@@ -40,6 +40,7 @@ int main() {
 #include <engine/kernels.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -732,11 +733,6 @@ void bench_swiglu(Table& t, int reps) {
 
   for (const Case& c : cases) {
     const std::int64_t n = c.n;
-    DeviceBuffer<float> gate(random_host(static_cast<std::size_t>(n), 1u));
-    DeviceBuffer<float> up(random_host(static_cast<std::size_t>(n), 2u));
-    DeviceBuffer<float> temp_silu(static_cast<std::size_t>(n));
-    DeviceBuffer<float> out(static_cast<std::size_t>(n));
-
     const double flops = 5.0 * d(n);
     const double unfused_bytes = 5.0 * d(n) * sizeof(float);
     const double fused_bytes = 3.0 * d(n) * sizeof(float);
@@ -744,44 +740,123 @@ void bench_swiglu(Table& t, int reps) {
     const int threads = 256;
     const int blocks = static_cast<int>((n + threads - 1) / threads);
 
-    // Warm the GPU to ramp SM and memory clocks into performance P0 state
-    for (int w = 0; w < 30; ++w) {
-      silu_unfused_kernel<<<blocks, threads>>>(gate.get(), temp_silu.get(), n);
-      mul_unfused_kernel<<<blocks, threads>>>(temp_silu.get(), up.get(), out.get(), n);
-      engine::cuda::swiglu(gate.get(), up.get(), out.get(), n);
+    // Cold-cache rotation for prefill (512x11008): keep working set well above
+    // 48-72 MiB GPU L2 caches so benchmarks measure true DRAM streaming bandwidth.
+    constexpr std::size_t kColdCacheBytes = std::size_t{256} * 1024 * 1024;
+    {
+      const std::size_t working_set_f32 = static_cast<std::size_t>(n) * sizeof(float) * 3;
+      std::size_t num_buffers = 1;
+      if (n > 11008) {
+        const std::size_t rotated =
+            (kColdCacheBytes + working_set_f32 - 1) / working_set_f32;
+        num_buffers = std::max<std::size_t>(4, rotated);
+      }
+
+      const std::vector<float> h_gate = random_host(static_cast<std::size_t>(n), 1u);
+      const std::vector<float> h_up = random_host(static_cast<std::size_t>(n), 2u);
+      std::vector<DeviceBuffer<float>> gates;
+      std::vector<DeviceBuffer<float>> ups;
+      std::vector<DeviceBuffer<float>> temp_silus;
+      std::vector<DeviceBuffer<float>> outs;
+      gates.reserve(num_buffers);
+      ups.reserve(num_buffers);
+      temp_silus.reserve(num_buffers);
+      outs.reserve(num_buffers);
+      for (std::size_t b = 0; b < num_buffers; ++b) {
+        gates.emplace_back(h_gate);
+        ups.emplace_back(h_up);
+        temp_silus.emplace_back(static_cast<std::size_t>(n));
+        outs.emplace_back(static_cast<std::size_t>(n));
+      }
+
+      std::size_t iter_unfused = 0;
+      t.measure_gpu(
+          "swiglu (unfused: silu+mul)", c.label, flops, unfused_bytes,
+          [&] {
+            const std::size_t idx = iter_unfused % num_buffers;
+            iter_unfused++;
+            float* g = gates[idx].get();
+            float* ts = temp_silus[idx].get();
+            float* u = ups[idx].get();
+            float* o = outs[idx].get();
+            silu_unfused_kernel<<<blocks, threads>>>(g, ts, n);
+            mul_unfused_kernel<<<blocks, threads>>>(ts, u, o, n);
+          },
+          /*warmup=*/10, reps);
+
+      std::size_t iter_fused = 0;
+      t.measure_gpu(
+          "swiglu (fused FP32)", c.label, flops, fused_bytes,
+          [&] {
+            const std::size_t idx = iter_fused % num_buffers;
+            iter_fused++;
+            engine::cuda::swiglu(gates[idx].get(), ups[idx].get(), outs[idx].get(), n);
+          },
+          /*warmup=*/10, reps);
     }
+
+    // FP16 SwiGLU (Cold DRAM for 512x11008: 33.8 MB/set fits inside 48 MiB L2,
+    // so rotate across >= 256 MiB of distinct device buffers).
+    {
+      const std::size_t working_set_fp16 =
+          static_cast<std::size_t>(n) * sizeof(engine::half) * 3;
+      std::size_t num_buffers = 1;
+      if (n > 11008) {
+        const std::size_t rotated =
+            (kColdCacheBytes + working_set_fp16 - 1) / working_set_fp16;
+        num_buffers = std::max<std::size_t>(8, rotated);
+      }
+
+      const std::vector<engine::half> h_gate =
+          random_host_half(static_cast<std::size_t>(n), 1u);
+      const std::vector<engine::half> h_up =
+          random_host_half(static_cast<std::size_t>(n), 2u);
+      std::vector<DeviceBuffer<engine::half>> gates;
+      std::vector<DeviceBuffer<engine::half>> ups;
+      std::vector<DeviceBuffer<engine::half>> outs;
+      gates.reserve(num_buffers);
+      ups.reserve(num_buffers);
+      outs.reserve(num_buffers);
+      for (std::size_t b = 0; b < num_buffers; ++b) {
+        gates.emplace_back(h_gate);
+        ups.emplace_back(h_up);
+        outs.emplace_back(static_cast<std::size_t>(n));
+      }
+
+      const double fused_bytes_fp16 = 3.0 * d(n) * sizeof(engine::half);
+      std::size_t iter_fp16 = 0;
+      t.measure_gpu(
+          "swiglu_fp16 (fused FP16)", c.label, flops, fused_bytes_fp16,
+          [&] {
+            const std::size_t idx = iter_fp16 % num_buffers;
+            iter_fp16++;
+            engine::half* g = gates[idx].get();
+            engine::half* u = ups[idx].get();
+            engine::half* o = outs[idx].get();
+            engine::cuda::swiglu_fp16(g, u, o, n);
+          },
+          /*warmup=*/10, reps);
+    }
+  }
+}
+
+void warmup_gpu(double seconds) {
+  if (seconds <= 0.0) return;
+  constexpr std::int64_t N = 1024;
+  DeviceBuffer<float> d_a(static_cast<std::size_t>(N * N));
+  DeviceBuffer<float> d_b(static_cast<std::size_t>(N * N));
+  DeviceBuffer<float> d_c(static_cast<std::size_t>(N * N));
+  d_a.zero();
+  d_b.zero();
+  d_c.zero();
+  CUDA_CHECK(cudaDeviceSynchronize());
+
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                            std::chrono::duration<double>(seconds));
+  while (std::chrono::steady_clock::now() < deadline) {
+    engine::cuda::matmul_register_tiled(d_a.get(), d_b.get(), d_c.get(), N, N, N);
     CUDA_CHECK(cudaDeviceSynchronize());
-
-    t.measure_gpu(
-        "swiglu (unfused: silu+mul)", c.label, flops, unfused_bytes,
-        [&] {
-          silu_unfused_kernel<<<blocks, threads>>>(gate.get(), temp_silu.get(), n);
-          mul_unfused_kernel<<<blocks, threads>>>(temp_silu.get(), up.get(), out.get(),
-                                                  n);
-        },
-        /*warmup=*/10, reps);
-
-    t.measure_gpu(
-        "swiglu (fused FP32)", c.label, flops, fused_bytes,
-        [&] { engine::cuda::swiglu(gate.get(), up.get(), out.get(), n); },
-        /*warmup=*/10, reps);
-
-    std::vector<engine::half> h_gate_half =
-        random_host_half(static_cast<std::size_t>(n), 1u);
-    std::vector<engine::half> h_up_half =
-        random_host_half(static_cast<std::size_t>(n), 2u);
-    DeviceBuffer<engine::half> d_gate_half(h_gate_half);
-    DeviceBuffer<engine::half> d_up_half(h_up_half);
-    DeviceBuffer<engine::half> d_out_half(static_cast<std::size_t>(n));
-
-    const double fused_bytes_fp16 = 3.0 * d(n) * sizeof(engine::half);
-    t.measure_gpu(
-        "swiglu_fp16 (fused FP16)", c.label, flops, fused_bytes_fp16,
-        [&] {
-          engine::cuda::swiglu_fp16(d_gate_half.get(), d_up_half.get(), d_out_half.get(),
-                                    n);
-        },
-        /*warmup=*/5, reps);
   }
 }
 
@@ -828,6 +903,7 @@ int main(int argc, char** argv) {
 #endif
 
   const int reps = quick ? 10 : 50;
+  warmup_gpu(quick ? 1.0 : 1.5);
 
   Table t("Kernel benchmarks");
   bench_launch_overhead(t, reps);
