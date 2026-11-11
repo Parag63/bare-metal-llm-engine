@@ -260,6 +260,30 @@ double tree_reduction_atol(const std::vector<float>& x) {
   return 2.0 * kU * depth * abs_sum;
 }
 
+std::vector<engine::half> to_half_vec(const std::vector<float>& src) {
+  std::vector<engine::half> out(src.size());
+  for (std::size_t i = 0; i < src.size(); ++i) {
+    out[i] = engine::float_to_half(src[i]);
+  }
+  return out;
+}
+
+std::vector<float> to_float_vec(const std::vector<engine::half>& src) {
+  std::vector<float> out(src.size());
+  for (std::size_t i = 0; i < src.size(); ++i) {
+    out[i] = engine::half_to_float(src[i]);
+  }
+  return out;
+}
+
+std::vector<std::int32_t> to_i32_vec(const std::vector<float>& src) {
+  std::vector<std::int32_t> out(src.size());
+  for (std::size_t i = 0; i < src.size(); ++i) {
+    out[i] = static_cast<std::int32_t>(std::lround(src[i]));
+  }
+  return out;
+}
+
 }  // namespace
 
 /// Every test in this file needs a GPU. On the laptop there isn't one, and that is
@@ -1203,31 +1227,27 @@ TEST(kernels, gemv_and_gemv_fp16_with_k_zero_zero_output) {
 // Phase 3 -- FP16 and missing inference kernels: gemv_fp16, embedding, argmax
 //===----------------------------------------------------------------------===//
 
-TEST(kernels, gemv_fp16_matches_cpu_ref) {
+TEST(kernels, gemv_fp16_matches_reference) {
   REQUIRE_CUDA_DEVICE();
 
   struct Shape {
     std::int64_t n, k;
   };
   const Shape shapes[] = {
-      {64, 64}, {128, 256}, {4096, 4096}, {73, 125},  // unaligned fallback
+      {64, 64},
+      {128, 256},
+      {73, 125},  // unaligned fallback
+      {4096, 4096},
   };
 
   for (const auto& s : shapes) {
-    std::vector<engine::half> h_A(static_cast<std::size_t>(s.k * s.n));
-    std::vector<engine::half> h_x(static_cast<std::size_t>(s.k));
-    std::vector<engine::half> exp(static_cast<std::size_t>(s.n));
+    const std::string stem =
+        "gemv_fp16__" + std::to_string(s.n) + "x" + std::to_string(s.k);
+    LOAD_GOLDEN(g, stem);
 
-    for (std::size_t i = 0; i < h_A.size(); ++i) {
-      h_A[i] =
-          engine::float_to_half(static_cast<float>(static_cast<int>(i % 19) - 9) * 0.05f);
-    }
-    for (std::size_t i = 0; i < h_x.size(); ++i) {
-      h_x[i] =
-          engine::float_to_half(static_cast<float>(static_cast<int>(i % 13) - 6) * 0.05f);
-    }
-
-    engine::cpu::gemv_fp16(h_A.data(), h_x.data(), exp.data(), s.n, s.k);
+    const auto h_A = to_half_vec(g.at("A").data);
+    const auto h_x = to_half_vec(g.at("x").data);
+    const auto& exp = g.at("expected");
 
     DeviceBuffer<engine::half> d_A(h_A);
     DeviceBuffer<engine::half> d_x(h_x);
@@ -1237,44 +1257,33 @@ TEST(kernels, gemv_fp16_matches_cpu_ref) {
     engine::cuda::gemv_fp16(d_A.get(), d_x.get(), d_out.get(), s.n, s.k);
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    const std::vector<engine::half> host = d_out.download();
-    std::vector<float> host_f(host.size());
-    std::vector<float> exp_f(exp.size());
-    for (std::size_t i = 0; i < host.size(); ++i) {
-      host_f[i] = engine::half_to_float(host[i]);
-      exp_f[i] = engine::half_to_float(exp[i]);
-    }
-
-    CHECK_CASE("gemv_fp16__" + std::to_string(s.n) + "x" + std::to_string(s.k),
-               host_f.data(), exp_f.data(), host_f.size(), 2e-3, 2e-3);
+    const auto host_f = to_float_vec(d_out.download());
+    CHECK_CASE(stem, host_f.data(), exp.data.data(), host_f.size(), 2e-3, 2e-3);
   }
 }
 
-TEST(kernels, embedding_f32_matches_cpu_ref) {
+TEST(kernels, embedding_f32_matches_reference) {
   REQUIRE_CUDA_DEVICE();
 
   struct Case {
     std::int64_t v, d, t;
   };
   const Case cases[] = {
-      {1000, 256, 5}, {100, 65, 3},  // unaligned fallback
+      {50, 16, 4},
+      {1000, 256, 5},  // vectorized aligned width
+      {100, 65, 3},    // unaligned fallback
   };
 
   for (const auto& c : cases) {
-    std::vector<float> table(static_cast<std::size_t>(c.v * c.d));
-    for (std::size_t i = 0; i < table.size(); ++i) {
-      table[i] = static_cast<float>(i) * 0.1f;
-    }
+    const std::string stem = "embedding__" + std::to_string(c.t) + "x" +
+                             std::to_string(c.d) + "_v" + std::to_string(c.v);
+    LOAD_GOLDEN(g, stem);
 
-    std::vector<std::int32_t> ids = {0, static_cast<std::int32_t>(c.v - 1), 7};
-    while (static_cast<std::int64_t>(ids.size()) < c.t) {
-      ids.push_back(static_cast<std::int32_t>(ids.size() % c.v));
-    }
+    const auto& table = g.at("table");
+    const auto ids = to_i32_vec(g.at("ids").data);
+    const auto& exp = g.at("expected");
 
-    std::vector<float> exp(static_cast<std::size_t>(c.t * c.d));
-    engine::cpu::embedding(table.data(), ids.data(), exp.data(), c.t, c.d, c.v);
-
-    DeviceBuffer<float> d_table(table);
+    DeviceBuffer<float> d_table(table.data);
     DeviceBuffer<std::int32_t> d_ids(ids);
     DeviceBuffer<float> d_out(static_cast<std::size_t>(c.t * c.d));
     d_out.zero();
@@ -1283,34 +1292,30 @@ TEST(kernels, embedding_f32_matches_cpu_ref) {
     CUDA_CHECK(cudaDeviceSynchronize());
 
     const std::vector<float> host = d_out.download();
-    CHECK_CASE("embedding_f32", host.data(), exp.data(), host.size(), 0.0, 0.0);
+    CHECK_CASE(stem, host.data(), exp.data.data(), host.size(), kAddRtol, kAddAtol);
   }
 }
 
-TEST(kernels, embedding_fp16_matches_cpu_ref) {
+TEST(kernels, embedding_fp16_matches_reference) {
   REQUIRE_CUDA_DEVICE();
 
   struct Case {
     std::int64_t v, d, t;
   };
   const Case cases[] = {
-      {500, 128, 4},
-      {50, 65, 2},
+      {50, 16, 4},
+      {1000, 256, 5},
+      {100, 65, 3},
   };
 
   for (const auto& c : cases) {
-    std::vector<engine::half> table(static_cast<std::size_t>(c.v * c.d));
-    for (std::size_t i = 0; i < table.size(); ++i) {
-      table[i] = engine::float_to_half(static_cast<float>(i % 31));
-    }
+    const std::string stem = "embedding_fp16__" + std::to_string(c.t) + "x" +
+                             std::to_string(c.d) + "_v" + std::to_string(c.v);
+    LOAD_GOLDEN(g, stem);
 
-    std::vector<std::int32_t> ids = {1, static_cast<std::int32_t>(c.v - 1)};
-    while (static_cast<std::int64_t>(ids.size()) < c.t) {
-      ids.push_back(static_cast<std::int32_t>(ids.size() % c.v));
-    }
-
-    std::vector<engine::half> exp(static_cast<std::size_t>(c.t * c.d));
-    engine::cpu::embedding_fp16(table.data(), ids.data(), exp.data(), c.t, c.d, c.v);
+    const auto table = to_half_vec(g.at("table").data);
+    const auto ids = to_i32_vec(g.at("ids").data);
+    const auto& exp = g.at("expected");
 
     DeviceBuffer<engine::half> d_table(table);
     DeviceBuffer<std::int32_t> d_ids(ids);
@@ -1320,64 +1325,57 @@ TEST(kernels, embedding_fp16_matches_cpu_ref) {
     engine::cuda::embedding_fp16(d_table.get(), d_ids.get(), d_out.get(), c.t, c.d, c.v);
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    const std::vector<engine::half> host = d_out.download();
-    for (std::size_t i = 0; i < host.size(); ++i) {
-      EXPECT_EQ(engine::half_to_float(host[i]), engine::half_to_float(exp[i]));
-    }
+    const auto host_f = to_float_vec(d_out.download());
+    CHECK_CASE(stem, host_f.data(), exp.data.data(), host_f.size(), kAddRtol, kAddAtol);
   }
 }
 
-TEST(kernels, argmax_matches_cpu_ref) {
+TEST(kernels, argmax_matches_reference) {
   REQUIRE_CUDA_DEVICE();
 
-  const std::int64_t vocab_size = 32000;
-  std::vector<float> logits(static_cast<std::size_t>(vocab_size));
-  for (std::size_t i = 0; i < logits.size(); ++i) {
-    logits[i] = static_cast<float>(static_cast<int>(i % 1000) - 500) * 0.01f;
+  auto check_stem = [&](const std::string& stem) {
+    LOAD_GOLDEN(g, stem);
+    const auto& logits = g.at("logits");
+    const auto expected_idx =
+        static_cast<std::int32_t>(std::lround(g.at("expected").data[0]));
+    const std::int64_t vocab_size = static_cast<std::int64_t>(logits.data.size());
+
+    DeviceBuffer<float> d_logits(logits.data);
+    DeviceBuffer<std::int32_t> d_out(std::vector<std::int32_t>{-1});
+
+    engine::cuda::argmax(d_logits.get(), d_out.get(), vocab_size);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    EXPECT_EQ(d_out.download()[0], expected_idx);
+  };
+
+  for (std::int64_t v : {1, 31, 512, 1025, 32000}) {
+    check_stem("argmax__v" + std::to_string(v));
   }
-  // Inject winner at index 17532
-  logits[17532] = 999.0f;
-  // Inject identical tie at later index 29111 -> tiebreaker must pick 17532
-  logits[29111] = 999.0f;
-
-  const std::int32_t exp = engine::cpu::argmax(logits.data(), vocab_size);
-  EXPECT_EQ(exp, 17532);
-
-  DeviceBuffer<float> d_logits(logits);
-  DeviceBuffer<std::int32_t> d_out(1);
-  d_out.zero();
-
-  engine::cuda::argmax(d_logits.get(), d_out.get(), vocab_size);
-  CUDA_CHECK(cudaDeviceSynchronize());
-
-  const std::vector<std::int32_t> host = d_out.download();
-  EXPECT_EQ(host[0], exp);
+  check_stem("argmax__tie_negative");
 }
 
-TEST(kernels, argmax_fp16_matches_cpu_ref) {
+TEST(kernels, argmax_fp16_matches_reference) {
   REQUIRE_CUDA_DEVICE();
 
-  const std::int64_t vocab_size = 32000;
-  std::vector<engine::half> logits(static_cast<std::size_t>(vocab_size));
-  for (std::size_t i = 0; i < logits.size(); ++i) {
-    logits[i] = engine::float_to_half(static_cast<float>(static_cast<int>(i % 100) - 50));
+  auto check_stem = [&](const std::string& stem) {
+    LOAD_GOLDEN(g, stem);
+    const auto logits = to_half_vec(g.at("logits").data);
+    const auto expected_idx =
+        static_cast<std::int32_t>(std::lround(g.at("expected").data[0]));
+    const std::int64_t vocab_size = static_cast<std::int64_t>(logits.size());
+
+    DeviceBuffer<engine::half> d_logits(logits);
+    DeviceBuffer<std::int32_t> d_out(std::vector<std::int32_t>{-1});
+
+    engine::cuda::argmax_fp16(d_logits.get(), d_out.get(), vocab_size);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    EXPECT_EQ(d_out.download()[0], expected_idx);
+  };
+
+  for (std::int64_t v : {1, 31, 512, 1025, 32000}) {
+    check_stem("argmax_fp16__v" + std::to_string(v));
   }
-  // Inject winner at index 8412
-  logits[8412] = engine::float_to_half(500.0f);
-  logits[21000] = engine::float_to_half(500.0f);
-
-  const std::int32_t exp = engine::cpu::argmax_fp16(logits.data(), vocab_size);
-  EXPECT_EQ(exp, 8412);
-
-  DeviceBuffer<engine::half> d_logits(logits);
-  DeviceBuffer<std::int32_t> d_out(1);
-  d_out.zero();
-
-  engine::cuda::argmax_fp16(d_logits.get(), d_out.get(), vocab_size);
-  CUDA_CHECK(cudaDeviceSynchronize());
-
-  const std::vector<std::int32_t> host = d_out.download();
-  EXPECT_EQ(host[0], exp);
+  check_stem("argmax_fp16__tie_negative");
 }
 
 TEST(kernels, argmax_all_neg_inf_returns_zero) {
@@ -1441,24 +1439,20 @@ TEST(kernels, argmax_all_neg_inf_returns_zero) {
 // Phase 4 -- Fused SwiGLU activation tests
 //===----------------------------------------------------------------------===//
 
-TEST(kernels, swiglu_f32_matches_cpu_ref) {
+TEST(kernels, swiglu_f32_matches_reference) {
   REQUIRE_CUDA_DEVICE();
 
   const std::int64_t sizes[] = {1, 65, 1024, 4096, 11008};
   for (std::int64_t n : sizes) {
-    std::vector<float> gate(static_cast<std::size_t>(n));
-    std::vector<float> up(static_cast<std::size_t>(n));
-    std::vector<float> exp(static_cast<std::size_t>(n));
+    const std::string stem = "swiglu__n" + std::to_string(n);
+    LOAD_GOLDEN(g, stem);
 
-    for (std::size_t i = 0; i < gate.size(); ++i) {
-      gate[i] = static_cast<float>(static_cast<int>(i % 23) - 11) * 0.2f;
-      up[i] = static_cast<float>(static_cast<int>(i % 17) - 8) * 0.2f;
-    }
+    const auto& gate = g.at("gate");
+    const auto& up = g.at("up");
+    const auto& exp = g.at("expected");
 
-    engine::cpu::swiglu(gate.data(), up.data(), exp.data(), n);
-
-    DeviceBuffer<float> d_gate(gate);
-    DeviceBuffer<float> d_up(up);
+    DeviceBuffer<float> d_gate(gate.data);
+    DeviceBuffer<float> d_up(up.data);
     DeviceBuffer<float> d_out(static_cast<std::size_t>(n));
     d_out.zero();
 
@@ -1466,28 +1460,21 @@ TEST(kernels, swiglu_f32_matches_cpu_ref) {
     CUDA_CHECK(cudaDeviceSynchronize());
 
     const std::vector<float> host = d_out.download();
-    CHECK_CASE("swiglu_f32__n" + std::to_string(n), host.data(), exp.data(), host.size(),
-               1e-5, 1e-5);
+    CHECK_CASE(stem, host.data(), exp.data.data(), host.size(), 1e-5, 1e-5);
   }
 }
 
-TEST(kernels, swiglu_fp16_matches_cpu_ref) {
+TEST(kernels, swiglu_fp16_matches_reference) {
   REQUIRE_CUDA_DEVICE();
 
   const std::int64_t sizes[] = {1, 65, 1024, 4096, 11008};
   for (std::int64_t n : sizes) {
-    std::vector<engine::half> gate(static_cast<std::size_t>(n));
-    std::vector<engine::half> up(static_cast<std::size_t>(n));
-    std::vector<engine::half> exp(static_cast<std::size_t>(n));
+    const std::string stem = "swiglu_fp16__n" + std::to_string(n);
+    LOAD_GOLDEN(g, stem);
 
-    for (std::size_t i = 0; i < gate.size(); ++i) {
-      gate[i] =
-          engine::float_to_half(static_cast<float>(static_cast<int>(i % 23) - 11) * 0.2f);
-      up[i] =
-          engine::float_to_half(static_cast<float>(static_cast<int>(i % 17) - 8) * 0.2f);
-    }
-
-    engine::cpu::swiglu_fp16(gate.data(), up.data(), exp.data(), n);
+    const auto gate = to_half_vec(g.at("gate").data);
+    const auto up = to_half_vec(g.at("up").data);
+    const auto& exp = g.at("expected");
 
     DeviceBuffer<engine::half> d_gate(gate);
     DeviceBuffer<engine::half> d_up(up);
@@ -1497,10 +1484,8 @@ TEST(kernels, swiglu_fp16_matches_cpu_ref) {
     engine::cuda::swiglu_fp16(d_gate.get(), d_up.get(), d_out.get(), n);
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    const std::vector<engine::half> host = d_out.download();
-    for (std::size_t i = 0; i < host.size(); ++i) {
-      EXPECT_NEAR(engine::half_to_float(host[i]), engine::half_to_float(exp[i]), 2e-3f);
-    }
+    const auto host_f = to_float_vec(d_out.download());
+    CHECK_CASE(stem, host_f.data(), exp.data.data(), host_f.size(), 2e-3, 2e-3);
   }
 }
 

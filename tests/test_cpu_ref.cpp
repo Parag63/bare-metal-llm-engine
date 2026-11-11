@@ -130,6 +130,61 @@ const RmsnormLinearShape kRmsnormLinearShapes[] = {{1, 4096, 4096, true},
 /// near-zero rows (which is exactly what the rmsnorm__zeros case tests).
 constexpr float kEps = 1e-5f;
 
+struct GemvShape {
+  std::int64_t n, k;
+};
+const GemvShape kGemvShapes[] = {
+    {4096, 4096},
+    {12288, 4096},
+    {127, 31},
+    {64, 128},
+};
+const GemvShape kGemvFp16Shapes[] = {
+    {64, 64},
+    {128, 256},
+    {73, 125},
+    {4096, 4096},
+};
+
+struct EmbeddingShape {
+  std::int64_t v, d, t;
+};
+const EmbeddingShape kEmbeddingShapes[] = {
+    {50, 16, 4},
+    {1000, 256, 5},
+    {100, 65, 3},
+};
+
+const std::int64_t kArgmaxSizes[] = {1, 31, 512, 1025, 32000};
+const std::int64_t kSwigluSizes[] = {1, 65, 1024, 4096, 11008};
+
+constexpr double kFp16Rtol = 2e-3;
+constexpr double kFp16Atol = 1e-3;
+
+std::vector<engine::half> to_half_vec(const std::vector<float>& src) {
+  std::vector<engine::half> out(src.size());
+  for (std::size_t i = 0; i < src.size(); ++i) {
+    out[i] = engine::float_to_half(src[i]);
+  }
+  return out;
+}
+
+std::vector<float> to_float_vec(const std::vector<engine::half>& src) {
+  std::vector<float> out(src.size());
+  for (std::size_t i = 0; i < src.size(); ++i) {
+    out[i] = engine::half_to_float(src[i]);
+  }
+  return out;
+}
+
+std::vector<std::int32_t> to_i32_vec(const std::vector<float>& src) {
+  std::vector<std::int32_t> out(src.size());
+  for (std::size_t i = 0; i < src.size(); ++i) {
+    out[i] = static_cast<std::int32_t>(std::lround(src[i]));
+  }
+  return out;
+}
+
 std::string dims2(std::int64_t a, std::int64_t b) {
   return std::to_string(a) + "x" + std::to_string(b);
 }
@@ -636,17 +691,6 @@ TEST(cpu_ref, rmsnorm_linear_agrees_with_separate_rmsnorm_and_matmul) {
 // GEMV (Matrix-vector product) tests.
 //===----------------------------------------------------------------------===//
 
-struct GemvShape {
-  std::int64_t n, k;
-};
-
-const GemvShape kGemvShapes[] = {
-    {4096, 4096},
-    {12288, 4096},
-    {127, 31},
-    {64, 128},
-};
-
 TEST(cpu_ref, gemv_matches_reference) {
   for (const auto& s : kGemvShapes) {
     const std::string stem = "gemv__" + std::to_string(s.n) + "x" + std::to_string(s.k);
@@ -688,114 +732,102 @@ TEST(cpu_ref, gemv_agrees_with_matmul_at_m1) {
 // Phase 3 — FP16 and missing inference kernels: gemv_fp16, embedding, argmax
 //===----------------------------------------------------------------------===//
 
-TEST(cpu_ref, gemv_fp16_matches_scalar_reference) {
-  const std::int64_t N = 64;
-  const std::int64_t K = 128;
-  std::vector<engine::half> A(static_cast<std::size_t>(K * N));
-  std::vector<engine::half> x(static_cast<std::size_t>(K));
-  std::vector<engine::half> out(static_cast<std::size_t>(N));
+TEST(cpu_ref, gemv_fp16_matches_reference) {
+  for (const auto& s : kGemvFp16Shapes) {
+    const std::string stem = "gemv_fp16__" + dims2(s.n, s.k);
+    LOAD_GOLDEN(g, stem);
 
-  for (std::size_t i = 0; i < A.size(); ++i) {
-    A[i] = engine::float_to_half(static_cast<float>(static_cast<int>(i % 17) - 8) * 0.1f);
-  }
-  for (std::size_t i = 0; i < x.size(); ++i) {
-    x[i] = engine::float_to_half(static_cast<float>(static_cast<int>(i % 13) - 6) * 0.1f);
-  }
+    const auto A = to_half_vec(g.at("A").data);
+    const auto x = to_half_vec(g.at("x").data);
+    const auto& exp = g.at("expected");
 
-  engine::cpu::gemv_fp16(A.data(), x.data(), out.data(), N, K);
+    std::vector<engine::half> out(static_cast<std::size_t>(s.n));
+    engine::cpu::gemv_fp16(A.data(), x.data(), out.data(), s.n, s.k);
 
-  for (std::int64_t j = 0; j < N; ++j) {
-    double acc = 0.0;
-    for (std::int64_t k = 0; k < K; ++k) {
-      acc += static_cast<double>(engine::half_to_float(x[static_cast<std::size_t>(k)])) *
-             static_cast<double>(
-                 engine::half_to_float(A[static_cast<std::size_t>(k * N + j)]));
-    }
-    float expected = static_cast<float>(acc);
-    float actual = engine::half_to_float(out[static_cast<std::size_t>(j)]);
-    EXPECT_NEAR(actual, expected, 2e-3);
+    const auto out_f = to_float_vec(out);
+    CHECK_CASE(stem, out_f.data(), exp.data.data(), out_f.size(), kFp16Rtol, kFp16Atol);
   }
 }
 
-TEST(cpu_ref, embedding_lookup_matches_expected) {
-  const std::int64_t vocab_size = 50;
-  const std::int64_t hidden_dim = 16;
-  const std::int64_t num_tokens = 4;
+TEST(cpu_ref, embedding_lookup_matches_reference) {
+  for (const auto& s : kEmbeddingShapes) {
+    const std::string stem = "embedding__" + dims2(s.t, s.d) + "_v" + std::to_string(s.v);
+    LOAD_GOLDEN(g, stem);
 
-  std::vector<float> table(static_cast<std::size_t>(vocab_size * hidden_dim));
-  for (std::size_t i = 0; i < table.size(); ++i) {
-    table[i] = static_cast<float>(i) * 0.5f;
-  }
+    const auto& table = g.at("table");
+    const auto ids = to_i32_vec(g.at("ids").data);
+    const auto& exp = g.at("expected");
 
-  std::vector<std::int32_t> input_ids = {0, 7, 49, 12};
-  std::vector<float> out(static_cast<std::size_t>(num_tokens * hidden_dim), -1.0f);
-
-  engine::cpu::embedding(table.data(), input_ids.data(), out.data(), num_tokens,
-                         hidden_dim, vocab_size);
-
-  for (std::int64_t t = 0; t < num_tokens; ++t) {
-    std::int32_t id = input_ids[static_cast<std::size_t>(t)];
-    for (std::int64_t d = 0; d < hidden_dim; ++d) {
-      EXPECT_EQ(out[static_cast<std::size_t>(t * hidden_dim + d)],
-                table[static_cast<std::size_t>(id * hidden_dim + d)]);
-    }
+    std::vector<float> out(static_cast<std::size_t>(s.t * s.d), -1.0f);
+    engine::cpu::embedding(table.data.data(), ids.data(), out.data(), s.t, s.d, s.v);
+    CHECK_CASE(stem, out.data(), exp.data.data(), out.size(), kExactRtol, kExactAtol);
   }
 
   // Bounds checks throw
+  std::vector<float> table(50 * 16, 0.0f);
+  std::vector<float> out(16, 0.0f);
   std::vector<std::int32_t> bad_ids = {50};
-  EXPECT_THROWS(engine::cpu::embedding(table.data(), bad_ids.data(), out.data(), 1,
-                                       hidden_dim, vocab_size));
+  EXPECT_THROWS(
+      engine::cpu::embedding(table.data(), bad_ids.data(), out.data(), 1, 16, 50));
   bad_ids = {-1};
-  EXPECT_THROWS(engine::cpu::embedding(table.data(), bad_ids.data(), out.data(), 1,
-                                       hidden_dim, vocab_size));
+  EXPECT_THROWS(
+      engine::cpu::embedding(table.data(), bad_ids.data(), out.data(), 1, 16, 50));
 }
 
-TEST(cpu_ref, embedding_fp16_lookup_matches_expected) {
-  const std::int64_t vocab_size = 32;
-  const std::int64_t hidden_dim = 16;
-  const std::int64_t num_tokens = 3;
+TEST(cpu_ref, embedding_fp16_lookup_matches_reference) {
+  for (const auto& s : kEmbeddingShapes) {
+    const std::string stem =
+        "embedding_fp16__" + dims2(s.t, s.d) + "_v" + std::to_string(s.v);
+    LOAD_GOLDEN(g, stem);
 
-  std::vector<engine::half> table(static_cast<std::size_t>(vocab_size * hidden_dim));
-  for (std::size_t i = 0; i < table.size(); ++i) {
-    table[i] = engine::float_to_half(static_cast<float>(i));
-  }
+    const auto table = to_half_vec(g.at("table").data);
+    const auto ids = to_i32_vec(g.at("ids").data);
+    const auto& exp = g.at("expected");
 
-  std::vector<std::int32_t> input_ids = {2, 31, 0};
-  std::vector<engine::half> out(static_cast<std::size_t>(num_tokens * hidden_dim));
+    std::vector<engine::half> out(static_cast<std::size_t>(s.t * s.d));
+    engine::cpu::embedding_fp16(table.data(), ids.data(), out.data(), s.t, s.d, s.v);
 
-  engine::cpu::embedding_fp16(table.data(), input_ids.data(), out.data(), num_tokens,
-                              hidden_dim, vocab_size);
-
-  for (std::int64_t t = 0; t < num_tokens; ++t) {
-    std::int32_t id = input_ids[static_cast<std::size_t>(t)];
-    for (std::int64_t d = 0; d < hidden_dim; ++d) {
-      EXPECT_EQ(
-          engine::half_to_float(out[static_cast<std::size_t>(t * hidden_dim + d)]),
-          engine::half_to_float(table[static_cast<std::size_t>(id * hidden_dim + d)]));
-    }
+    const auto out_f = to_float_vec(out);
+    CHECK_CASE(stem, out_f.data(), exp.data.data(), out_f.size(), kExactRtol, kExactAtol);
   }
 }
 
-TEST(cpu_ref, argmax_finds_maximum_and_tiebreaks) {
-  std::vector<float> logits = {1.0f, 5.5f, 3.2f, 5.5f, 2.0f};
-  // Max is 5.5f, occurring at index 1 and index 3. Lowest index is 1.
-  std::int32_t best =
-      engine::cpu::argmax(logits.data(), static_cast<std::int64_t>(logits.size()));
-  EXPECT_EQ(best, 1);
+TEST(cpu_ref, argmax_matches_reference) {
+  for (std::int64_t v : kArgmaxSizes) {
+    const std::string stem = "argmax__v" + std::to_string(v);
+    LOAD_GOLDEN(g, stem);
 
-  // Single element
-  std::vector<float> single = {42.0f};
-  EXPECT_EQ(engine::cpu::argmax(single.data(), 1), 0);
+    const auto& logits = g.at("logits");
+    const auto expected_idx =
+        static_cast<std::int32_t>(std::lround(g.at("expected").data[0]));
+    EXPECT_EQ(engine::cpu::argmax(logits.data.data(), v), expected_idx);
+  }
+
+  LOAD_GOLDEN(g_tie, "argmax__tie_negative");
+  const auto& tie_logits = g_tie.at("logits");
+  const auto tie_n = static_cast<std::int64_t>(tie_logits.data.size());
+  const auto tie_expected =
+      static_cast<std::int32_t>(std::lround(g_tie.at("expected").data[0]));
+  EXPECT_EQ(engine::cpu::argmax(tie_logits.data.data(), tie_n), tie_expected);
 }
 
-TEST(cpu_ref, argmax_fp16_finds_maximum_and_tiebreaks) {
-  std::vector<engine::half> logits = {
-      engine::float_to_half(-10.0f), engine::float_to_half(4.25f),
-      engine::float_to_half(100.5f), engine::float_to_half(100.5f),
-      engine::float_to_half(0.0f)};
-  std::int32_t best =
-      engine::cpu::argmax_fp16(logits.data(), static_cast<std::int64_t>(logits.size()));
-  EXPECT_EQ(best, 2);
+TEST(cpu_ref, argmax_fp16_matches_reference) {
+  for (std::int64_t v : kArgmaxSizes) {
+    const std::string stem = "argmax_fp16__v" + std::to_string(v);
+    LOAD_GOLDEN(g, stem);
+
+    const auto logits = to_half_vec(g.at("logits").data);
+    const auto expected_idx =
+        static_cast<std::int32_t>(std::lround(g.at("expected").data[0]));
+    EXPECT_EQ(engine::cpu::argmax_fp16(logits.data(), v), expected_idx);
+  }
+
+  LOAD_GOLDEN(g_tie, "argmax_fp16__tie_negative");
+  const auto tie_logits = to_half_vec(g_tie.at("logits").data);
+  const auto tie_n = static_cast<std::int64_t>(tie_logits.size());
+  const auto tie_expected =
+      static_cast<std::int32_t>(std::lround(g_tie.at("expected").data[0]));
+  EXPECT_EQ(engine::cpu::argmax_fp16(tie_logits.data(), tie_n), tie_expected);
 }
 
 TEST(cpu_ref, argmax_all_neg_inf_returns_zero) {
@@ -812,19 +844,18 @@ TEST(cpu_ref, argmax_all_neg_inf_returns_zero) {
   EXPECT_EQ(engine::cpu::argmax_fp16(f16_logits.data(), 64), 0);
 }
 
-TEST(cpu_ref, swiglu_matches_mathematical_definition) {
-  const std::vector<float> gate = {0.0f, 1.0f, -1.0f, 2.0f, -2.0f, 10.0f, -10.0f};
-  const std::vector<float> up = {2.0f, 3.0f, 4.0f, -1.5f, 0.5f, 1.0f, 1.0f};
-  std::vector<float> out(gate.size(), 0.0f);
+TEST(cpu_ref, swiglu_matches_reference) {
+  for (std::int64_t n : kSwigluSizes) {
+    const std::string stem = "swiglu__n" + std::to_string(n);
+    LOAD_GOLDEN(g, stem);
 
-  engine::cpu::swiglu(gate.data(), up.data(), out.data(),
-                      static_cast<std::int64_t>(gate.size()));
+    const auto& gate = g.at("gate");
+    const auto& up = g.at("up");
+    const auto& exp = g.at("expected");
 
-  for (std::size_t i = 0; i < gate.size(); ++i) {
-    const double g = static_cast<double>(gate[i]);
-    const double u = static_cast<double>(up[i]);
-    const double expected = (g / (1.0 + std::exp(-g))) * u;
-    EXPECT_NEAR(out[i], static_cast<float>(expected), 1e-6f);
+    std::vector<float> out(static_cast<std::size_t>(n), 0.0f);
+    engine::cpu::swiglu(gate.data.data(), up.data.data(), out.data(), n);
+    CHECK_CASE(stem, out.data(), exp.data.data(), out.size(), kFloatRtol, kFloatAtol);
   }
 
   // Contract: null pointers & negative length throw
@@ -835,25 +866,19 @@ TEST(cpu_ref, swiglu_matches_mathematical_definition) {
   EXPECT_THROWS(engine::cpu::swiglu(&dummy, &dummy, &dummy, -1));
 }
 
-TEST(cpu_ref, swiglu_fp16_matches_mathematical_definition) {
-  const std::vector<float> gate_f = {0.0f, 1.5f, -1.5f, 3.0f, -3.0f};
-  const std::vector<float> up_f = {1.0f, 2.0f, 0.5f, -2.0f, 4.0f};
-  std::vector<engine::half> gate(gate_f.size());
-  std::vector<engine::half> up(up_f.size());
-  std::vector<engine::half> out(gate_f.size());
+TEST(cpu_ref, swiglu_fp16_matches_reference) {
+  for (std::int64_t n : kSwigluSizes) {
+    const std::string stem = "swiglu_fp16__n" + std::to_string(n);
+    LOAD_GOLDEN(g, stem);
 
-  for (std::size_t i = 0; i < gate_f.size(); ++i) {
-    gate[i] = engine::float_to_half(gate_f[i]);
-    up[i] = engine::float_to_half(up_f[i]);
-  }
+    const auto gate = to_half_vec(g.at("gate").data);
+    const auto up = to_half_vec(g.at("up").data);
+    const auto& exp = g.at("expected");
 
-  engine::cpu::swiglu_fp16(gate.data(), up.data(), out.data(),
-                           static_cast<std::int64_t>(gate.size()));
+    std::vector<engine::half> out(static_cast<std::size_t>(n));
+    engine::cpu::swiglu_fp16(gate.data(), up.data(), out.data(), n);
 
-  for (std::size_t i = 0; i < gate_f.size(); ++i) {
-    const double g = static_cast<double>(gate_f[i]);
-    const double u = static_cast<double>(up_f[i]);
-    const double expected = (g / (1.0 + std::exp(-g))) * u;
-    EXPECT_NEAR(engine::half_to_float(out[i]), static_cast<float>(expected), 2e-3f);
+    const auto out_f = to_float_vec(out);
+    CHECK_CASE(stem, out_f.data(), exp.data.data(), out_f.size(), kFp16Rtol, kFp16Atol);
   }
 }

@@ -145,6 +145,23 @@ class NumpyBackend:
     def gemv(A, x):
         return x.astype(np.float64) @ A.astype(np.float64)
 
+    @staticmethod
+    def embedding(table, ids):
+        return table[ids.astype(np.int64)].astype(np.float64)
+
+    @staticmethod
+    def argmax(x):
+        # np.argmax guarantees lowest-index tie-breaking.
+        return np.array([int(np.argmax(x.astype(np.float64)))], dtype=np.float64)
+
+    @staticmethod
+    def swiglu(gate, up):
+        g64 = gate.astype(np.float64)
+        u64 = up.astype(np.float64)
+        exp_neg = np.exp(-np.abs(g64))
+        sigmoid = np.where(g64 >= 0.0, 1.0 / (1.0 + exp_neg), exp_neg / (1.0 + exp_neg))
+        return (g64 * sigmoid) * u64
+
 
 class TorchBackend:
     name = "torch"
@@ -202,6 +219,20 @@ class TorchBackend:
 
     def gemv(self, A, x):
         return (self._t(x) @ self._t(A)).numpy()
+
+    def embedding(self, table, ids):
+        idx = self.torch.from_numpy(np.ascontiguousarray(ids, dtype=np.int64))
+        return self.torch.nn.functional.embedding(idx, self._t(table)).numpy()
+
+    def argmax(self, x):
+        x64 = self._t(x)
+        max_val = x64.max()
+        first_idx = int((x64 == max_val).nonzero(as_tuple=False)[0, 0].item())
+        return np.array([first_idx], dtype=np.float64)
+
+    def swiglu(self, gate, up):
+        t = self.torch
+        return (t.nn.functional.silu(self._t(gate)) * self._t(up)).numpy()
 
 
 def select_backend(requested: str):
@@ -285,6 +316,25 @@ GEMV_SHAPES = [
     (127, 31),        # Irregular shape (bounds check & alignment test)
     (64, 128),        # Small power of 2
 ]
+
+# Phase 3 & 4 -- FP16, gather, argmax, and SwiGLU golden cases
+GEMV_FP16_SHAPES = [
+    (64, 64),
+    (128, 256),
+    (73, 125),        # Irregular scalar fallback
+    (4096, 4096),
+]
+
+# (vocab_size, hidden_dim, num_tokens)
+EMBEDDING_SHAPES = [
+    (50, 16, 4),
+    (1000, 256, 5),   # Vectorized float4 / uint4 aligned width
+    (100, 65, 3),     # Unaligned scalar fallback width
+]
+
+ARGMAX_SIZES = [1, 31, 512, 1025, 32000]
+
+SWIGLU_SIZES = [1, 65, 1024, 4096, 11008]
 
 
 def build_cases(rng, backend):
@@ -421,6 +471,86 @@ def build_cases(rng, backend):
             "A": a,
             "x": x,
             "expected": backend.gemv(a, x),
+        }
+
+    # --- gemv_fp16 ----------------------------------------------------------
+    for n, k in GEMV_FP16_SHAPES:
+        scale_a = 1.0 / np.sqrt(max(k, 1))
+        a = (rng.standard_normal((k, n), dtype=np.float32) * scale_a).astype(np.float16)
+        x = rng.standard_normal(k, dtype=np.float32).astype(np.float16)
+        yield f"gemv_fp16__{n}x{k}", {
+            "A": a,
+            "x": x,
+            "expected": backend.gemv(a, x).astype(np.float16),
+        }
+
+    # --- embedding & embedding_fp16 -----------------------------------------
+    for v, d, t in EMBEDDING_SHAPES:
+        ids = rng.integers(0, v, size=t, dtype=np.int64)
+        ids[0] = 0
+        if t >= 2:
+            ids[1] = v - 1
+
+        table_f32 = rng.standard_normal((v, d), dtype=np.float32)
+        yield f"embedding__{t}x{d}_v{v}", {
+            "table": table_f32,
+            "ids": ids.astype(np.float32),
+            "expected": backend.embedding(table_f32, ids),
+        }
+
+        table_f16 = rng.standard_normal((v, d), dtype=np.float32).astype(np.float16)
+        yield f"embedding_fp16__{t}x{d}_v{v}", {
+            "table": table_f16,
+            "ids": ids.astype(np.float32),
+            "expected": backend.embedding(table_f16, ids).astype(np.float16),
+        }
+
+    # --- argmax & argmax_fp16 -----------------------------------------------
+    for v in ARGMAX_SIZES:
+        logits_f32 = rng.standard_normal(v, dtype=np.float32) * 5.0
+        yield f"argmax__v{v}", {
+            "logits": logits_f32,
+            "expected": backend.argmax(logits_f32),
+        }
+
+        logits_f16 = (rng.standard_normal(v, dtype=np.float32) * 5.0).astype(np.float16)
+        yield f"argmax_fp16__v{v}", {
+            "logits": logits_f16,
+            "expected": backend.argmax(logits_f16),
+        }
+
+    tie_f32 = rng.uniform(-50.0, -20.0, size=64).astype(np.float32)
+    tie_f32[17] = -12.5
+    tie_f32[49] = -12.5
+    yield "argmax__tie_negative", {
+        "logits": tie_f32,
+        "expected": backend.argmax(tie_f32),
+    }
+
+    tie_f16 = rng.uniform(-50.0, -20.0, size=64).astype(np.float16)
+    tie_f16[9] = np.float16(-12.5)
+    tie_f16[55] = np.float16(-12.5)
+    yield "argmax_fp16__tie_negative", {
+        "logits": tie_f16,
+        "expected": backend.argmax(tie_f16),
+    }
+
+    # --- swiglu & swiglu_fp16 -----------------------------------------------
+    for n in SWIGLU_SIZES:
+        gate_f32 = rng.standard_normal(n, dtype=np.float32)
+        up_f32 = rng.standard_normal(n, dtype=np.float32)
+        yield f"swiglu__n{n}", {
+            "gate": gate_f32,
+            "up": up_f32,
+            "expected": backend.swiglu(gate_f32, up_f32),
+        }
+
+        gate_f16 = rng.standard_normal(n, dtype=np.float32).astype(np.float16)
+        up_f16 = rng.standard_normal(n, dtype=np.float32).astype(np.float16)
+        yield f"swiglu_fp16__n{n}", {
+            "gate": gate_f16,
+            "up": up_f16,
+            "expected": backend.swiglu(gate_f16, up_f16).astype(np.float16),
         }
 
 
