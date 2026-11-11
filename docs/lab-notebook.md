@@ -126,6 +126,35 @@ Measured at 2805 MHz SM / 10251 MHz mem (RTX 4070 SUPER, `RelWithDebInfo`, `reps
 
 - **Prediction vs Measurement (Phase 4):** Decode latency (**3.1 µs / 3.7 µs**) landed inside our **3–5 µs** launch-floor prediction, and cold prefill (**45 µs / 431.8 GB/s** = 85.7% peak BW at `S=2048` TinyLlama) hit right inside our **43–55 µs** target window. *(Note: high single-launch `(max-min)/median` spread at sub-50 µs reflects Windows WDDM timer/scheduler outliers while IQR stays 1.0–4.0 µs.)*
 
+### Phase 5 Measured Results — FlashAttention-2 Prefill (`attention_prefill`) & GQA Group Sharing
+
+Implemented in [kernels/attention_prefill.cu](../kernels/attention_prefill.cu): CUDA-core v1 FlashAttention-2 with `Br=64` (per-head) or `Br=128` (`tokens_per_blk = 128/G` across `G in {2,4,8}` Q heads in GQA group-shared mode), `Bc=64` (`D=64` per-head) / `Bc=32` (`D=128` and GQA-shared), 8 warps/block (rows split across warps), zero-bank-conflict `+2` `half2` SMEM padding, causal block/tile skipping + boundary masking, FP32 online softmax + output accumulators, single final normalize, optional `[s_q, n_heads]` `out_lse`, and $O(S)$ auxiliary memory.
+
+**Compiler Register, Spill, & Occupancy Inspection (`nvcc -arch=sm_89 -O2 -Xptxas -v`):**
+
+| Kernel Specialization | Mode | Tile `(Br, Bc)` | SMEM / Block | Regs / Thr | Spills | Active Blocks / SM (`sm_89`) | Theoretical Occupancy |
+|---|---|---|---:|---:|---:|---:|---:|
+| `D=64, per-head` | MHA / fallback | `(64, 64)` | 25.5 KiB | 84 | **0 B** | 2 (`reg`-capped) | 33.3% (512 thr/SM) |
+| `D=64, group-shared` | GQA `G in {2,4,8}` | `(128, 32)` | 25.5 KiB | 126 | **0 B** | 2 (`reg`-capped) | 33.3% (512 thr/SM) |
+| `D=128, per-head` | MHA / fallback | `(64, 32)` | 33.0 KiB | 80 | **0 B** | 3 (`reg+smem`) | 50.0% (768 thr/SM) |
+| `D=128, group-shared` | GQA `G in {2,4,8}` | `(128, 32)` | 49.5 KiB (opt-in) | 168 | **0 B** | 1 (`reg`-capped) | 16.7% (256 thr/SM) |
+
+**Prefill Crossover & GQA Group-Sharing Ablation (`relwithdebinfo`, 2745 MHz SM [2640–2805], 10251 MHz mem):**
+
+| Shape | `attention_naive` | `FA2 (per-head)` | `FA2 (GQA-shared)` | Speedup vs Naive | Group-Share Gain | FA2 Causal TFLOP/s |
+|---|---:|---:|---:|---:|---:|---:|
+| TinyLlama `S=128` (`32/4, D=64`) | 0.134 ms | 0.023 ms | 0.025 ms | **5.4×** | — (L2/grid launch) | 2.75 |
+| TinyLlama `S=512` (`32/4, D=64`) | 1.25 ms | 0.135 ms | 0.135 ms | **9.3×** | 1.00× | 7.96 |
+| TinyLlama `S=1024` (`32/4, D=64`) | 4.95 ms | 0.434 ms | 0.401 ms | **12.3×** | **+8.2%** | 10.73 |
+| TinyLlama `S=2048` (`32/4, D=64`) | 19.85 ms | 1.54 ms | **1.36 ms** | **14.6×** | **+13.2%** | **12.67** (35.7% nom. FP32) |
+| TinyLlama `S=4096` (`32/4, D=64`) | 79.02 ms | 5.88 ms | **4.87 ms** | **16.2×** | **+20.7%** | **14.12** (39.8% nom. FP32) |
+| Llama-2-7B `S=2048` (`32/32, D=128`) | 28.78 ms | **3.03 ms** | — (`G=1`) | **9.5×** | n/a | **11.34** (32.0% nom. FP32) |
+
+- **Prediction vs Measurement (Phase 5):**
+  - Eliminating the $O(S^2)$ `[32, S, S]` score buffer (512 MiB at `S=2048`, 2.0 GiB at `S=4096`) and tiling $Q/K/V$ in registers + SMEM cuts `S=2048` latency from **19.85 ms → 1.36 ms (14.6× faster)** and reaches **12.67 TFLOP/s** at `S=2048` (**14.12 TFLOP/s** at `S=4096`), cleanly inside our **10–18 TFLOP/s** Phase 1 prediction and above the 25% FP32 peak target (32.0–39.8% nominal / 28.8–35.9% live boost).
+  - Crossover against naive already holds at the smallest measured point (`S=128`: **5.4×** faster) because even at 2 MiB score footprint, `attention_naive` suffers three kernel launches and untiled SIMT `PV` streaming.
+  - GQA group sharing (`M_thr=4` rows/thread across 8 heads sharing `K/V` in SMEM) adds **+13.2% at `S=2048`** and **+20.7% at `S=4096`**, lifting register reuse from 2.67 to 4.0 FMAs per SMEM word while cutting total global KV tile fetches across the grid by $2\times$ (`512` vs `1024` block sweeps of $K/V$ at `S=2048`).
+
 ---
 
 ## Week 09 — 2026-10-02 · Pre-Module 4 Mathematical & Microarchitectural Audit: Baseline Realities, Cache Residency, and Precision Decisions

@@ -1912,12 +1912,23 @@ TEST(kernels, rope_contracts_and_edge_cases) {
                                    1, 64, -1));
 }
 
-TEST_PENDING(kernels, attention_prefill_matches_reference) {
+TEST(kernels, attention_prefill_matches_reference) {
   REQUIRE_CUDA_DEVICE();
   verify_prefill_attention_against_golden(ctx, engine::cuda::attention_prefill, "flash");
+  auto per_head_fn = [](const engine::half* q, const engine::half* k,
+                        const engine::half* v, engine::half* out, std::int64_t s_q,
+                        std::int64_t s_kv, std::int64_t n_heads, std::int64_t n_kv_heads,
+                        std::int64_t head_dim, std::int64_t kv_head_stride, float scale,
+                        std::int64_t q_pos_offset, bool is_causal, float* out_lse,
+                        cudaStream_t stream) {
+    engine::cuda::detail::attention_prefill_with_mode(
+        q, k, v, out, s_q, s_kv, n_heads, n_kv_heads, head_dim, kv_head_stride, scale,
+        q_pos_offset, is_causal, out_lse, /*share_gqa_kv=*/false, stream);
+  };
+  verify_prefill_attention_against_golden(ctx, per_head_fn, "flash_no_gqa_share");
 }
 
-TEST_PENDING(kernels, attention_prefill_agrees_with_naive_and_online) {
+TEST(kernels, attention_prefill_agrees_with_naive_and_online) {
   REQUIRE_CUDA_DEVICE();
   for (const auto& c : kAttentionCases) {
     const std::string stem = std::string("attention__") + c.name;
@@ -1956,7 +1967,7 @@ TEST_PENDING(kernels, attention_prefill_agrees_with_naive_and_online) {
   }
 }
 
-TEST_PENDING(kernels, attention_prefill_contracts_and_edge_cases) {
+TEST(kernels, attention_prefill_contracts_and_edge_cases) {
   REQUIRE_CUDA_DEVICE();
   verify_prefill_attention_contracts(ctx, engine::cuda::attention_prefill, "flash");
 }

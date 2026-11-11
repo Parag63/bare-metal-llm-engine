@@ -157,6 +157,16 @@ void attention_prefill(const half* q, const half* k, const half* v, half* out,
                        std::int64_t q_pos_offset = 0, bool is_causal = true,
                        float* out_lse = nullptr, cudaStream_t stream = 0);
 
+namespace detail {
+/// Explicitly toggle GQA group sharing in FlashAttention-2 prefill (for ablations).
+void attention_prefill_with_mode(const half* q, const half* k, const half* v, half* out,
+                                 std::int64_t s_q, std::int64_t s_kv,
+                                 std::int64_t n_heads, std::int64_t n_kv_heads,
+                                 std::int64_t head_dim, std::int64_t kv_head_stride,
+                                 float scale, std::int64_t q_pos_offset, bool is_causal,
+                                 float* out_lse, bool share_gqa_kv, cudaStream_t stream);
+}  // namespace detail
+
 /// Single-token decode attention with Split-KV FlashDecoding (ADR-0013).
 void attention_decode(const half* q, const half* k, const half* v, half* out,
                       std::int64_t kv_len, std::int64_t n_heads, std::int64_t n_kv_heads,

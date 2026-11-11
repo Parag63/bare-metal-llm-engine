@@ -840,7 +840,7 @@ void bench_swiglu(Table& t, int reps) {
   }
 }
 
-void bench_attention_naive(Table& t, int reps) {
+void bench_attention_prefill(Table& t, int reps, bool include_large) {
   struct AttnCase {
     std::int64_t s;
     std::int64_t hq;
@@ -848,11 +848,16 @@ void bench_attention_naive(Table& t, int reps) {
     std::int64_t d_head;
     const char* arch;
   };
-  const AttnCase cases[] = {
-      {128, 32, 4, 64, "TinyLlama"},    {512, 32, 4, 64, "TinyLlama"},
-      {1024, 32, 4, 64, "TinyLlama"},   {2048, 32, 4, 64, "TinyLlama"},
-      {2048, 32, 32, 128, "Llama2-7B"},
+  std::vector<AttnCase> cases = {
+      {128, 32, 4, 64, "TinyLlama"},
+      {512, 32, 4, 64, "TinyLlama"},
+      {1024, 32, 4, 64, "TinyLlama"},
+      {2048, 32, 4, 64, "TinyLlama"},
   };
+  if (include_large) {
+    cases.push_back({4096, 32, 4, 64, "TinyLlama"});
+  }
+  cases.push_back({2048, 32, 32, 128, "Llama2-7B"});
 
   for (const AttnCase& c : cases) {
     const std::size_t q_elems = static_cast<std::size_t>(c.s * c.hq * c.d_head);
@@ -867,7 +872,7 @@ void bench_attention_naive(Table& t, int reps) {
     const std::size_t io_set_bytes = (q_elems * 2 + kv_elems * 2) * sizeof(engine::half);
     const std::size_t kColdBytes = std::size_t{192} * 1024 * 1024;
     const std::size_t num_buffers = std::min<std::size_t>(
-        32, std::max<std::size_t>(2, (kColdBytes + io_set_bytes - 1) / io_set_bytes));
+        16, std::max<std::size_t>(2, (kColdBytes + io_set_bytes - 1) / io_set_bytes));
 
     std::vector<DeviceBuffer<engine::half>> d_qs, d_ks, d_vs, d_outs;
     d_qs.reserve(num_buffers);
@@ -888,24 +893,57 @@ void bench_attention_naive(Table& t, int reps) {
                                (2.0 * d(c.hq) + 2.0 * d(c.hkv)) * d(c.s) * d(c.d_head);
     const float scale = 1.0f / std::sqrt(static_cast<float>(c.d_head));
 
-    char size_label[96];
-    std::snprintf(size_label, sizeof(size_label),
+    char naive_label[96];
+    std::snprintf(naive_label, sizeof(naive_label),
                   "%s S=%lld H=%lld/%lld D=%lld (%s scores)", c.arch,
                   static_cast<long long>(c.s), static_cast<long long>(c.hq),
                   static_cast<long long>(c.hkv), static_cast<long long>(c.d_head),
                   mib(scores_bytes).c_str());
 
-    std::size_t iter = 0;
+    char flash_label[96];
+    std::snprintf(flash_label, sizeof(flash_label), "%s S=%lld H=%lld/%lld D=%lld",
+                  c.arch, static_cast<long long>(c.s), static_cast<long long>(c.hq),
+                  static_cast<long long>(c.hkv), static_cast<long long>(c.d_head));
+
+    std::size_t iter_n = 0;
+    const int naive_reps = (c.s >= 4096) ? std::min(reps, 15) : reps;
     t.measure_gpu(
-        "attention_naive", size_label, flops, ideal_bytes,
+        "attention_naive", naive_label, flops, ideal_bytes,
         [&] {
-          const std::size_t idx = iter % num_buffers;
-          ++iter;
+          const std::size_t idx = iter_n % num_buffers;
+          ++iter_n;
           engine::cuda::attention_naive(
               d_qs[idx].get(), d_ks[idx].get(), d_vs[idx].get(), d_outs[idx].get(), c.s,
               c.s, c.hq, c.hkv, c.d_head, c.s * c.d_head, scale, 0, true, nullptr);
         },
+        /*warmup=*/5, naive_reps);
+
+    std::size_t iter_f = 0;
+    t.measure_gpu(
+        "attention_prefill (FA2)", flash_label, flops, ideal_bytes,
+        [&] {
+          const std::size_t idx = iter_f % num_buffers;
+          ++iter_f;
+          engine::cuda::attention_prefill(
+              d_qs[idx].get(), d_ks[idx].get(), d_vs[idx].get(), d_outs[idx].get(), c.s,
+              c.s, c.hq, c.hkv, c.d_head, c.s * c.d_head, scale, 0, true, nullptr);
+        },
         /*warmup=*/5, reps);
+
+    if (c.hq > c.hkv) {
+      std::size_t iter_p = 0;
+      t.measure_gpu(
+          "attention_prefill (per-head)", flash_label, flops, ideal_bytes,
+          [&] {
+            const std::size_t idx = iter_p % num_buffers;
+            ++iter_p;
+            engine::cuda::detail::attention_prefill_with_mode(
+                d_qs[idx].get(), d_ks[idx].get(), d_vs[idx].get(), d_outs[idx].get(), c.s,
+                c.s, c.hq, c.hkv, c.d_head, c.s * c.d_head, scale, 0, true, nullptr,
+                /*share_gqa_kv=*/false, nullptr);
+          },
+          /*warmup=*/5, reps);
+    }
   }
 }
 
@@ -1057,7 +1095,9 @@ int main(int argc, char** argv) {
   if (want("rmsnorm_linear")) bench_rmsnorm_linear(t, reps);
   if (want("missing")) bench_missing_kernels(t, reps);
   if (want("swiglu")) bench_swiglu(t, reps);
-  if (want("attention_naive")) bench_attention_naive(t, reps);
+  if (want("attention_prefill") || want("attention_naive")) {
+    bench_attention_prefill(t, reps, /*include_large=*/!quick);
+  }
   if (want("rope")) bench_rope(t, reps);
 
   if (json_output) {
