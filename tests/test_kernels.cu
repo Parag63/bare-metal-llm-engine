@@ -339,12 +339,11 @@ const RopeCase kRopeCases[] = {
 using PrefillAttentionFn = void (*)(const engine::half*, const engine::half*,
                                     const engine::half*, engine::half*, std::int64_t,
                                     std::int64_t, std::int64_t, std::int64_t,
-                                    std::int64_t, std::int64_t, float, std::int64_t,
-                                    bool, float*, cudaStream_t);
+                                    std::int64_t, std::int64_t, float, std::int64_t, bool,
+                                    float*, cudaStream_t);
 
 void verify_prefill_attention_against_golden(engtest::TestContext& ctx,
-                                             PrefillAttentionFn fn,
-                                             const char* label) {
+                                             PrefillAttentionFn fn, const char* label) {
   for (const auto& c : kAttentionCases) {
     const std::string stem = std::string("attention__") + c.name;
     LOAD_GOLDEN(g, stem);
@@ -365,8 +364,8 @@ void verify_prefill_attention_against_golden(engtest::TestContext& ctx,
 
     const float scale = 1.0f / std::sqrt(static_cast<float>(c.head_dim));
     fn(d_q.get(), d_k.get(), d_v.get(), d_out.get(), c.s_q, c.s_kv, c.n_heads,
-       c.n_kv_heads, c.head_dim, c.s_kv * c.head_dim, scale, c.q_pos_offset,
-       c.is_causal, d_lse.get(), nullptr);
+       c.n_kv_heads, c.head_dim, c.s_kv * c.head_dim, scale, c.q_pos_offset, c.is_causal,
+       d_lse.get(), nullptr);
     CUDA_CHECK(cudaDeviceSynchronize());
 
     const auto host_out = to_float_vec(d_out.download());
@@ -401,8 +400,8 @@ void verify_prefill_attention_contracts(engtest::TestContext& ctx, PrefillAttent
     DeviceBuffer<engine::half> d_in(init);
     DeviceBuffer<engine::half> d_out(init);
     DeviceBuffer<float> d_lse(std::vector<float>(usize(s_q * H_q), 42.0f));
-    fn(d_in.get(), d_in.get(), d_in.get(), d_out.get(), s_q, 0, H_q, H_kv, D, 0, scale,
-       0, true, d_lse.get(), nullptr);
+    fn(d_in.get(), d_in.get(), d_in.get(), d_out.get(), s_q, 0, H_q, H_kv, D, 0, scale, 0,
+       true, d_lse.get(), nullptr);
     CUDA_CHECK(cudaDeviceSynchronize());
     for (engine::half h : d_out.download()) EXPECT_EQ(engine::half_to_float(h), 0.0f);
     for (float val : d_lse.download()) EXPECT_TRUE(std::isinf(val) && val < 0.0f);
@@ -415,7 +414,8 @@ void verify_prefill_attention_contracts(engtest::TestContext& ctx, PrefillAttent
     const auto k_pack = to_half_vec(g.at("k").data);
     const auto v_pack = to_half_vec(g.at("v").data);
     const std::int64_t s_q = 17, s_kv = 17, hq = 8, hkv = 2, max_seq = 40;
-    const engine::half h_nan = engine::float_to_half(std::numeric_limits<float>::quiet_NaN());
+    const engine::half h_nan =
+        engine::float_to_half(std::numeric_limits<float>::quiet_NaN());
 
     std::vector<engine::half> k_cache(usize(hkv * max_seq * D), h_nan);
     std::vector<engine::half> v_cache(usize(hkv * max_seq * D), h_nan);
@@ -442,10 +442,13 @@ void verify_prefill_attention_contracts(engtest::TestContext& ctx, PrefillAttent
   DeviceBuffer<engine::half> d(usize(H_q * 4 * D));
   d.zero();
   engine::half* p = d.get();
-  EXPECT_THROWS(fn(nullptr, p, p, p, 1, 2, H_q, H_kv, D, 2 * D, scale, 0, true, nullptr, nullptr));
+  EXPECT_THROWS(
+      fn(nullptr, p, p, p, 1, 2, H_q, H_kv, D, 2 * D, scale, 0, true, nullptr, nullptr));
   EXPECT_THROWS(fn(p, p, p, p, 1, 2, 6, 4, D, 2 * D, scale, 0, true, nullptr, nullptr));
-  EXPECT_THROWS(fn(p, p, p, p, 1, 2, H_q, H_kv, 32, 2 * 32, scale, 0, true, nullptr, nullptr));
-  EXPECT_THROWS(fn(p, p, p, p, 1, 4, H_q, H_kv, D, 2 * D, scale, 0, true, nullptr, nullptr));
+  EXPECT_THROWS(
+      fn(p, p, p, p, 1, 2, H_q, H_kv, 32, 2 * 32, scale, 0, true, nullptr, nullptr));
+  EXPECT_THROWS(
+      fn(p, p, p, p, 1, 4, H_q, H_kv, D, 2 * D, scale, 0, true, nullptr, nullptr));
 }
 
 }  // namespace
@@ -1843,12 +1846,12 @@ TEST(kernels, empty_work_is_a_no_op_not_an_error) {
 // Module 4 -- Attention, RoPE, FlashAttention-2, and FlashDecoding
 //===----------------------------------------------------------------------===//
 
-TEST_PENDING(kernels, attention_naive_matches_reference) {
+TEST(kernels, attention_naive_matches_reference) {
   REQUIRE_CUDA_DEVICE();
   verify_prefill_attention_against_golden(ctx, engine::cuda::attention_naive, "naive");
 }
 
-TEST_PENDING(kernels, attention_naive_contracts_and_edge_cases) {
+TEST(kernels, attention_naive_contracts_and_edge_cases) {
   REQUIRE_CUDA_DEVICE();
   verify_prefill_attention_contracts(ctx, engine::cuda::attention_naive, "naive");
 }
@@ -1903,8 +1906,8 @@ TEST_PENDING(kernels, rope_contracts_and_edge_cases) {
 
   EXPECT_THROWS(
       engine::cuda::rope(d_q.get(), nullptr, d_tab.get(), d_tab.get(), 1, 1, 1, 64));
-  EXPECT_THROWS(engine::cuda::rope(d_q.get(), d_q.get(), d_tab.get(), d_tab.get(), 1, 1,
-                                   1, 48));
+  EXPECT_THROWS(
+      engine::cuda::rope(d_q.get(), d_q.get(), d_tab.get(), d_tab.get(), 1, 1, 1, 48));
   EXPECT_THROWS(engine::cuda::rope(d_q.get(), d_q.get(), d_tab.get(), d_tab.get(), 1, 1,
                                    1, 64, -1));
 }
@@ -1933,8 +1936,8 @@ TEST_PENDING(kernels, attention_prefill_agrees_with_naive_and_online) {
     engine::cuda::attention_naive(d_q.get(), d_k.get(), d_v.get(), d_naive.get(), c.s_q,
                                   c.s_kv, c.n_heads, c.n_kv_heads, c.head_dim, kv_stride,
                                   scale, c.q_pos_offset, c.is_causal);
-    engine::cuda::attention_prefill(d_q.get(), d_k.get(), d_v.get(), d_flash.get(),
-                                    c.s_q, c.s_kv, c.n_heads, c.n_kv_heads, c.head_dim,
+    engine::cuda::attention_prefill(d_q.get(), d_k.get(), d_v.get(), d_flash.get(), c.s_q,
+                                    c.s_kv, c.n_heads, c.n_kv_heads, c.head_dim,
                                     kv_stride, scale, c.q_pos_offset, c.is_causal);
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -1946,8 +1949,8 @@ TEST_PENDING(kernels, attention_prefill_agrees_with_naive_and_online) {
     const auto naive_f = to_float_vec(d_naive.download());
     const auto flash_f = to_float_vec(d_flash.download());
     const auto online_f = to_float_vec(h_online);
-    CHECK_CASE(stem + " (flash vs naive)", flash_f.data(), naive_f.data(),
-               flash_f.size(), attention_rtol(), attention_atol(c.s_kv));
+    CHECK_CASE(stem + " (flash vs naive)", flash_f.data(), naive_f.data(), flash_f.size(),
+               attention_rtol(), attention_atol(c.s_kv));
     CHECK_CASE(stem + " (flash vs online_cpu)", flash_f.data(), online_f.data(),
                flash_f.size(), attention_rtol(), attention_atol(c.s_kv));
   }
@@ -2009,8 +2012,8 @@ TEST_PENDING(kernels, attention_decode_splits_and_contracts) {
              attention_rtol(), attention_atol(kv_len));
   CHECK_CASE("decode split_kv=8 vs golden", f8.data(), exp.data.data(), f8.size(),
              attention_rtol(), attention_atol(kv_len));
-  CHECK_CASE("decode split_kv=1 vs 8", f1.data(), f8.data(), f1.size(),
-             attention_rtol(), attention_atol(kv_len));
+  CHECK_CASE("decode split_kv=1 vs 8", f1.data(), f8.data(), f1.size(), attention_rtol(),
+             attention_atol(kv_len));
 
   // kv_len=3 < split_kv=16 edge case & kv_len == 0 zero-fill.
   DeviceBuffer<engine::half> d_out3(q.size()), d_out0(q.size());

@@ -95,6 +95,22 @@ Hardware baseline (RTX 4070 SUPER, `sm_89`, 56 SMs, 48 MiB L2, 504.0 GB/s peak G
 
 *(Empirical tables and discrepancies vs prediction will be appended below as Phases 3–8 complete — never editing the predictions above.)*
 
+### Phase 3 Measured Results — Naive FP16 Attention Baseline (`attention_naive`)
+
+Implemented in [kernels/attention_naive.cu](../kernels/attention_naive.cu): stream-ordered `[n_heads, s_q, s_kv]` FP32 score workspace via `ScopedPoolBuffer`, scores kernel writing `-INFINITY` on causal mask (`j > q_pos_offset + i`), existing `softmax_rows` in-place, optional token-major `[s_q, n_heads]` `out_lse`, and FP32-accumulated `P · V` kernel writing FP16 `out`. Both golden (`attention_naive_matches_reference`) and contract (`attention_naive_contracts_and_edge_cases`) suites pass.
+
+Measured at 2670 MHz SM / 10251 MHz mem (RTX 4070 SUPER, `RelWithDebInfo`, `reps=50`):
+
+| Configuration | Scores Buffer | Median (ms) | IQR (ms) | Min (ms) | Spread | Causal GFLOP/s | Ideal I/O GB/s |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| TinyLlama `S=128` (`H=32/4, D=64`) | 2.0 MiB | 0.141 | 0.0077 | 0.133 | 10.85% | 480.7 | 8.38 |
+| TinyLlama `S=512` (`H=32/4, D=64`) | 32.0 MiB | 1.25 | 0.0060 | 1.24 | 21.76% | 859.8 | 3.77 |
+| TinyLlama `S=1024` (`H=32/4, D=64`) | 128.0 MiB | 4.92 | 0.017 | 4.91 | 5.45% | 873.7 | 1.92 |
+| TinyLlama `S=2048` (`H=32/4, D=64`) | 512.0 MiB | 19.39 | 0.204 | 19.24 | 3.91% | 886.6 | 0.974 |
+| Llama-2-7B `S=2048` (`H=32/32, D=128`) | 512.0 MiB | 28.38 | 0.524 | 28.01 | 3.68% | 1211.5 | 2.37 |
+
+- **Prediction vs Measurement (Phase 3):** Notice `S=2048` measured **19.39 ms** vs our 4.5 ms DRAM-only lower bound: untiled warp-dot-product `QK^T` (`Q` shared, unvectorized `K`) and single-row `PV` (`1` block per `(h, i)` streaming `2048` keys) add SIMT compute and `4.3x` unamortized memory overhead (~0.89 TFLOP/s effective) on top of the 512 MiB score-matrix materialization. Scaling from `S=512` to `S=2048` is cleanly $4.0\times$ per $2\times$ sequence length ($1.25 \to 4.92 \to 19.39$ ms), confirming strict $O(S^2)$ work & workspace scaling and giving a clean GPU-side numerical oracle for FlashAttention-2.
+
 ---
 
 ## Week 09 — 2026-10-02 · Pre-Module 4 Mathematical & Microarchitectural Audit: Baseline Realities, Cache Residency, and Precision Decisions

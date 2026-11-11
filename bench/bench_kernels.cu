@@ -840,6 +840,75 @@ void bench_swiglu(Table& t, int reps) {
   }
 }
 
+void bench_attention_naive(Table& t, int reps) {
+  struct AttnCase {
+    std::int64_t s;
+    std::int64_t hq;
+    std::int64_t hkv;
+    std::int64_t d_head;
+    const char* arch;
+  };
+  const AttnCase cases[] = {
+      {128, 32, 4, 64, "TinyLlama"},    {512, 32, 4, 64, "TinyLlama"},
+      {1024, 32, 4, 64, "TinyLlama"},   {2048, 32, 4, 64, "TinyLlama"},
+      {2048, 32, 32, 128, "Llama2-7B"},
+  };
+
+  for (const AttnCase& c : cases) {
+    const std::size_t q_elems = static_cast<std::size_t>(c.s * c.hq * c.d_head);
+    const std::size_t kv_elems = static_cast<std::size_t>(c.hkv * c.s * c.d_head);
+    const std::size_t scores_bytes =
+        static_cast<std::size_t>(c.hq * c.s * c.s) * sizeof(float);
+
+    const auto h_q = random_host_half(q_elems, 11u);
+    const auto h_k = random_host_half(kv_elems, 22u);
+    const auto h_v = random_host_half(kv_elems, 33u);
+
+    const std::size_t io_set_bytes = (q_elems * 2 + kv_elems * 2) * sizeof(engine::half);
+    const std::size_t kColdBytes = std::size_t{192} * 1024 * 1024;
+    const std::size_t num_buffers = std::min<std::size_t>(
+        32, std::max<std::size_t>(2, (kColdBytes + io_set_bytes - 1) / io_set_bytes));
+
+    std::vector<DeviceBuffer<engine::half>> d_qs, d_ks, d_vs, d_outs;
+    d_qs.reserve(num_buffers);
+    d_ks.reserve(num_buffers);
+    d_vs.reserve(num_buffers);
+    d_outs.reserve(num_buffers);
+    for (std::size_t b = 0; b < num_buffers; ++b) {
+      d_qs.emplace_back(h_q);
+      d_ks.emplace_back(h_k);
+      d_vs.emplace_back(h_v);
+      d_outs.emplace_back(q_elems);
+    }
+
+    // Causal attention FLOPs (lower triangle only): 4 * H_q * S*(S+1)/2 * D.
+    const double flops = 2.0 * d(c.hq) * (d(c.s) * d(c.s + 1)) * d(c.d_head);
+    // Ideal FlashAttention DRAM I/O: read Q, K, V once + write Out once.
+    const double ideal_bytes = static_cast<double>(sizeof(engine::half)) *
+                               (2.0 * d(c.hq) + 2.0 * d(c.hkv)) * d(c.s) * d(c.d_head);
+    const float scale = 1.0f / std::sqrt(static_cast<float>(c.d_head));
+
+    char size_label[96];
+    std::snprintf(size_label, sizeof(size_label),
+                  "%s S=%lld H=%lld/%lld D=%lld (%s scores)", c.arch,
+                  static_cast<long long>(c.s), static_cast<long long>(c.hq),
+                  static_cast<long long>(c.hkv), static_cast<long long>(c.d_head),
+                  mib(scores_bytes).c_str());
+
+    std::size_t iter = 0;
+    t.measure_gpu(
+        "attention_naive", size_label, flops, ideal_bytes,
+        [&] {
+          const std::size_t idx = iter % num_buffers;
+          ++iter;
+          engine::cuda::attention_naive(
+              d_qs[idx].get(), d_ks[idx].get(), d_vs[idx].get(), d_outs[idx].get(), c.s,
+              c.s, c.hq, c.hkv, c.d_head, c.s * c.d_head, scale, 0, true, nullptr);
+        },
+        /*warmup=*/5, reps);
+  }
+}
+
 void warmup_gpu(double seconds) {
   if (seconds <= 0.0) return;
   constexpr std::int64_t N = 1024;
@@ -865,16 +934,20 @@ void warmup_gpu(double seconds) {
 int main(int argc, char** argv) {
   bool quick = false;
   bool json_output = false;
+  std::string filter;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     if (arg == "--quick") {
       quick = true;
     } else if (arg == "--json") {
       json_output = true;
+    } else if (arg.rfind("--filter=", 0) == 0) {
+      filter = arg.substr(9);
     } else if (arg == "--help" || arg == "-h") {
-      std::printf("usage: bench_kernels [--quick] [--json]\n");
-      std::printf("  --quick   fewer repetitions, skips 4096^3 matmul\n");
-      std::printf("  --json    output results as machine-readable JSON\n");
+      std::printf("usage: bench_kernels [--quick] [--json] [--filter=<name>]\n");
+      std::printf("  --quick          fewer repetitions, skips 4096^3 matmul\n");
+      std::printf("  --json           output results as machine-readable JSON\n");
+      std::printf("  --filter=<name>  run only sections matching <name>\n");
       return 0;
     } else {
       std::fprintf(stderr, "unknown argument: %s\n", arg.c_str());
@@ -906,17 +979,21 @@ int main(int argc, char** argv) {
   warmup_gpu(quick ? 1.0 : 1.5);
 
   Table t("Kernel benchmarks");
-  bench_launch_overhead(t, reps);
-  bench_vector_add(t, reps);
-  bench_reduce_sum(t, reps);
-  bench_softmax(t, reps);
-  bench_rmsnorm(t, reps);
-  bench_matmul(t, reps, /*include_large=*/!quick);
-  bench_gemv(t, reps);
-  bench_residual_rmsnorm(t, reps);
-  bench_rmsnorm_linear(t, reps);
-  bench_missing_kernels(t, reps);
-  bench_swiglu(t, reps);
+  const auto want = [&](const char* name) {
+    return filter.empty() || std::string(name).find(filter) != std::string::npos;
+  };
+  if (want("launch_overhead")) bench_launch_overhead(t, reps);
+  if (want("vector_add")) bench_vector_add(t, reps);
+  if (want("reduce_sum")) bench_reduce_sum(t, reps);
+  if (want("softmax")) bench_softmax(t, reps);
+  if (want("rmsnorm")) bench_rmsnorm(t, reps);
+  if (want("matmul")) bench_matmul(t, reps, /*include_large=*/!quick);
+  if (want("gemv")) bench_gemv(t, reps);
+  if (want("residual_rmsnorm")) bench_residual_rmsnorm(t, reps);
+  if (want("rmsnorm_linear")) bench_rmsnorm_linear(t, reps);
+  if (want("missing")) bench_missing_kernels(t, reps);
+  if (want("swiglu")) bench_swiglu(t, reps);
+  if (want("attention_naive")) bench_attention_naive(t, reps);
 
   if (json_output) {
     t.print_json(std::cout);
