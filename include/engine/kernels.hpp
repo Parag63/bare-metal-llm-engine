@@ -25,6 +25,7 @@
 
 #if ENGINE_HAS_CUDA
 
+#include <engine/attention_types.hpp>
 #include <engine/half.hpp>
 #include <cuda_runtime.h>
 
@@ -139,6 +140,36 @@ void swiglu(const float* gate, const float* up, float* out, std::int64_t n,
             cudaStream_t stream = 0);
 void swiglu_fp16(const half* gate, const half* up, half* out, std::int64_t n,
                  cudaStream_t stream = 0);
+
+/// Naive FP16 attention baseline (materializes [n_heads, s_q, s_kv] FP32 scores).
+void attention_naive(const half* q, const half* k, const half* v, half* out,
+                     std::int64_t s_q, std::int64_t s_kv, std::int64_t n_heads,
+                     std::int64_t n_kv_heads, std::int64_t head_dim,
+                     std::int64_t kv_head_stride, float scale,
+                     std::int64_t q_pos_offset = 0, bool is_causal = true,
+                     float* out_lse = nullptr, cudaStream_t stream = 0);
+
+/// FlashAttention-2 fused tiled prefill (O(N) SRAM online softmax, causal skip).
+void attention_prefill(const half* q, const half* k, const half* v, half* out,
+                       std::int64_t s_q, std::int64_t s_kv, std::int64_t n_heads,
+                       std::int64_t n_kv_heads, std::int64_t head_dim,
+                       std::int64_t kv_head_stride, float scale,
+                       std::int64_t q_pos_offset = 0, bool is_causal = true,
+                       float* out_lse = nullptr, cudaStream_t stream = 0);
+
+/// Single-token decode attention with Split-KV FlashDecoding (ADR-0013).
+void attention_decode(const half* q, const half* k, const half* v, half* out,
+                      std::int64_t kv_len, std::int64_t n_heads, std::int64_t n_kv_heads,
+                      std::int64_t head_dim, std::int64_t kv_head_stride, float scale,
+                      int split_kv = 0, cudaStream_t stream = 0);
+
+/// In-place Rotary Position Embedding on token-major Q [s, n_heads, D] and
+/// K [s, n_kv_heads, D] using precomputed [max_seq, D/2] FP32 cos/sin tables.
+void rope(half* q, half* k, const float* cos_table, const float* sin_table,
+          std::int64_t s, std::int64_t n_heads, std::int64_t n_kv_heads,
+          std::int64_t head_dim, std::int64_t pos_offset = 0,
+          RopeConvention convention = RopeConvention::RotateHalf,
+          cudaStream_t stream = 0);
 
 }  // namespace engine::cuda
 

@@ -136,6 +136,8 @@ set(ENGINE_SOURCES
   src/cpu_ref/embedding_cpu.cpp
   src/cpu_ref/argmax_cpu.cpp
   src/cpu_ref/swiglu_cpu.cpp
+  src/cpu_ref/attention_cpu.cpp
+  src/cpu_ref/rope_cpu.cpp
   src/pool_allocator.cpp
   src/cuda_stream.cpp
 )
@@ -155,6 +157,10 @@ set(ENGINE_CUDA_SOURCES
   kernels/swiglu.cu
   kernels/residual_rmsnorm.cu
   kernels/rmsnorm_linear.cu
+  kernels/attention_naive.cu
+  kernels/rope.cu
+  kernels/attention_prefill.cu
+  kernels/attention_decode.cu
 )
 
 if(ENGINE_CUDA_ENABLED)

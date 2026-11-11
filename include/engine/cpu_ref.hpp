@@ -17,6 +17,7 @@
 //   of matmul bugs, so it is stated once here and never varied.
 //===----------------------------------------------------------------------===//
 
+#include <engine/attention_types.hpp>
 #include <engine/half.hpp>
 #include <cstdint>
 
@@ -113,5 +114,33 @@ std::int32_t argmax_fp16(const half* logits, std::int64_t vocab_size);
 /// SwiGLU activation: out[i] = SiLU(gate[i]) * up[i] = (gate[i] / (1 + exp(-gate[i]))) * up[i].
 void swiglu(const float* gate, const float* up, float* out, std::int64_t n);
 void swiglu_fp16(const half* gate, const half* up, half* out, std::int64_t n);
+
+/// Causal/non-causal MHA/GQA attention (two-pass FP64 oracle).
+/// Layouts: Q/out [s_q, n_heads, head_dim], K/V [n_kv_heads, kv_stride_seq, head_dim]
+/// with kv_head_stride elements between consecutive KV heads.
+void attention(const half* q, const half* k, const half* v, half* out, std::int64_t s_q,
+               std::int64_t s_kv, std::int64_t n_heads, std::int64_t n_kv_heads,
+               std::int64_t head_dim, std::int64_t kv_head_stride, float scale,
+               std::int64_t q_pos_offset = 0, bool is_causal = true,
+               float* out_lse = nullptr);
+
+/// Scalar tiled online-softmax CPU oracle matching FlashAttention-2 recurrence.
+void attention_online(const half* q, const half* k, const half* v, half* out,
+                      std::int64_t s_q, std::int64_t s_kv, std::int64_t n_heads,
+                      std::int64_t n_kv_heads, std::int64_t head_dim,
+                      std::int64_t kv_head_stride, float scale,
+                      std::int64_t q_pos_offset = 0, bool is_causal = true,
+                      float* out_lse = nullptr);
+
+/// Precomputes [max_seq_len, head_dim / 2] RoPE cos/sin tables in FP64 -> FP32.
+void rope_precompute_tables(float* cos_table, float* sin_table, std::int64_t max_seq_len,
+                            std::int64_t head_dim, float theta = 10000.0f);
+
+/// In-place Rotary Position Embedding on token-major Q [s, n_heads, head_dim]
+/// and K [s, n_kv_heads, head_dim] (k may be nullptr iff n_kv_heads == 0).
+void rope(half* q, half* k, const float* cos_table, const float* sin_table,
+          std::int64_t s, std::int64_t n_heads, std::int64_t n_kv_heads,
+          std::int64_t head_dim, std::int64_t pos_offset = 0,
+          RopeConvention convention = RopeConvention::RotateHalf);
 
 }  // namespace engine::cpu

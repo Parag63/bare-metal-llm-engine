@@ -25,6 +25,7 @@
 
 #include <engine/cpu_ref.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <limits>
@@ -160,6 +161,59 @@ const std::int64_t kSwigluSizes[] = {1, 65, 1024, 4096, 11008};
 
 constexpr double kFp16Rtol = 2e-3;
 constexpr double kFp16Atol = 1e-3;
+
+// Derived error tolerance for FP16-input, FP32-accumulate attention vs FP64 golden:
+//   * binary16 machine epsilon eps16 = 2^-10 = 9.765625e-4 (unit roundoff u16 = 2^-11).
+//   * Final FP16 output cast incurs <= 0.5 * eps16 relative error; pre-cast FP32
+//     softmax & PV accumulation adds O(s_kv * u32) (where u32 = 2^-23) plus at most
+//     1-ulp binary16 tie-boundary flip (2 * eps16 relative slack, 1.5 * eps16 floor).
+inline double attention_rtol() { return 2.0 * std::ldexp(1.0, -10); }
+inline double attention_atol(std::int64_t s_kv) {
+  return 1.5 * std::ldexp(1.0, -10) +
+         4.0 * static_cast<double>(s_kv) * std::ldexp(1.0, -23);
+}
+inline double lse_rtol() { return 2e-5; }
+inline double lse_atol(std::int64_t s_kv) {
+  return 2e-5 + 4.0 * static_cast<double>(s_kv) * std::ldexp(1.0, -23);
+}
+
+struct AttentionCase {
+  const char* name;
+  std::int64_t s_q, s_kv, n_heads, n_kv_heads, head_dim, q_pos_offset;
+  bool is_causal;
+};
+
+const AttentionCase kAttentionCases[] = {
+    {"s1_h1_d64_causal", 1, 1, 1, 1, 64, 0, true},
+    {"s1_kv31_h4_d64_nocausal", 1, 31, 4, 4, 64, 0, false},
+    {"s17_h8_kv2_d64_causal", 17, 17, 8, 2, 64, 0, true},
+    {"s33_kv65_h8_kv2_d128_off32_causal", 33, 65, 8, 2, 128, 32, true},
+    {"s64_h8_d64_causal", 64, 64, 8, 8, 64, 0, true},
+    {"s128_h16_kv4_d128_causal", 128, 128, 16, 4, 128, 0, true},
+    {"s16_h32_kv4_d64_causal", 16, 16, 32, 4, 64, 0, true},
+    {"s1_kv257_h32_kv4_d64_decode", 1, 257, 32, 4, 64, 256, false},
+    {"s1_kv513_h8_kv2_d128_decode", 1, 513, 8, 2, 128, 512, false},
+    {"s16_kv32_h4_d64_stress_causal", 16, 32, 4, 4, 64, 0, true},
+};
+
+struct RopeCase {
+  const char* name;
+  std::int64_t s, n_heads, n_kv_heads, head_dim, pos_offset;
+  engine::RopeConvention convention;
+};
+
+const RopeCase kRopeCases[] = {
+    {"s8_h4_kv2_d64_pos0_half", 8, 4, 2, 64, 0, engine::RopeConvention::RotateHalf},
+    {"s8_h4_kv2_d64_pos0_adj", 8, 4, 2, 64, 0, engine::RopeConvention::AdjacentPair},
+    {"s17_h8_kv2_d128_pos137_half", 17, 8, 2, 128, 137,
+     engine::RopeConvention::RotateHalf},
+    {"s4_h4_d64_pos2047_half", 4, 4, 4, 64, 2047, engine::RopeConvention::RotateHalf},
+    {"s4_h4_d64_pos2047_adj", 4, 4, 4, 64, 2047, engine::RopeConvention::AdjacentPair},
+    {"s4_h4_kv2_d128_pos99998_half", 4, 4, 2, 128, 99998,
+     engine::RopeConvention::RotateHalf},
+    {"s4_h4_kv2_d128_pos99998_adj", 4, 4, 2, 128, 99998,
+     engine::RopeConvention::AdjacentPair},
+};
 
 std::vector<engine::half> to_half_vec(const std::vector<float>& src) {
   std::vector<engine::half> out(src.size());
@@ -881,4 +935,208 @@ TEST(cpu_ref, swiglu_fp16_matches_reference) {
     const auto out_f = to_float_vec(out);
     CHECK_CASE(stem, out_f.data(), exp.data.data(), out_f.size(), kFp16Rtol, kFp16Atol);
   }
+}
+
+//===----------------------------------------------------------------------===//
+// Module 4 -- Attention and RoPE CPU reference tests
+//===----------------------------------------------------------------------===//
+
+TEST(cpu_ref, attention_matches_reference) {
+  for (const auto& c : kAttentionCases) {
+    const std::string stem = std::string("attention__") + c.name;
+    LOAD_GOLDEN(g, stem);
+
+    const auto q = to_half_vec(g.at("q").data);
+    const auto k = to_half_vec(g.at("k").data);
+    const auto v = to_half_vec(g.at("v").data);
+    const auto& exp = g.at("expected");
+    const auto& exp_lse = g.at("lse");
+
+    const std::size_t out_n = static_cast<std::size_t>(c.s_q * c.n_heads * c.head_dim);
+    const std::size_t lse_n = static_cast<std::size_t>(c.s_q * c.n_heads);
+    std::vector<engine::half> out(out_n, engine::float_to_half(0.0f));
+    std::vector<float> lse(lse_n, 0.0f);
+
+    const float scale = 1.0f / std::sqrt(static_cast<float>(c.head_dim));
+    const std::int64_t kv_head_stride = c.s_kv * c.head_dim;
+
+    engine::cpu::attention(q.data(), k.data(), v.data(), out.data(), c.s_q, c.s_kv,
+                           c.n_heads, c.n_kv_heads, c.head_dim, kv_head_stride, scale,
+                           c.q_pos_offset, c.is_causal, lse.data());
+
+    const auto out_f = to_float_vec(out);
+    CHECK_CASE(stem, out_f.data(), exp.data.data(), out_f.size(), attention_rtol(),
+               attention_atol(c.s_kv));
+    CHECK_CASE(stem + " (lse)", lse.data(), exp_lse.data.data(), lse.size(), lse_rtol(),
+               lse_atol(c.s_kv));
+  }
+}
+
+TEST(cpu_ref, attention_online_matches_reference_and_two_pass) {
+  for (const auto& c : kAttentionCases) {
+    const std::string stem = std::string("attention__") + c.name;
+    LOAD_GOLDEN(g, stem);
+
+    const auto q = to_half_vec(g.at("q").data);
+    const auto k = to_half_vec(g.at("k").data);
+    const auto v = to_half_vec(g.at("v").data);
+    const auto& exp = g.at("expected");
+
+    const std::size_t out_n = static_cast<std::size_t>(c.s_q * c.n_heads * c.head_dim);
+    const std::size_t lse_n = static_cast<std::size_t>(c.s_q * c.n_heads);
+    std::vector<engine::half> out_two(out_n), out_online(out_n);
+    std::vector<float> lse_two(lse_n), lse_online(lse_n);
+
+    const float scale = 1.0f / std::sqrt(static_cast<float>(c.head_dim));
+    const std::int64_t kv_head_stride = c.s_kv * c.head_dim;
+
+    engine::cpu::attention(q.data(), k.data(), v.data(), out_two.data(), c.s_q, c.s_kv,
+                           c.n_heads, c.n_kv_heads, c.head_dim, kv_head_stride, scale,
+                           c.q_pos_offset, c.is_causal, lse_two.data());
+    engine::cpu::attention_online(q.data(), k.data(), v.data(), out_online.data(), c.s_q,
+                                  c.s_kv, c.n_heads, c.n_kv_heads, c.head_dim,
+                                  kv_head_stride, scale, c.q_pos_offset, c.is_causal,
+                                  lse_online.data());
+
+    const auto online_f = to_float_vec(out_online);
+    const auto two_f = to_float_vec(out_two);
+    CHECK_CASE(stem + " (online vs golden)", online_f.data(), exp.data.data(),
+               online_f.size(), attention_rtol(), attention_atol(c.s_kv));
+    // Two FP64 passes vs tiled online recurrence must agree up to FP16 tie rounding.
+    CHECK_CASE(stem + " (online vs two-pass)", online_f.data(), two_f.data(),
+               online_f.size(), attention_rtol(), attention_atol(c.s_kv));
+    CHECK_CASE(stem + " (online LSE vs two-pass)", lse_online.data(), lse_two.data(),
+               lse_online.size(), 1e-6, 1e-6);
+  }
+}
+
+TEST(cpu_ref, attention_contracts_and_edge_cases) {
+  const std::int64_t D = 64;
+  const std::int64_t H_q = 4, H_kv = 2;
+  const float scale = 1.0f / std::sqrt(static_cast<float>(D));
+  const engine::half h_poison = engine::float_to_half(9.5f);
+
+  // s_q == 0 is a legal no-op (must not touch output buffer).
+  {
+    std::vector<engine::half> buf(static_cast<std::size_t>(2 * H_q * D), h_poison);
+    engine::cpu::attention(buf.data(), buf.data(), buf.data(), buf.data(), 0, 4, H_q,
+                           H_kv, D, 4 * D, scale);
+    for (engine::half h : buf) {
+      EXPECT_EQ(engine::half_to_float(h), 9.5f);
+    }
+  }
+
+  // s_kv == 0 with s_q > 0 zero-fills out and sets lse to -inf.
+  {
+    const std::int64_t s_q = 3;
+    std::vector<engine::half> dummy(static_cast<std::size_t>(s_q * H_q * D), h_poison);
+    std::vector<engine::half> out(static_cast<std::size_t>(s_q * H_q * D), h_poison);
+    std::vector<float> lse(static_cast<std::size_t>(s_q * H_q), 42.0f);
+    engine::cpu::attention(dummy.data(), dummy.data(), dummy.data(), out.data(), s_q, 0,
+                           H_q, H_kv, D, 0, scale, 0, true, lse.data());
+    for (engine::half h : out) {
+      EXPECT_EQ(engine::half_to_float(h), 0.0f);
+    }
+    for (float v : lse) {
+      EXPECT_TRUE(std::isinf(v) && v < 0.0f);
+    }
+  }
+
+  // Non-contiguous KV cache stride > s_kv * D must ignore poisoned inactive slots.
+  {
+    LOAD_GOLDEN(g, "attention__s17_h8_kv2_d64_causal");
+    const auto q = to_half_vec(g.at("q").data);
+    const auto k_pack = to_half_vec(g.at("k").data);
+    const auto v_pack = to_half_vec(g.at("v").data);
+    const std::int64_t s_q = 17, s_kv = 17, hq = 8, hkv = 2, max_seq = 40;
+    const engine::half h_nan =
+        engine::float_to_half(std::numeric_limits<float>::quiet_NaN());
+
+    std::vector<engine::half> k_cache(static_cast<std::size_t>(hkv * max_seq * D), h_nan);
+    std::vector<engine::half> v_cache(static_cast<std::size_t>(hkv * max_seq * D), h_nan);
+    for (std::int64_t hk = 0; hk < hkv; ++hk) {
+      std::copy_n(k_pack.data() + hk * s_kv * D, static_cast<std::size_t>(s_kv * D),
+                  k_cache.data() + hk * max_seq * D);
+      std::copy_n(v_pack.data() + hk * s_kv * D, static_cast<std::size_t>(s_kv * D),
+                  v_cache.data() + hk * max_seq * D);
+    }
+
+    std::vector<engine::half> out(q.size());
+    engine::cpu::attention(q.data(), k_cache.data(), v_cache.data(), out.data(), s_q,
+                           s_kv, hq, hkv, D, max_seq * D, scale, 0, true);
+    const auto out_f = to_float_vec(out);
+    CHECK_CASE("cpu attention strided KV cache", out_f.data(),
+               g.at("expected").data.data(), out_f.size(), attention_rtol(),
+               attention_atol(s_kv));
+  }
+
+  // Parameter validation errors.
+  std::vector<engine::half> buf(static_cast<std::size_t>(H_q * 4 * D), h_poison);
+  engine::half* p = buf.data();
+  EXPECT_THROWS(
+      engine::cpu::attention(nullptr, p, p, p, 1, 2, H_q, H_kv, D, 2 * D, scale));
+  EXPECT_THROWS(
+      engine::cpu::attention(p, nullptr, p, p, 1, 2, H_q, H_kv, D, 2 * D, scale));
+  EXPECT_THROWS(
+      engine::cpu::attention(p, p, nullptr, p, 1, 2, H_q, H_kv, D, 2 * D, scale));
+  EXPECT_THROWS(
+      engine::cpu::attention(p, p, p, nullptr, 1, 2, H_q, H_kv, D, 2 * D, scale));
+  EXPECT_THROWS(engine::cpu::attention(p, p, p, p, 1, 2, 6, 4, D, 2 * D, scale));
+  EXPECT_THROWS(engine::cpu::attention(p, p, p, p, 1, 2, H_q, H_kv, 32, 2 * 32, scale));
+  EXPECT_THROWS(engine::cpu::attention(p, p, p, p, -1, 2, H_q, H_kv, D, 2 * D, scale));
+  EXPECT_THROWS(engine::cpu::attention(p, p, p, p, 1, -1, H_q, H_kv, D, 2 * D, scale));
+  EXPECT_THROWS(engine::cpu::attention(p, p, p, p, 1, 4, H_q, H_kv, D, 2 * D, scale));
+  EXPECT_THROWS(engine::cpu::attention_online(p, p, p, p, 1, 2, 6, 4, D, 2 * D, scale));
+}
+
+TEST(cpu_ref, rope_matches_reference) {
+  for (const auto& c : kRopeCases) {
+    const std::string stem = std::string("rope__") + c.name;
+    LOAD_GOLDEN(g, stem);
+
+    auto q = to_half_vec(g.at("q_in").data);
+    auto k = to_half_vec(g.at("k_in").data);
+    const auto& exp_cos = g.at("cos").data;
+    const auto& exp_sin = g.at("sin").data;
+    const auto& exp_q = g.at("expected").data;
+    const auto& exp_k = g.at("k_out").data;
+
+    // Verify table precomputation across [pos_offset, pos_offset + s) including
+    // large positions like pos=100000 where FP32 phase arithmetic drifts.
+    const std::int64_t half_d = c.head_dim / 2;
+    const std::int64_t max_seq = c.pos_offset + c.s;
+    std::vector<float> cos_table(static_cast<std::size_t>(max_seq * half_d));
+    std::vector<float> sin_table(static_cast<std::size_t>(max_seq * half_d));
+    engine::cpu::rope_precompute_tables(cos_table.data(), sin_table.data(), max_seq,
+                                        c.head_dim, 10000.0f);
+
+    const std::size_t slice_off = static_cast<std::size_t>(c.pos_offset * half_d);
+    CHECK_CASE(stem + " (cos)", cos_table.data() + slice_off, exp_cos.data(),
+               exp_cos.size(), 1e-6, 1e-6);
+    CHECK_CASE(stem + " (sin)", sin_table.data() + slice_off, exp_sin.data(),
+               exp_sin.size(), 1e-6, 1e-6);
+
+    engine::cpu::rope(q.data(), k.data(), cos_table.data(), sin_table.data(), c.s,
+                      c.n_heads, c.n_kv_heads, c.head_dim, c.pos_offset, c.convention);
+
+    const auto q_f = to_float_vec(q);
+    const auto k_f = to_float_vec(k);
+    CHECK_CASE(stem + " (q)", q_f.data(), exp_q.data(), q_f.size(), attention_rtol(),
+               attention_atol(1));
+    CHECK_CASE(stem + " (k)", k_f.data(), exp_k.data(), k_f.size(), attention_rtol(),
+               attention_atol(1));
+  }
+
+  // Contract checks: s == 0 no-op, nullable k when n_kv_heads == 0, invalid dims/ptrs.
+  std::vector<engine::half> q_buf(64, engine::float_to_half(1.25f));
+  std::vector<float> tab(64, 1.0f);
+  engine::cpu::rope(q_buf.data(), nullptr, tab.data(), tab.data(), 0, 1, 0, 64);
+  EXPECT_EQ(engine::half_to_float(q_buf[0]), 1.25f);
+  engine::cpu::rope(q_buf.data(), nullptr, tab.data(), tab.data(), 1, 1, 0, 64);
+  EXPECT_THROWS(
+      engine::cpu::rope(q_buf.data(), nullptr, tab.data(), tab.data(), 1, 1, 1, 64));
+  EXPECT_THROWS(
+      engine::cpu::rope(q_buf.data(), q_buf.data(), tab.data(), tab.data(), 1, 1, 1, 48));
+  EXPECT_THROWS(engine::cpu::rope(q_buf.data(), q_buf.data(), tab.data(), tab.data(), 1,
+                                  1, 1, 64, -1));
 }

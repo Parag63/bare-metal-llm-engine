@@ -162,6 +162,74 @@ class NumpyBackend:
         sigmoid = np.where(g64 >= 0.0, 1.0 / (1.0 + exp_neg), exp_neg / (1.0 + exp_neg))
         return (g64 * sigmoid) * u64
 
+    @staticmethod
+    def rope_tables(max_seq_len, head_dim, theta=10000.0):
+        half_d = head_dim // 2
+        i = np.arange(half_d, dtype=np.float64)
+        inv_freq = float(theta) ** (-2.0 * i / float(head_dim))
+        pos = np.arange(max_seq_len, dtype=np.float64)[:, None]
+        angles = pos * inv_freq[None, :]
+        return np.cos(angles), np.sin(angles)
+
+    @staticmethod
+    def rope(q, k, cos, sin, convention):
+        # q: [s, n_heads, head_dim], k: [s, n_kv_heads, head_dim], cos/sin: [s, half_d]
+        def apply_one(x):
+            x64 = x.astype(np.float64)
+            c = cos[:, None, :]
+            s = sin[:, None, :]
+            half_d = x64.shape[-1] // 2
+            if convention == "rotate_half":
+                x0 = x64[..., :half_d]
+                x1 = x64[..., half_d:]
+                return np.concatenate([x0 * c - x1 * s, x0 * s + x1 * c], axis=-1)
+            else:
+                x0 = x64[..., 0::2]
+                x1 = x64[..., 1::2]
+                out = np.empty_like(x64)
+                out[..., 0::2] = x0 * c - x1 * s
+                out[..., 1::2] = x0 * s + x1 * c
+                return out
+
+        return apply_one(q), apply_one(k)
+
+    @staticmethod
+    def attention(q, k, v, scale, q_pos_offset, is_causal):
+        # q: [s_q, n_heads, head_dim], k/v: [n_kv_heads, s_kv, head_dim]
+        q64 = q.astype(np.float64)
+        k64 = k.astype(np.float64)
+        v64 = v.astype(np.float64)
+        s_q, n_heads, head_dim = q64.shape
+        n_kv_heads, s_kv, _ = k64.shape
+        group = n_heads // n_kv_heads
+        out = np.zeros((s_q, n_heads, head_dim), dtype=np.float64)
+        lse = np.full((s_q, n_heads), -np.inf, dtype=np.float64)
+
+        k_exp = np.repeat(k64, group, axis=0)  # [n_heads, s_kv, head_dim]
+        v_exp = np.repeat(v64, group, axis=0)  # [n_heads, s_kv, head_dim]
+        # scores: [n_heads, s_q, s_kv]
+        scores = np.einsum("qhd,hkd->hqk", q64, k_exp) * float(scale)
+
+        if is_causal:
+            q_idx = np.arange(s_q, dtype=np.int64)[:, None] + q_pos_offset
+            k_idx = np.arange(s_kv, dtype=np.int64)[None, :]
+            mask = k_idx > q_idx
+            scores = np.where(mask[None, :, :], -np.inf, scores)
+
+        for h in range(n_heads):
+            for i in range(s_q):
+                row = scores[h, i]
+                m = np.max(row)
+                if not np.isfinite(m) and m < 0.0:
+                    continue
+                w = np.exp(row - m)
+                s_exp = np.sum(w)
+                if s_exp == 0.0:
+                    continue
+                out[i, h] = (w / s_exp) @ v_exp[h]
+                lse[i, h] = m + np.log(s_exp)
+        return out, lse
+
 
 class TorchBackend:
     name = "torch"
@@ -233,6 +301,52 @@ class TorchBackend:
     def swiglu(self, gate, up):
         t = self.torch
         return (t.nn.functional.silu(self._t(gate)) * self._t(up)).numpy()
+
+    def rope(self, q, k, cos, sin, convention):
+        t = self.torch
+
+        def apply_one(x):
+            xt = self._t(x)
+            ct = t.from_numpy(cos.astype(np.float64))[:, None, :]
+            st = t.from_numpy(sin.astype(np.float64))[:, None, :]
+            half_d = xt.shape[-1] // 2
+            if convention == "rotate_half":
+                x0 = xt[..., :half_d]
+                x1 = xt[..., half_d:]
+                return t.cat([x0 * ct - x1 * st, x0 * st + x1 * ct], dim=-1).numpy()
+            x0 = xt[..., 0::2]
+            x1 = xt[..., 1::2]
+            out = t.empty_like(xt)
+            out[..., 0::2] = x0 * ct - x1 * st
+            out[..., 1::2] = x0 * st + x1 * ct
+            return out.numpy()
+
+        return apply_one(q), apply_one(k)
+
+    def attention(self, q, k, v, scale, q_pos_offset, is_causal):
+        t = self.torch
+        q_t = self._t(q).permute(1, 0, 2)  # [H_q, s_q, D]
+        k_t = self._t(k)  # [H_kv, s_kv, D]
+        v_t = self._t(v)
+        n_heads, s_q, _ = q_t.shape
+        n_kv_heads, s_kv, _ = k_t.shape
+        group = n_heads // n_kv_heads
+        if group > 1:
+            k_t = k_t.repeat_interleave(group, dim=0)
+            v_t = v_t.repeat_interleave(group, dim=0)
+        scores = t.matmul(q_t, k_t.transpose(-2, -1)) * float(scale)
+        if is_causal:
+            q_idx = t.arange(s_q, dtype=t.int64)[:, None] + q_pos_offset
+            k_idx = t.arange(s_kv, dtype=t.int64)[None, :]
+            scores = scores.masked_fill((k_idx > q_idx)[None, :, :], float("-inf"))
+        m = scores.amax(dim=-1, keepdim=True)
+        w = t.exp(scores - m)
+        w = t.where(t.isfinite(m), w, t.zeros_like(w))
+        s_exp = w.sum(dim=-1, keepdim=True)
+        probs = t.where(s_exp > 0, w / s_exp, t.zeros_like(w))
+        out = t.matmul(probs, v_t).permute(1, 0, 2)
+        lse = (m.squeeze(-1) + t.log(s_exp.squeeze(-1))).permute(1, 0)
+        return out.numpy(), lse.numpy()
 
 
 def select_backend(requested: str):
@@ -335,6 +449,32 @@ EMBEDDING_SHAPES = [
 ARGMAX_SIZES = [1, 31, 512, 1025, 32000]
 
 SWIGLU_SIZES = [1, 65, 1024, 4096, 11008]
+
+# Module 4 -- RoPE cases: (name, s, n_heads, n_kv_heads, head_dim, pos_offset, convention)
+ROPE_CASES = [
+    ("s8_h4_kv2_d64_pos0_half", 8, 4, 2, 64, 0, "rotate_half"),
+    ("s8_h4_kv2_d64_pos0_adj", 8, 4, 2, 64, 0, "adjacent_pair"),
+    ("s17_h8_kv2_d128_pos137_half", 17, 8, 2, 128, 137, "rotate_half"),
+    ("s4_h4_d64_pos2047_half", 4, 4, 4, 64, 2047, "rotate_half"),
+    ("s4_h4_d64_pos2047_adj", 4, 4, 4, 64, 2047, "adjacent_pair"),
+    ("s4_h4_kv2_d128_pos99998_half", 4, 4, 2, 128, 99998, "rotate_half"),
+    ("s4_h4_kv2_d128_pos99998_adj", 4, 4, 2, 128, 99998, "adjacent_pair"),
+]
+
+# Module 4 -- Attention cases:
+# (name, s_q, s_kv, n_heads, n_kv_heads, head_dim, q_pos_offset, is_causal, qk_amp)
+ATTENTION_CASES = [
+    ("s1_h1_d64_causal", 1, 1, 1, 1, 64, 0, True, 1.0),
+    ("s1_kv31_h4_d64_nocausal", 1, 31, 4, 4, 64, 0, False, 1.0),
+    ("s17_h8_kv2_d64_causal", 17, 17, 8, 2, 64, 0, True, 1.0),
+    ("s33_kv65_h8_kv2_d128_off32_causal", 33, 65, 8, 2, 128, 32, True, 1.0),
+    ("s64_h8_d64_causal", 64, 64, 8, 8, 64, 0, True, 1.0),
+    ("s128_h16_kv4_d128_causal", 128, 128, 16, 4, 128, 0, True, 1.0),
+    ("s16_h32_kv4_d64_causal", 16, 16, 32, 4, 64, 0, True, 1.0),
+    ("s1_kv257_h32_kv4_d64_decode", 1, 257, 32, 4, 64, 256, False, 1.0),
+    ("s1_kv513_h8_kv2_d128_decode", 1, 513, 8, 2, 128, 512, False, 1.0),
+    ("s16_kv32_h4_d64_stress_causal", 16, 32, 4, 4, 64, 0, True, 4.0),
+]
 
 
 def build_cases(rng, backend):
@@ -551,6 +691,41 @@ def build_cases(rng, backend):
             "gate": gate_f16,
             "up": up_f16,
             "expected": backend.swiglu(gate_f16, up_f16).astype(np.float16),
+        }
+
+    # --- Module 4: RoPE -----------------------------------------------------
+    for name, s, n_heads, n_kv_heads, head_dim, pos_offset, conv in ROPE_CASES:
+        q_in = rng.standard_normal((s, n_heads, head_dim), dtype=np.float32).astype(np.float16)
+        k_in = rng.standard_normal((s, n_kv_heads, head_dim), dtype=np.float32).astype(np.float16)
+        i_idx = np.arange(head_dim // 2, dtype=np.float64)
+        inv_freq = 10000.0 ** (-2.0 * i_idx / float(head_dim))
+        pos = np.arange(pos_offset, pos_offset + s, dtype=np.float64)[:, None]
+        angles = pos * inv_freq[None, :]
+        cos_slice = np.cos(angles)
+        sin_slice = np.sin(angles)
+        q_out, k_out = backend.rope(q_in, k_in, cos_slice, sin_slice, conv)
+        yield f"rope__{name}", {
+            "q_in": q_in,
+            "k_in": k_in,
+            "cos": cos_slice,
+            "sin": sin_slice,
+            "expected": q_out,
+            "k_out": k_out,
+        }
+
+    # --- Module 4: Attention ------------------------------------------------
+    for name, s_q, s_kv, n_heads, n_kv_heads, head_dim, q_pos_offset, is_causal, qk_amp in ATTENTION_CASES:
+        q = (rng.standard_normal((s_q, n_heads, head_dim), dtype=np.float32) * qk_amp).astype(np.float16)
+        k = (rng.standard_normal((n_kv_heads, s_kv, head_dim), dtype=np.float32) * qk_amp).astype(np.float16)
+        v = rng.standard_normal((n_kv_heads, s_kv, head_dim), dtype=np.float32).astype(np.float16)
+        scale = 1.0 / np.sqrt(float(head_dim))
+        expected, lse = backend.attention(q, k, v, scale, q_pos_offset, is_causal)
+        yield f"attention__{name}", {
+            "q": q,
+            "k": k,
+            "v": v,
+            "expected": expected,
+            "lse": lse,
         }
 
 
