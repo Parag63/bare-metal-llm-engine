@@ -143,6 +143,35 @@ def format_readme_table(data: dict) -> str:
     else:
         sw_str = "❌ Not found"
 
+    # 15. attention_naive
+    an = find_result(results, "attention_naive", "TinyLlama S=2048") or find_result(results, "attention_naive")
+    an_str = f"✅ {an['median_ms']:.2f} ms @ TinyLlama S=2048 ({an['gflops']:.0f} GFLOP/s)" if an else "❌ Not found"
+
+    # 16. rope
+    rp = find_result(results, "rope (RotateHalf)", "prefill S=2048 TinyLlama") or find_result(results, "rope (RotateHalf)", "prefill")
+    rp_str = f"✅ {rp['median_ms']:.3f} ms @ S=2048 ({rp['gbps']:.1f} GB/s, {rp['pct_peak_bw']:.1f}% peak)" if rp else "❌ Not found"
+
+    # 17. attention_prefill (FA2)
+    ap = find_result(results, "attention_prefill (FA2)", "TinyLlama S=4096") or find_result(results, "attention_prefill (FA2)", "TinyLlama S=2048")
+    an_4k = find_result(results, "attention_naive", "TinyLlama S=4096") or an
+    if ap and an_4k and ap.get("median_ms", 0) > 0:
+        ap_speedup = an_4k["median_ms"] / ap["median_ms"]
+        ap_str = f"✅ {ap['gflops']/1000:.2f} TFLOP/s @ S=4096 ({ap['median_ms']:.2f} ms, {ap_speedup:.1f}× vs naive)"
+    elif ap:
+        ap_str = f"✅ {ap['gflops']/1000:.2f} TFLOP/s ({ap['median_ms']:.2f} ms)"
+    else:
+        ap_str = "❌ Not found"
+
+    # 18. attention_decode (FlashDecoding)
+    ad_l2 = find_result(results, "attention_decode (FlashDecoding)", "Llama2-7B L=8192")
+    ad_tl = find_result(results, "attention_decode (FlashDecoding)", "TinyLlama L=32768")
+    if ad_l2 and ad_tl:
+        ad_str = f"✅ {ad_l2['gbps']:.1f} GB/s ({ad_l2['pct_peak_bw']:.1f}% peak, Llama2); {ad_tl['median_ms']:.3f} ms (TinyLlama 32k)"
+    elif ad_l2:
+        ad_str = f"✅ {ad_l2['gbps']:.1f} GB/s ({ad_l2['pct_peak_bw']:.1f}% peak)"
+    else:
+        ad_str = "❌ Not found"
+
     table_lines = [
         "| # | Kernel | New idea | GPU result |",
         "|---|---|---|---|",
@@ -160,6 +189,10 @@ def format_readme_table(data: dict) -> str:
         f"| 12 | `argmax` | greedy token sampling via 16-warp shuffle reduction | {am_str} |",
         f"| 13 | `matmul_register_tiled` | 2D register tiling (8x8 thread tile, outer products, float4) | {mrt_str} |",
         f"| 14 | `swiglu` | fused SiLU + elementwise multiply (40% memory traffic reduction) | {sw_str} |",
+        f"| 15 | `attention_naive` | causal FP16->FP32 GQA baseline (3-pass `[H, S, S]`) | {an_str} |",
+        f"| 16 | `rope` | in-place rotary embeddings (RotateHalf & AdjacentPair) | {rp_str} |",
+        f"| 17 | `attention_prefill` | FlashAttention-2 tiled online softmax + GQA SMEM reuse | {ap_str} |",
+        f"| 18 | `attention_decode` | FlashDecoding split-KV + warp-per-head GQA broadcast | {ad_str} |",
     ]
     return "\n".join(table_lines)
 
@@ -178,7 +211,12 @@ def format_baselines_table(data: dict) -> str:
 
     sw_fused = find_result(results, "swiglu (fused FP32)", "512x11008")
     sw_unfused = find_result(results, "swiglu (unfused: silu+mul)", "512x11008")
-    
+
+    an_4k = find_result(results, "attention_naive", "TinyLlama S=4096")
+    ap_4k = find_result(results, "attention_prefill (FA2)", "TinyLlama S=4096")
+    ad_tl_s1 = find_result(results, "attention_decode (splits=1)", "TinyLlama L=32768")
+    ad_tl_fd = find_result(results, "attention_decode (FlashDecoding)", "TinyLlama L=32768")
+
     lines = [
         "### Benchmark Credibility & Baseline Verification",
         "",
@@ -196,6 +234,10 @@ def format_baselines_table(data: dict) -> str:
         lines.append(f"| **GEMV Cold DRAM vs Warm L2** | 1x4096x4096 (decode) | {gemv_warm['gbps']:.1f} GB/s (warm L2) | {gemv_cold['gbps']:.1f} GB/s (cold DRAM) | {gemv_cold['pct_peak_bw']:.1f}% peak DRAM (pure streaming via rotating weight buffers) |")
     if sw_fused and sw_unfused:
         lines.append(f"| **Fused vs Unfused SwiGLU** | 512x11008 (prefill MLP) | {sw_unfused['median_ms']:.3f} ms (unfused) | {sw_fused['median_ms']:.3f} ms (fused) | {sw_unfused['median_ms']/sw_fused['median_ms']:.2f}× speedup (12N vs 20N bytes DRAM traffic) |")
+    if an_4k and ap_4k:
+        lines.append(f"| **FlashAttention-2 vs Naive Prefill** | TinyLlama S=4096 (32/4, D=64) | {an_4k['median_ms']:.2f} ms (2 GiB scores) | {ap_4k['median_ms']:.2f} ms ({ap_4k['gflops']/1000:.2f} TFLOP/s) | {an_4k['median_ms']/ap_4k['median_ms']:.1f}× speedup (O(S) vs O(S²) DRAM via `ncu`) |")
+    if ad_tl_s1 and ad_tl_fd:
+        lines.append(f"| **FlashDecoding vs Single-Pass Decode** | TinyLlama L=32768 (32/4, D=64) | {ad_tl_s1['median_ms']:.2f} ms (splits=1) | {ad_tl_fd['median_ms']:.3f} ms ({ad_tl_fd['gbps']:.1f} GB/s) | {ad_tl_s1['median_ms']/ad_tl_fd['median_ms']:.1f}× speedup (split-KV + warp GQA broadcast) |")
     
     lines.append("| **llama-bench External Baseline** | TinyLlama-1.1B (Q4_K_M) | 18,512.0 t/s (pp512) | 391.2 t/s (tg128) | 4-bit quantized weights (~249 GB/s effective) |")
     lines.append("| **llama-bench External Baseline** | TinyLlama-1.1B (Q8_0) | 18,767.1 t/s (pp512) | 275.2 t/s (tg128) | 8-bit quantized weights (~300 GB/s effective) |")

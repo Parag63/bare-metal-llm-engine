@@ -39,7 +39,7 @@ Formal records of significant design decisions and their rationale.
 | [ADR-0010](adr/0010-multi-architecture-cuda-compilation.md) | Flexible architecture compilation | Flexible architecture specification with native SASS generation without PTX JIT overhead |
 | [ADR-0011](adr/0011-flashattention2-fp16-precision.md) | FlashAttention-2 FP16 precision | Attention starts natively in FP16 with FP32 online softmax accumulator to minimize shared memory |
 | [ADR-0012](adr/0012-attention-layouts-and-api.md) | Attention layouts & raw API | Token-major Q/Out, head-major KV cache with explicit stride, FP32 double-precomputed RoPE, edge contracts |
-| [ADR-0013](adr/0013-flashdecoding-split-kv.md) | FlashDecoding split-KV (stub) | Split-KV partitioning heuristic and GQA group-sharing across SMs during decode |
+| [ADR-0013](adr/0013-flashdecoding-split-kv.md) | FlashDecoding split-KV & GQA broadcast | Split-KV partitioning heuristic (`min_keys >= 512`), warp-per-head SMEM KV sharing (`66.7%` occ), and partial-LSE reduction |
 
 ### API Reference (to be added)
 

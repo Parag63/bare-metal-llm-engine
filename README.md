@@ -7,12 +7,11 @@ inference path.
 
 B.Tech CSE major project · Parag Das (2303344) · Jul 2026 – Jun 2027
 
-> **Status: Modules 1, 2 & 3 complete + Phase 4 Foundational Kernels. Moving to FlashAttention (Module 4).**
-> The tensor library, 14 hand-written CUDA kernels (including FP16 GEMV, fused SwiGLU, 2D register-tiled GEMM, embedding gather, and argmax), and the full
-> verification/benchmark infrastructure are implemented and verified. `passed 126  failed 0  pending 0` across
-> 8 test suites (`dtype`, `golden`, `cpu_ref`, `storage`, `tensor`, `allocator`, `kernels`, `all`) on the CUDA-enabled build (RTX 4070 SUPER, nvcc 12.6). Memory-bound
-> kernels achieve 85–94% of peak bandwidth (GEMV reaches 473.5 GB/s / 94.0% peak BW, beating cuBLAS by +13.7%);
-> 2D register-tiled matmul reaches 16,173 GFLOP/s at 4096³ (73.0% of cuBLAS).
+> **Status: Modules 1, 2, 3 & 4 complete (FlashAttention-2, FlashDecoding & RoPE). Moving to Quantization (Module 5).**
+> The tensor library, 18 hand-written CUDA kernels (including FlashAttention-2 prefill, FlashDecoding split-KV, RoPE, FP16 GEMV, fused SwiGLU, and 2D register-tiled GEMM), and the full
+> verification/benchmark infrastructure are implemented and verified. `passed 141  failed 0  pending 0` across
+> 8 test suites (`dtype`, `golden`, `cpu_ref`, `storage`, `tensor`, `allocator`, `kernels`, `all`) on the CUDA-enabled build (RTX 4070 SUPER, nvcc 12.6). Decode attention hits **463.6 GB/s (92.0% peak BW)** at `L=8192`,
+> FlashAttention-2 prefill reaches **14.0 TFLOP/s** at `S=4096` (**16.1×** faster than naive), and 2D register-tiled GEMM reaches **16.6+ TFLOP/s** at `4096³`.
 
 ## What "from scratch" means here
 
@@ -56,11 +55,11 @@ clock-locking recipe: **[docs/01-dev-environment.md](docs/01-dev-environment.md)
 ```
 include/engine/     public headers — dtype, tensor, allocator, device_buffer,
                     check (error handling), cpu_ref, kernels (launch API), cuda_device
-src/                C++ implementation (tensor.cpp: 559 lines, Module 1)
-src/cpu_ref/        the CPU oracle: scalar, FP64 accumulators, obvious over fast (9 ops)
-kernels/            CUDA kernels — all nine implemented (7 ladder + 2 fused ops)
+src/                C++ implementation (tensor, allocator, pool_allocator)
+src/cpu_ref/        the CPU oracle: scalar, FP64 accumulators (13 ops incl. attention & RoPE)
+kernels/            CUDA kernels — 18 implemented (ladder + fusion + attention/RoPE + bridge)
 tests/              custom harness + suites: dtype, golden, cpu_ref, storage, tensor,
-                    allocator, kernels (126 tests across 8 CTest suites, all passing)
+                    allocator, kernels (141 tests across 8 CTest suites, all passing)
 tests/golden/       generated float64 reference data — gitignored, regenerate it
 bench/              bench_cpu_ref (the denominator) and bench_kernels (with --json support)
 tools/              gen_reference.py, generate_results_table.py, roofline_plot.py
@@ -126,7 +125,7 @@ the GPU than that baseline is.
 
 ## The kernel ladder (complete)
 
-Fourteen foundational and inference kernels, each introducing one idea and reusing everything before it. All
+Eighteen foundational and inference kernels, each introducing one idea and reusing everything before it. All
 implemented, verified against float64 reference data, and benchmarked on the RTX 4070
 SUPER (504.0 GB/s peak, sm_89) with locked GPU clocks (2475 MHz):
 
@@ -192,7 +191,7 @@ kernel in the project, and the only one where being clever about arithmetic wins
 | [0010](docs/adr/0010-multi-architecture-cuda-compilation.md) | Multi-architecture CUDA compilation — flexible architecture lists in `ENGINE_CUDA_ARCH` with native SASS generation |
 | [0011](docs/adr/0011-flashattention2-fp16-precision.md) | Attention Precision — start Module 4 FlashAttention-2 in FP16 with FP32 online softmax accumulator to minimize shared memory |
 | [0012](docs/adr/0012-attention-layouts-and-api.md) | Attention layouts & raw API — token-major Q/Out, head-major strided KV cache, RoPE conventions, and edge contracts |
-| [0013](docs/adr/0013-flashdecoding-split-kv.md) | FlashDecoding split-KV (stub) — split-KV parallelism across SMs and GQA head sharing during decode |
+| [0013](docs/adr/0013-flashdecoding-split-kv.md) | FlashDecoding split-KV & GQA broadcast — `min_keys >= 512` split-KV heuristic and warp-per-head SMEM GQA sharing during decode |
 
 ## Build options
 
@@ -222,8 +221,10 @@ files; `--target bench` runs the benchmark binaries.
 - [x] **Phase 4 Deliverables — Foundational Kernels & Infrastructure** (complete). FP16 GEMV, Fused SwiGLU,
   2D Register-Tiled GEMM (17.2 TFLOP/s), Embedding Lookup, Argmax Greedy Sampling, Stream-ordered Pool Allocator,
   RAII CUDA Streams & Events, and Multi-Arch Compilation (ADR 0010). 126 / 126 unit tests passing across 8 CTest suites.
-- [ ] **Module 4 — FlashAttention-2** — tiled online softmax + GEMM fusion, avoiding materialisation
-  of the full S = QK^T attention-score matrix; causal masking + GQA support; RoPE and SwiGLU.
+- [x] **Module 4 — FlashAttention-2 & FlashDecoding** (complete). In-place RoPE (`RotateHalf` & `AdjacentPair`),
+  causal naive attention baseline, tiled online-softmax FlashAttention-2 prefill (14.0 TFLOP/s at `S=4096`, 16.1× vs naive,
+  115× DRAM traffic reduction verified via `ncu`), FlashDecoding split-KV decode (463.6 GB/s / 92.0% peak BW on Llama-2-7B `L=8192`),
+  and prefill+decode bridge integration tests (`141 / 141` unit tests passing across 8 CTest suites).
 - [ ] **Module 5 — Quantization** — packed INT4 / INT8 weights with fused dequantisation GEMV kernels.
 - [ ] **Module 6 — KV-Cache** — ring-buffer cache with zero-copy slicing via the Tensor view system.
 - [ ] **Module 7 — Model Loader** — GGUF-style mmap'd weights, ~50 weight tensors aliasing one

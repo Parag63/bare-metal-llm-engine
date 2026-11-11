@@ -22,7 +22,7 @@
 | [ADR-0010](../docs/adr/0010-multi-architecture-cuda-compilation.md) | Flexible CUDA architecture compilation | Support flexible architecture specification with native SASS generation without PTX JIT overhead |
 | [ADR-0011](../docs/adr/0011-flashattention2-fp16-precision.md) | FlashAttention-2 FP16 precision | Attention starts natively in FP16 with FP32 online softmax accumulator to minimize shared memory |
 | [ADR-0012](../docs/adr/0012-attention-layouts-and-api.md) | Attention layouts & raw API | Token-major Q/Out `[S, H_q, D]`, head-major KV cache `[H_kv, S_max, D]` with `kv_head_stride`, RoPE conventions |
-| [ADR-0013](../docs/adr/0013-flashdecoding-split-kv.md) | FlashDecoding split-KV (stub) | Decode split-KV partitioning heuristic and GQA group-sharing across SMs (to be finalized in Phase 6) |
+| [ADR-0013](../docs/adr/0013-flashdecoding-split-kv.md) | FlashDecoding split-KV & GQA broadcast | Split-KV partitioning heuristic (`min_keys >= 512`), warp-per-head SMEM KV sharing (`66.7%` occ), and partial-LSE reduction |
 
 ## Informal Decisions
 
@@ -129,7 +129,17 @@ macro was already expanded when the library was compiled. This was a real bug in
 
 ### D-016: FlashAttention-2 online softmax formulation and causal block skipping
 **Date:** Oct 2026 (Module 4)
-**Decision:** Module 4 implements FlashAttention-2 with outer loop over $Q$ blocks ($B_r = 64$) and inner loop over $K,V$ blocks ($B_c = 64$). Causal masking skips strictly lower-triangular blocks entirely. GQA maps $h_q \in [0, H_Q-1]$ to $h_{kv} = \lfloor h_q / G \rfloor$ directly in memory.
-**Why:** FlashAttention-2 reduces register pressure by keeping $Q$ blocks in registers/SRAM and updating the output accumulator $O_i$ in-place via online rescaling factors ($m_{\text{new}}, \ell_{\text{new}}$). Causal block skipping cuts FLOPs by $50\%$ in autoregressive prefill. Zero memory materialization of the $S \times S$ matrix reduces DRAM traffic from $O(S^2)$ to $O(S)$.
+**Decision:** Module 4 implements FlashAttention-2 with outer loop over $Q$ blocks ($B_r = 64$, or $B_r = 128$ across GQA groups) and inner loop over $K,V$ blocks ($B_c \in \{32, 64\}$). Causal masking skips strictly upper-triangular blocks entirely. GQA maps $h_q \in [0, H_Q-1]$ to $h_{kv} = \lfloor h_q / G \rfloor$ with optional shared KV staging.
+**Why:** FlashAttention-2 keeps $Q$ fragments and output accumulators $O_i$ in registers while updating via online softmax rescaling ($m_{\text{new}}, \ell_{\text{new}}$). Eliminating `[H_q, S, S]` materialization cuts Nsight Compute DRAM traffic by **$115\times$** before softmax (`633 MB + 580 MB` naive vs `10.56 MB` FA2 at `S=2048`) and speeds up TinyLlama `S=4096` by **$16.1\times$** (`78.61 ms -> 4.89 ms`).
+
+### D-017: Warp-per-head GQA KV broadcast over register `kGChunk=8` unrolling in decode
+**Date:** Nov 2026 (Module 4, Phase 6)
+**Decision:** `flash_decode_gqa_warp_kernel` (`G in {2, 4, 8}`) assigns one warp per Q head inside a cooperative block that loads `[kTileK, D]` KV slices into shared memory once (`LDG.128`), instead of computing `kGChunk=8` Q heads per thread.
+**Why:** Register-unrolling `kGChunk=8` inflated register usage to 134–138 regs/thread (`1` block/SM = 16.7% occupancy) plus 8 serial cross-warp SMEM reductions, regressing below unshared decode at `L=2048`. Warp-per-head specialization drops register pressure to 48–54 regs/thread (`4` blocks/SM = 66.7% occupancy, 0 B spills, 0 bank conflicts), delivering **$1.92\times$** speedup (`0.096 -> 0.050 ms`) at `L=16384` and **$17.8\times$** over single-pass (`splits=1`) at `L=32768`.
+
+### D-018: PoolAllocator reverse slab scan and 64 MiB automatic growth cap
+**Date:** Nov 2026 (Module 4, Phase 8)
+**Decision:** `PoolAllocator::allocate()` scans all existing slabs in reverse order before reserving a new driver slab, and caps automatic `next_slab_size_` doubling at `64 MiB` (`bucket_size` still allocates oversized slabs once without raising `next_slab_size_`).
+**Why:** Uncapped doubling allowed a single 2 GiB `attention_naive S=4096` workspace to push `next_slab_size_` to 4 GiB, causing subsequent 1 MiB scratch requests in `attention_decode` to allocate 4 GiB and spill 12 GiB WDDM VRAM to host RAM over PCIe (`5.35 ms / 25.1 GB/s` regression vs `0.290 ms / 463.6 GB/s` cold VRAM).
 
 
