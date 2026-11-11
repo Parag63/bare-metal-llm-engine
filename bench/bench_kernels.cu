@@ -38,6 +38,7 @@ int main() {
 #include <engine/cuda_device.hpp>
 #include <engine/device_buffer.hpp>
 #include <engine/kernels.hpp>
+#include <engine/pool_allocator.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -1241,6 +1242,8 @@ int main(int argc, char** argv) {
   if (want("swiglu")) bench_swiglu(t, reps);
   if (want("attention_prefill") || want("attention_naive")) {
     bench_attention_prefill(t, reps, /*include_large=*/!quick);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    engine::pool_allocator(engine::Device::CUDA).reset();
   }
   if (want("attention_decode")) bench_attention_decode(t, reps);
   if (filter == "decode_sweep") bench_decode_sweep(t, reps);

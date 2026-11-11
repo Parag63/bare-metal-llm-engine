@@ -145,21 +145,24 @@ void* PoolAllocator::allocate(std::size_t bytes) {
     }
   }
 
-  // 2. Carve from existing slab if space permits
-  if (!slabs_.empty()) {
-    Slab& current = slabs_.back();
-    const std::size_t remaining = current.size - current.offset;
+  // 2. Carve from existing slabs if space permits (scan most recent first so one-off
+  // large slabs do not strand remaining space in earlier slabs).
+  for (auto slab_it = slabs_.rbegin(); slab_it != slabs_.rend(); ++slab_it) {
+    const std::size_t remaining = slab_it->size - slab_it->offset;
     if (remaining >= bucket_size) {
-      char* base = static_cast<char*>(current.ptr);
-      void* p = base + current.offset;
-      current.offset += bucket_size;
+      char* base = static_cast<char*>(slab_it->ptr);
+      void* p = base + slab_it->offset;
+      slab_it->offset += bucket_size;
       return record_allocation(p, bucket_size);
     }
   }
 
-  // 3. Allocate a new slab from the driver
+  // 3. Allocate a new slab from the driver. Cap automatic slab doubling so a single
+  // huge allocation (e.g., 2 GiB naive score matrix) does not force the next tiny
+  // allocation to reserve a 4 GiB slab.
+  static constexpr std::size_t kMaxAutoSlabSize = std::size_t{64} * 1024 * 1024;
   const std::size_t slab_size = std::max(next_slab_size_, bucket_size);
-  next_slab_size_ = std::max(next_slab_size_ * 2, slab_size * 2);
+  next_slab_size_ = std::min(kMaxAutoSlabSize, next_slab_size_ * 2);
 
   void* slab_ptr = driver_alloc(slab_size);
   stats_.bytes_reserved += slab_size;

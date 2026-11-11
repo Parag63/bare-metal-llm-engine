@@ -192,6 +192,45 @@ Implemented in [kernels/attention_decode.cu](../kernels/attention_decode.cu) and
   - **Llama-2-7B** exceeds the `>= 80%` DRAM peak target at both `L=2048` (**85.58% / 431.4 GB/s**) and `L=8192` (**91.97% / 463.6 GB/s**).
   - **TinyLlama** reaches **75.61% (381.1 GB/s)** at `L=32768` (**17.7×** faster than single-pass `1.56 ms`), because `H_kv=4` moves only 8–32 MiB KV (theoretical DRAM transfer at `504 GB/s` is only 16.5–66 µs, so fixed ~10 µs split+reduce overhead caps 8–16 MiB at 52.6–66.5% even with `4` blocks/SM occupancy and `2.10×` GQA win over unshared).
 
+#### Phase 7 — Attention Sub-Block Bridge & End-to-End Integration Tests (`4548ca1`)
+
+- Created [kernels/attention_bridge.cu](../kernels/attention_bridge.cu) (`cast_f32_to_f16`, `cast_f16_to_f32`, and `kv_cache_write` for token-major → head-major `[n_kv_heads, max_seq, head_dim]` KV cache append) plus `run_attention_subblock` in [tools/gen_reference.py](../tools/gen_reference.py) (99 golden files, 66.8 MiB).
+- Verified `kernels.attention_subblock_prefill_and_decode_golden` and `kernels.attention_subblock_tinyllama_shape` (`s_q=64` prefill followed by 2 sequential decode tokens at `kv_len=65, 66` at exact TinyLlama `d_model=2048, H=32/4, D=64`) within derived FP16 accumulation tolerance (`rtol = 16 * 2^-10 ≈ 1.56e-2`, `atol = 8 * 2^-10 ≈ 7.81e-3`): CUDA `ctest` 8/8, CPU-only `ctest` 7/7.
+
+#### Phase 8 — Nsight Compute Profiling, Roofline Analysis & Discrepancy Audit
+
+1. **Nsight Compute (`ncu`) Hardware Counter Breakdown (`sm_89` RTX 4070 SUPER):**
+
+| Kernel | Workload | `dram__bytes.sum` | SMEM Load Bank Conflicts | L2 Hit Rate | Active Warps | Primary Warp Stall Drivers (per active issue) |
+|---|---|---:|---:|---:|---:|---|
+| `attention_naive_scores_kernel<64>` | TinyLlama `S=2048` | **633.4 MB** | **3,483,558** | — | — | Untiled `[H, S, S]` global writes + bank conflicts |
+| `attention_naive_pv_kernel<64>` | TinyLlama `S=2048` | **580.1 MB** | — | — | — | `>1.16 GiB` DRAM before even counting `softmax_rows` |
+| `flash_prefill_kernel<64,128,32,1>` | TinyLlama `S=2048` GQA | **10.56 MB** (`10.07 MiB`, `1.007×` ideal) | **0** | 92.98% | 31.15% | **Math pipe throttle 62.35%**, short 25.16%, MIO 13.79%, long 12.64% |
+| `flash_prefill_kernel<64,64,64,0>` | TinyLlama `S=2048` per-head | **10.52 MB** | **0** | 96.35% | 32.48% | **Math pipe throttle 74.45%**, **MIO throttle 69.71%**, long 10.82% |
+| `flash_prefill_kernel<128,64,32,0>` | Llama2-7B `S=2048` | **68.24 MB** (`65.08 MiB`, `1.017×` ideal) | 26,662 | 91.02% | 32.53% | **Math pipe throttle 83.79%**, short 45.31%, MIO 18.98%, long 13.54% |
+| `flash_decode_gqa_warp_kernel<64,8>` | TinyLlama `L=8192` | **8.43 MB** (`8.04 MiB`, `1.005×` ideal) | **0** | 6.27% (cold slab) | 32.46% | **Wait 143.3% / short 147.7% / long scoreboard 131.0%**, math **11.5%** |
+| `flash_decode_split_kernel<64,1>` | TinyLlama `L=2048` unshared | **2.13 MB** | 0 | **86.67%** (`8×` L2 reread) | — | **Long scoreboard 821.2%**, barrier 86.9% |
+| `flash_decode_reduce_kernel<128>` | TinyLlama `L=32768` | minimal | 0 | — | — | **Long scoreboard 1364.5%** (streaming partials), math **0.54%** |
+
+   - **Hardware Counter Proof of Architecture:**
+     - **Prefill (`attention_prefill`) is definitively SIMT math-bound** as predicted: DRAM traffic hits **`1.007×` (`10.07 MiB` vs `10.00 MiB` ideal)** and **`1.017×` (`65.08 MiB` vs `64.00 MiB` ideal)** theoretical minimum, SMEM `+2` padding achieves **0 SMEM load bank conflicts** at `D=64`, `stalled_long_scoreboard` is only **10.8–13.5%**, and **62.4–83.8% `math_pipe_throttle`** confirms the SIMT FP32 FMA unit (rather than memory) limits v1 prefill at **12.70–14.02 TFLOP/s**. Moreover, GQA group sharing (`M_thr=4`) cuts MIO/SMEM stall contention from **69.71% → 13.79% (5.1× lower)**.
+     - **Decode (`flash_decode_gqa_warp_kernel`) is strictly memory-bound** as predicted: cold slab DRAM bytes hit **`1.005×` (`8.04 MiB` vs `8.00 MiB` ideal)** with `6.27%` L2 hit rate (honest cold DRAM measurement), **0 SMEM bank conflicts**, only **11.5% math throttle**, and DRAM latency/sync wait dominating warps. Meanwhile unshared decode relies on `86.67%` L2 hits across 8 independent reads of KV.
+
+2. **PoolAllocator Bug Discovered During Full-Suite Benchmarking (`src/pool_allocator.cpp`):**
+   - Full `bench_kernels --json` initially showed `Llama2-7B L=8192` decode collapsing from **0.290 ms (463.6 GB/s)** to **5.35 ms (25.1 GB/s = PCIe host-RAM speed!)** right after `attention_naive S=4096`.
+   - Root cause: `PoolAllocator::allocate()` updated `next_slab_size_ = std::max(next_slab_size_ * 2, slab_size * 2)` without an upper bound, AND only checked `slabs_.back()`. When `attention_naive S=4096` requested a `2048 MiB` score matrix, `next_slab_size_` jumped to **`4096 MiB` (`4 GiB`)** — forcing the very next tiny `1 MiB` split-KV scratch allocation in `attention_decode` to call `cudaMalloc(4 GiB)` on top of >3 GiB already pooled, spilling the 12 GiB WDDM VRAM budget into host RAM over PCIe.
+   - Fix in [src/pool_allocator.cpp](../src/pool_allocator.cpp) + [bench/bench_kernels.cu](../bench/bench_kernels.cu): scanned all existing slabs reverse-first before allocating, capped automatic `next_slab_size_` doubling at `64 MiB`, and added `pool_allocator(Device::CUDA).reset()` after `bench_attention_prefill`. Re-running full `bench_kernels --json` immediately restored `Llama2-7B L=8192` to **0.290 ms (spread 8.5%, 463.6 GB/s / 91.97% peak BW)** and TinyLlama `L=32768` to **0.088 ms (381.7 GB/s / 75.7%)**.
+
+3. **Roofline Update (`docs/roofline.png`) & Negative Results (`docs/negative-results.md`):**
+   - Extended [tools/roofline_plot.py](../tools/roofline_plot.py) (`ai_max = 3500` to capture FA2 `S=4096` at `1820.9 FLOP/B`) with distinct markers/labels for `attention_naive`, `attention_prefill (FA2)`, `attention_decode (FlashDecoding & splits=1)`, `rope`, and `matmul_register_tiled`, and regenerated [docs/roofline.png](roofline.png).
+   - Added Section 5 & updated Summary Table in [negative-results.md](negative-results.md) covering the `kGChunk=8` 138-register occupancy collapse and naive attention `ncu` DRAM amplification.
+
+4. **End-of-Module Prediction vs Measurement Review:**
+   - **Naive `S=2048` gap (predicted ~4.5 ms DRAM-only vs measured 19.6 ms):** untiled `QK^T` / single-row `PV` added SIMT and uncoalesced K/V overhead (~4.3× slower than DRAM floor), still scaling cleanly $4.0\times$ per $2\times S$.
+   - **FA2 Prefill (predicted 10–18 TFLOP/s, 1.0–1.7 ms at `S=2048`):** measured **1.36 ms / 12.70 TFLOP/s** (`S=2048`) and **4.89 ms / 14.02 TFLOP/s** (`S=4096`), hitting dead-center inside prediction (`35.8%–39.5%` nominal FP32 peak, `ncu`-verified math-bound).
+   - **Decode FlashDecoding:** Llama-2-7B `L=8192` (**0.290 ms / 463.6 GB/s = 91.97% peak BW**) beat prediction (300–350 µs); TinyLlama `L=8192..32768` (`0.032..0.088 ms / 264.5..381.7 GB/s`) matched latency predictions (fixed ~10 µs split+reduce overhead caps 8–16 MiB at 52–67%).
+   - **RoPE:** `S=1` decode (**3.1 µs**) and `S=2048` prefill (**44.2 µs / 439.1 GB/s**, **158.1 µs / 431.2 GB/s**) landed squarely inside the Phase 1 predicted ranges (`3–5 µs` and `43–55 µs`).
+
 ---
 
 ## Week 09 — 2026-10-02 · Pre-Module 4 Mathematical & Microarchitectural Audit: Baseline Realities, Cache Residency, and Precision Decisions

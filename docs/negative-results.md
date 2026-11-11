@@ -166,12 +166,34 @@ Launching grids exceeding $4\times$ SM count ($> 224$ blocks on RTX 4070 SUPER) 
 
 ---
 
-## 5. Summary Table of Negative & Neutral Results
+## 5. Multi-Head Register-Chunking (`kGChunk=8`) Occupancy Collapse & `attention_naive` Memory Amplification (Module 4)
+
+### 1. Decode GQA `kGChunk=8` Register Explosion (`attention_decode` v1)
+- **The Hypothesis:** Keeping all $G = H_q / H_{kv} = 8$ query heads' $Q$ fragments and output accumulators (`o_loc[8][8]`) resident inside each thread would load each $K/V$ element from global memory only once across a whole GQA group and yield higher decode throughput than reloading $K/V$ per Q head via L2 cache.
+- **Measurement & Finding (`TinyLlama`, $H_q=32, H_{kv}=4, D=64$):**
+  - `nvcc -arch=sm_89 -Xptxas -v` measured **134–138 registers/thread** on the `kGChunk=8` kernel — capping occupancy on `sm_89` (1536 max threads/SM, 65536 regs/block) to **1 active block/SM (16.7% theoretical occupancy)** and serializing 8 consecutive cross-warp shared-memory reductions per block.
+  - On `bench_kernels`, v1 (`kGChunk=8`) plateaued at **0.096 ms (174.4 GB/s, 34.6% peak BW)** at $L=16384$ and lost outright to `no GQA share` at $L=2048$ (**0.037 ms vs 0.023 ms**).
+- **Why It Failed & Fix (`flash_decode_gqa_warp_kernel`, ADR-0013):**
+  - Replaced thread-level $G$-head unrolling with warp-level specialization: $G \in \{2,4,8\}$ warps cooperatively stage a `[kTileK, D]` ($32 \times D$) `half2` $K/V$ tile into SMEM (8192 B at $G=8, D=64$) via vectorized `LDG.128`, each warp owns exactly **1** Q head in registers and emits directly with warp shuffle (zero cross-warp SMEM reduction).
+  - Register count dropped from **134–138 → 53–54 regs/thread** (**4 blocks/SM = 66.7% occupancy**, 0 B spills, 0 SMEM bank conflicts via `ncu`). TinyLlama $L=16384$ sped up **$1.92\times$ (`0.096 → 0.050 ms / 334.5 GB/s`)** and $L=32768$ reached **0.088 ms (381.7 GB/s)**, **$2.08\times$ faster than `no GQA share` (`0.183 ms`)** and **$17.8\times$ faster than single-pass (`splits=1`, `1.566 ms`)**.
+
+---
+
+### 2. Unfused `attention_naive` Materialized Score Matrix vs FlashAttention-2 Prefill
+- **Measurement (`ncu` at TinyLlama $S=2048, H=32/4, D=64$):**
+  - Materializing the FP32 `[H_q, S, S]` matrix (`512.0 MiB` at $S=2048$, `2048.0 MiB` at $S=4096$) forces Nsight Compute DRAM traffic of **633.4 MB** (`scores_kernel`) + **580.1 MB** (`pv_kernel`) = **1,213.5 MB (1.13 GiB)** before even counting `softmax_rows` in-place passes (~1.0 GiB) plus **3,483,558 SMEM bank conflicts** in `scores_kernel`.
+  - Tiled online-softmax `flash_prefill_kernel` reduces `ncu dram__bytes.sum` at $S=2048$ to **10.56 MB (10.07 MiB)** — a **$115\times$ DRAM traffic reduction before softmax** (~200× total) with **0 SMEM bank conflicts** — cutting latency from **19.62 ms → 1.36 ms (14.5×)** at $S=2048$ and **78.61 ms → 4.89 ms (16.1×)** at $S=4096$.
+
+---
+
+## 6. Summary Table of Negative & Neutral Results
 
 | Optimization Tested | Target Kernel | Expected Gain | Observed Result | Primary Bottleneck / Reason |
 |---|---|---|---|---|
 | 1D Strip Fusion at Decode ($M=1$) | `rmsnorm_linear` | +43% vs separate | **$2.45\times$ SLOWER** vs `rmsnorm + gemv` | 16 blocks leaves 40 of 56 SMs idle; unvectorized scalar reduction vs multi-warp `gemv` |
 | 1D Row Fusion at Prefill ($M=512$) | `rmsnorm_linear` | +15–30% speedup (16 MiB saved) | **$13.6\times$ SLOWER** vs register-tiled | Destroys 2D weight reuse across tokens; DRAM read explodes by +2.55 GB |
+| `kGChunk=8` multi-head register tiling | `attention_decode` | 8× fewer KV global reads vs `no GQA share` | **1.6× SLOWER** at $L=2048$, capped at 174 GB/s ($L=16384$) | 134–138 regs/thread caps `sm_89` occupancy to 16.7% + 8 serial cross-warp SMEM reductions; fixed via warp-per-head SMEM KV broadcast (`53 regs`, 66.7% occ) |
+| Naive 3-pass `[H, S, S]` attention | `attention_naive` | Clean baseline | **16.1× slower** at $S=4096$ (78.6 ms vs 4.89 ms FA2) | `ncu`: >1.16 GiB DRAM traffic before softmax (`S=2048`), 3.48M bank conflicts vs `10.07 MiB` FA2 (`0` bank conflicts) |
 | Shared-memory bank conflict padding (`[32][33]`) | `matmul_tiled` | 5–10% speedup | -0.2% (neutral/regression) | sm_89 shared-memory crossbar + non-power-of-2 index arithmetic overhead |
 | DRAM traffic claim for warm L2 residual | `residual_rmsnorm` | 442 GB/s cold DRAM | 33.5 MB resides in 48 MB L2 | 19–34 µs is an L2 cache hit measurement; true cold DRAM is 434 GB/s at 4096×4096 ($1.24\times$ speedup vs 0.763 ms separate) |
 | Oversized thread grid ($>1024$ blocks) | `vector_add` | Improved tail latency | Flat to +1% latency | 56 SMs fully saturated at 224 blocks; extra blocks increase hardware queue overhead |
