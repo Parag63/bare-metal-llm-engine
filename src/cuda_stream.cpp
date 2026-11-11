@@ -20,6 +20,11 @@ CudaStream::~CudaStream() {
   }
 }
 
+void CudaStream::wait(const CudaEvent& event, unsigned int flags) const {
+  ENGINE_CHECK(event.get() != nullptr, "CudaStream::wait called on null event");
+  CUDA_CHECK(cudaStreamWaitEvent(stream_, event.get(), flags));
+}
+
 CudaEvent::CudaEvent() : CudaEvent(cudaEventDefault) {}
 
 CudaEvent::CudaEvent(unsigned int flags) {

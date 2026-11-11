@@ -8,7 +8,14 @@
 //===----------------------------------------------------------------------===//
 
 #include <engine/allocator.hpp>
+#include <engine/config.hpp>
 
+#if ENGINE_HAS_CUDA
+#include <cuda_runtime.h>
+#endif
+
+#include <cstddef>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <unordered_map>
@@ -28,6 +35,11 @@ class PoolAllocator final : public Allocator {
 
   void* allocate(std::size_t bytes) override;
   void deallocate(void* ptr) override;
+#if ENGINE_HAS_CUDA
+  /// Returns `ptr` to the pool once all work queued on `stream` finishes.
+  /// Records an event on `stream` and defers reuse until cudaEventQuery succeeds.
+  void deallocate(void* ptr, cudaStream_t stream);
+#endif
   Device device() const override { return device_; }
   AllocStats stats() const override;
 
@@ -42,6 +54,11 @@ class PoolAllocator final : public Allocator {
 
   void* driver_alloc(std::size_t bytes);
   void driver_free(void* ptr);
+  void* record_allocation(void* ptr, std::size_t bucket_size);
+#if ENGINE_HAS_CUDA
+  cudaEvent_t acquire_event();
+  void release_event(cudaEvent_t event);
+#endif
 
   Device device_;
   std::size_t initial_slab_size_;
@@ -50,10 +67,20 @@ class PoolAllocator final : public Allocator {
   mutable std::mutex mutex_;
   AllocStats stats_;
 
-  // Free lists per power-of-two size bucket
-  std::map<std::size_t, std::vector<void*>> free_lists_;
+  struct FreeBlock {
+    void* ptr = nullptr;
+#if ENGINE_HAS_CUDA
+    cudaEvent_t ready_event = nullptr;
+#endif
+  };
+
+  // Free queues per power-of-two bucket; CUDA blocks carry their completion event.
+  std::map<std::size_t, std::deque<FreeBlock>> free_lists_;
   // Active allocations mapping ptr -> bucket size
   std::unordered_map<void*, std::size_t> allocated_sizes_;
+#if ENGINE_HAS_CUDA
+  std::vector<cudaEvent_t> event_pool_;
+#endif
 
   // Slabs reserved from the driver
   struct Slab {
@@ -62,6 +89,59 @@ class PoolAllocator final : public Allocator {
     std::size_t offset = 0;
   };
   std::vector<Slab> slabs_;
+};
+
+/// RAII guard for scratch memory allocated from a PoolAllocator.
+/// On CUDA pools, binds deallocation to the launch stream so the block is not
+/// reused by another stream until prior kernels finish.
+class ScopedPoolBuffer {
+ public:
+  ScopedPoolBuffer(PoolAllocator& pool, std::size_t bytes)
+      : pool_(pool), ptr_(pool.allocate(bytes)) {}
+
+#if ENGINE_HAS_CUDA
+  ScopedPoolBuffer(PoolAllocator& pool, std::size_t bytes, cudaStream_t stream)
+      : pool_(pool), ptr_(pool.allocate(bytes)), stream_(stream) {}
+#endif
+
+  ~ScopedPoolBuffer() {
+    try {
+      release();
+    } catch (...) {
+    }
+  }
+
+  ScopedPoolBuffer(const ScopedPoolBuffer&) = delete;
+  ScopedPoolBuffer& operator=(const ScopedPoolBuffer&) = delete;
+  ScopedPoolBuffer(ScopedPoolBuffer&&) = delete;
+  ScopedPoolBuffer& operator=(ScopedPoolBuffer&&) = delete;
+
+  void* get() const { return ptr_; }
+
+  template <typename T>
+  T* as() const {
+    return static_cast<T*>(ptr_);
+  }
+
+  void release() {
+    if (ptr_ == nullptr) return;
+    void* p = ptr_;
+    ptr_ = nullptr;
+#if ENGINE_HAS_CUDA
+    if (pool_.device() == Device::CUDA) {
+      pool_.deallocate(p, stream_);
+      return;
+    }
+#endif
+    pool_.deallocate(p);
+  }
+
+ private:
+  PoolAllocator& pool_;
+  void* ptr_ = nullptr;
+#if ENGINE_HAS_CUDA
+  cudaStream_t stream_ = nullptr;
+#endif
 };
 
 /// Returns the singleton PoolAllocator instance for the specified device.

@@ -15,6 +15,8 @@
 
 namespace engine {
 
+class CudaEvent;
+
 /// RAII wrapper managing the lifecycle of a cudaStream_t.
 class CudaStream {
  public:
@@ -52,6 +54,8 @@ class CudaStream {
       CUDA_CHECK(cudaStreamSynchronize(stream_));
     }
   }
+
+  void wait(const CudaEvent& event, unsigned int flags = 0) const;
 
  private:
   cudaStream_t stream_ = nullptr;
@@ -96,6 +100,15 @@ class CudaEvent {
     if (event_) {
       CUDA_CHECK(cudaEventSynchronize(event_));
     }
+  }
+
+  bool is_complete() const {
+    if (!event_) return true;
+    const cudaError_t err = cudaEventQuery(event_);
+    if (err == cudaSuccess) return true;
+    if (err == cudaErrorNotReady) return false;
+    CUDA_CHECK(err);
+    return false;
   }
 
   static float elapsed_ms(const CudaEvent& start, const CudaEvent& end) {

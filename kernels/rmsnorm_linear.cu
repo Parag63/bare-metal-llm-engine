@@ -189,18 +189,14 @@ void rmsnorm_linear(const float* in, const float* rms_weight, const float* W, fl
   // 2. At M > 1 (prefill phase): 1D strip fusion reloads the K x N weight matrix from DRAM
   //    for every row, adding 2.29 GB of reload traffic (13.6x slower than register-tiled GEMM).
   //    Therefore, dispatch M > 1 to rmsnorm + matmul_register_tiled.
+  const std::size_t temp_bytes =
+      static_cast<std::size_t>(M) * static_cast<std::size_t>(K) * sizeof(float);
+  ScopedPoolBuffer temp(pool_allocator(Device::CUDA), temp_bytes, stream);
+  rmsnorm(in, rms_weight, temp.as<float>(), M, K, eps, stream);
   if (M == 1) {
-    const std::size_t temp_bytes = static_cast<std::size_t>(K) * sizeof(float);
-    float* temp = static_cast<float*>(pool_allocator(Device::CUDA).allocate(temp_bytes));
-    rmsnorm(in, rms_weight, temp, 1, K, eps, stream);
-    gemv(W, temp, out, N, K, stream);
-    pool_allocator(Device::CUDA).deallocate(temp);
+    gemv(W, temp.as<float>(), out, N, K, stream);
   } else {
-    const std::size_t temp_bytes = static_cast<std::size_t>(M * K) * sizeof(float);
-    float* temp = static_cast<float*>(pool_allocator(Device::CUDA).allocate(temp_bytes));
-    rmsnorm(in, rms_weight, temp, M, K, eps, stream);
-    matmul_register_tiled(temp, W, out, M, N, K, stream);
-    pool_allocator(Device::CUDA).deallocate(temp);
+    matmul_register_tiled(temp.as<float>(), W, out, M, N, K, stream);
   }
 }
 

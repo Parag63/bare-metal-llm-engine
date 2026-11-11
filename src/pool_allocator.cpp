@@ -82,6 +82,33 @@ void PoolAllocator::driver_free(void* ptr) {
   }
 }
 
+void* PoolAllocator::record_allocation(void* ptr, std::size_t bucket_size) {
+  stats_.bytes_in_use += bucket_size;
+  stats_.peak_bytes_in_use = std::max(stats_.peak_bytes_in_use, stats_.bytes_in_use);
+  stats_.num_allocs++;
+  allocated_sizes_[ptr] = bucket_size;
+  return ptr;
+}
+
+#if ENGINE_HAS_CUDA
+cudaEvent_t PoolAllocator::acquire_event() {
+  if (!event_pool_.empty()) {
+    cudaEvent_t ev = event_pool_.back();
+    event_pool_.pop_back();
+    return ev;
+  }
+  cudaEvent_t ev = nullptr;
+  CUDA_CHECK(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming));
+  return ev;
+}
+
+void PoolAllocator::release_event(cudaEvent_t event) {
+  if (event != nullptr) {
+    event_pool_.push_back(event);
+  }
+}
+#endif
+
 void* PoolAllocator::allocate(std::size_t bytes) {
   if (bytes == 0) return nullptr;
 
@@ -89,17 +116,33 @@ void* PoolAllocator::allocate(std::size_t bytes) {
 
   std::lock_guard<std::mutex> lock(mutex_);
 
-  // 1. Check size-class free list
+  // 1. Check size-class free queue; skip CUDA blocks whose stream event is still pending.
   auto it = free_lists_.find(bucket_size);
-  if (it != free_lists_.end() && !it->second.empty()) {
-    void* p = it->second.back();
-    it->second.pop_back();
-
-    stats_.bytes_in_use += bucket_size;
-    stats_.peak_bytes_in_use = std::max(stats_.peak_bytes_in_use, stats_.bytes_in_use);
-    stats_.num_allocs++;
-    allocated_sizes_[p] = bucket_size;
-    return p;
+  if (it != free_lists_.end()) {
+    auto& queue = it->second;
+    for (auto blk_it = queue.begin(); blk_it != queue.end(); ++blk_it) {
+      bool ready = true;
+#if ENGINE_HAS_CUDA
+      if (blk_it->ready_event != nullptr) {
+        const cudaError_t q = cudaEventQuery(blk_it->ready_event);
+        if (q == cudaSuccess) {
+          release_event(blk_it->ready_event);
+          blk_it->ready_event = nullptr;
+        } else if (q == cudaErrorNotReady) {
+          ready = false;
+        } else {
+          release_event(blk_it->ready_event);
+          blk_it->ready_event = nullptr;
+          CUDA_CHECK(q);
+        }
+      }
+#endif
+      if (ready) {
+        void* p = blk_it->ptr;
+        queue.erase(blk_it);
+        return record_allocation(p, bucket_size);
+      }
+    }
   }
 
   // 2. Carve from existing slab if space permits
@@ -110,12 +153,7 @@ void* PoolAllocator::allocate(std::size_t bytes) {
       char* base = static_cast<char*>(current.ptr);
       void* p = base + current.offset;
       current.offset += bucket_size;
-
-      stats_.bytes_in_use += bucket_size;
-      stats_.peak_bytes_in_use = std::max(stats_.peak_bytes_in_use, stats_.bytes_in_use);
-      stats_.num_allocs++;
-      allocated_sizes_[p] = bucket_size;
-      return p;
+      return record_allocation(p, bucket_size);
     }
   }
 
@@ -128,17 +166,18 @@ void* PoolAllocator::allocate(std::size_t bytes) {
   stats_.num_driver_allocs++;
 
   slabs_.push_back({slab_ptr, slab_size, bucket_size});
-
-  stats_.bytes_in_use += bucket_size;
-  stats_.peak_bytes_in_use = std::max(stats_.peak_bytes_in_use, stats_.bytes_in_use);
-  stats_.num_allocs++;
-  allocated_sizes_[slab_ptr] = bucket_size;
-
-  return slab_ptr;
+  return record_allocation(slab_ptr, bucket_size);
 }
 
 void PoolAllocator::deallocate(void* ptr) {
   if (!ptr) return;
+
+#if ENGINE_HAS_CUDA
+  if (device_ == Device::CUDA) {
+    deallocate(ptr, static_cast<cudaStream_t>(nullptr));
+    return;
+  }
+#endif
 
   std::lock_guard<std::mutex> lock(mutex_);
 
@@ -150,8 +189,36 @@ void PoolAllocator::deallocate(void* ptr) {
   allocated_sizes_.erase(it);
 
   stats_.bytes_in_use -= bucket_size;
-  free_lists_[bucket_size].push_back(ptr);
+  free_lists_[bucket_size].push_back(FreeBlock{ptr});
 }
+
+#if ENGINE_HAS_CUDA
+void PoolAllocator::deallocate(void* ptr, cudaStream_t stream) {
+  if (!ptr) return;
+  if (device_ != Device::CUDA) {
+    deallocate(ptr);
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  auto it = allocated_sizes_.find(ptr);
+  ENGINE_CHECK(it != allocated_sizes_.end(),
+               "PoolAllocator: pointer was not allocated by this pool");
+
+  const std::size_t bucket_size = it->second;
+  cudaEvent_t ev = acquire_event();
+  const cudaError_t err = cudaEventRecord(ev, stream);
+  if (err != cudaSuccess) {
+    release_event(ev);
+    CUDA_CHECK(err);
+  }
+
+  allocated_sizes_.erase(it);
+  stats_.bytes_in_use -= bucket_size;
+  free_lists_[bucket_size].push_back(FreeBlock{ptr, ev});
+}
+#endif
 
 AllocStats PoolAllocator::stats() const {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -160,6 +227,20 @@ AllocStats PoolAllocator::stats() const {
 
 void PoolAllocator::reset() {
   std::lock_guard<std::mutex> lock(mutex_);
+
+#if ENGINE_HAS_CUDA
+  for (auto& kv : free_lists_) {
+    for (auto& blk : kv.second) {
+      if (blk.ready_event != nullptr) {
+        cudaEventDestroy(blk.ready_event);
+      }
+    }
+  }
+  for (cudaEvent_t ev : event_pool_) {
+    cudaEventDestroy(ev);
+  }
+  event_pool_.clear();
+#endif
 
   for (auto& slab : slabs_) {
     driver_free(slab.ptr);

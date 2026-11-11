@@ -45,6 +45,7 @@
 #include <engine/check.hpp>
 #include <engine/cpu_ref.hpp>
 #include <engine/cuda_device.hpp>
+#include <engine/cuda_stream.hpp>
 #include <engine/device_buffer.hpp>
 #include <engine/kernels.hpp>
 
@@ -991,6 +992,76 @@ TEST(kernels, rmsnorm_linear_agrees_with_separate_rmsnorm_and_matmul) {
 
     CHECK_CASE(stem + " (fused vs separate)", fused.data(), separate.data(), fused.size(),
                /*rtol=*/1e-4, /*atol=*/5e-5);
+  }
+}
+
+TEST(kernels, rmsnorm_linear_multi_stream_pool_safety) {
+  REQUIRE_CUDA_DEVICE();
+
+  // Exercise both decode (M = 1) and prefill (M = 32) scratch paths concurrently
+  // across two non-blocking streams so PoolAllocator must defer scratch reuse.
+  engine::CudaStream stream_a;
+  engine::CudaStream stream_b;
+
+  constexpr std::int64_t K = 512;
+  constexpr std::int64_t N = 512;
+
+  struct Run {
+    std::int64_t m;
+    DeviceBuffer<float> d_in;
+    DeviceBuffer<float> d_weight;
+    DeviceBuffer<float> d_w;
+    DeviceBuffer<float> d_out;
+    std::vector<float> expected;
+  };
+
+  std::vector<Run> runs;
+  runs.reserve(6);
+  for (int i = 0; i < 6; ++i) {
+    const std::int64_t M = (i % 2 == 0) ? 32 : 1;
+    const float seed = static_cast<float>(i + 1) * 1.37f;
+
+    std::vector<float> in(usize(M * K));
+    std::vector<float> weight(usize(K));
+    std::vector<float> w(usize(K * N));
+    for (std::size_t idx = 0; idx < in.size(); ++idx) {
+      in[idx] = std::sin(seed + static_cast<float>(idx) * 0.013f);
+    }
+    for (std::size_t idx = 0; idx < weight.size(); ++idx) {
+      weight[idx] = 0.75f + 0.25f * std::cos(seed + static_cast<float>(idx) * 0.031f);
+    }
+    for (std::size_t idx = 0; idx < w.size(); ++idx) {
+      w[idx] = 0.05f * std::cos(seed * 1.7f + static_cast<float>(idx) * 0.007f);
+    }
+
+    std::vector<float> expected(usize(M * N), 0.0f);
+    engine::cpu::rmsnorm_linear(in.data(), weight.data(), w.data(), expected.data(), M, N,
+                                K, kEps);
+    runs.emplace_back();
+    Run& run = runs.back();
+    run.m = M;
+    run.d_in = DeviceBuffer<float>(in);
+    run.d_weight = DeviceBuffer<float>(weight);
+    run.d_w = DeviceBuffer<float>(w);
+    run.d_out = DeviceBuffer<float>(usize(M * N));
+    run.d_out.zero();
+    run.expected = std::move(expected);
+  }
+  CUDA_CHECK(cudaDeviceSynchronize());
+
+  for (std::size_t i = 0; i < runs.size(); ++i) {
+    Run& r = runs[i];
+    cudaStream_t stream = (i % 2 == 0) ? stream_a.get() : stream_b.get();
+    engine::cuda::rmsnorm_linear(r.d_in.get(), r.d_weight.get(), r.d_w.get(),
+                                 r.d_out.get(), r.m, N, K, kEps, stream);
+  }
+  stream_a.synchronize();
+  stream_b.synchronize();
+
+  for (std::size_t i = 0; i < runs.size(); ++i) {
+    const std::vector<float> host = runs[i].d_out.download();
+    CHECK_CASE("rmsnorm_linear multi-stream #" + std::to_string(i), host.data(),
+               runs[i].expected.data(), host.size(), kMatmulRtol, kMatmulAtol);
   }
 }
 
