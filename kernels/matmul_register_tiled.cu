@@ -31,6 +31,7 @@
 #include <engine/check.hpp>
 #include <engine/kernels.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <cuda_runtime.h>
 
@@ -180,7 +181,14 @@ void matmul_register_tiled(const float* A, const float* B, float* C, std::int64_
   ENGINE_CHECK(M >= 0, "matmul_register_tiled: M must be non-negative");
   ENGINE_CHECK(N >= 0, "matmul_register_tiled: N must be non-negative");
   ENGINE_CHECK(K >= 0, "matmul_register_tiled: K must be non-negative");
-  if (M == 0 || N == 0 || K == 0) return;
+  if (M == 0 || N == 0) return;
+
+  // An Mx0 times 0xN product is the MxN zero matrix.
+  if (K == 0) {
+    const auto count = static_cast<std::size_t>(M) * static_cast<std::size_t>(N);
+    CUDA_CHECK(cudaMemsetAsync(C, 0, count * sizeof(float), stream));
+    return;
+  }
 
   dim3 block(16, 16);  // 256 threads
   dim3 grid(static_cast<unsigned int>((N + BN - 1) / BN),

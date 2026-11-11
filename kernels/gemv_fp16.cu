@@ -24,6 +24,7 @@
 #include <engine/check.hpp>
 #include <engine/kernels.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -120,7 +121,14 @@ void gemv_fp16(const half* A, const half* x, half* out, std::int64_t N, std::int
   ENGINE_CHECK(out != nullptr, "gemv_fp16: out is null");
   ENGINE_CHECK(N >= 0, "gemv_fp16: N must be non-negative");
   ENGINE_CHECK(K >= 0, "gemv_fp16: K must be non-negative");
-  if (N == 0 || K == 0) return;
+  if (N == 0) return;
+
+  // An empty dot product (K == 0) produces an all-zero output vector.
+  if (K == 0) {
+    const std::size_t out_bytes = static_cast<std::size_t>(N) * sizeof(half);
+    CUDA_CHECK(cudaMemsetAsync(out, 0, out_bytes, stream));
+    return;
+  }
 
   const bool is_aligned_64 = (N % 64 == 0) && (K % 8 == 0) &&
                              (reinterpret_cast<uintptr_t>(A) % sizeof(half2) == 0) &&

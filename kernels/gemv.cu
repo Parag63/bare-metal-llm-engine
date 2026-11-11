@@ -25,6 +25,7 @@
 #include <engine/check.hpp>
 #include <engine/kernels.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <cuda_runtime.h>
 
@@ -117,7 +118,14 @@ void gemv(const float* A, const float* x, float* out, std::int64_t N, std::int64
   ENGINE_CHECK(out != nullptr, "gemv: out is null");
   ENGINE_CHECK(N >= 0, "gemv: N must be non-negative");
   ENGINE_CHECK(K >= 0, "gemv: K must be non-negative");
-  if (N == 0 || K == 0) return;
+  if (N == 0) return;
+
+  // An empty dot product (K == 0) produces an all-zero output vector.
+  if (K == 0) {
+    const std::size_t out_bytes = static_cast<std::size_t>(N) * sizeof(float);
+    CUDA_CHECK(cudaMemsetAsync(out, 0, out_bytes, stream));
+    return;
+  }
 
   // If aligned to 64 columns and K is a multiple of 8, use the multi-warp vectorized path
   const bool is_aligned_64 = (N % 64 == 0) && (K % 8 == 0) &&

@@ -752,16 +752,23 @@ TEST(kernels, matmul_with_k_zero_is_the_zero_matrix) {
   d_a.zero();
   d_b.zero();
 
-  engine::cuda::matmul_naive(d_a.get(), d_b.get(), d_c.get(), M, N, /*K=*/0);
-  CUDA_CHECK(cudaDeviceSynchronize());
+  using MatmulFn = void (*)(const float*, const float*, float*, std::int64_t,
+                            std::int64_t, std::int64_t, cudaStream_t);
+  const MatmulFn fns[] = {engine::cuda::matmul_naive, engine::cuda::matmul_tiled,
+                          engine::cuda::matmul_register_tiled};
+  for (MatmulFn fn : fns) {
+    d_c.upload(poison);
+    fn(d_a.get(), d_b.get(), d_c.get(), M, N, /*K=*/0, /*stream=*/nullptr);
+    CUDA_CHECK(cudaDeviceSynchronize());
 
-  const std::vector<float> host = d_c.download();
-  for (float v : host) {
-    if (v != 0.0f) {
-      ctx.add_failure(
-          __FILE__, __LINE__,
-          "K == 0 must produce an all-zero MxN result, found " + std::to_string(v));
-      break;
+    const std::vector<float> host = d_c.download();
+    for (float v : host) {
+      if (v != 0.0f) {
+        ctx.add_failure(
+            __FILE__, __LINE__,
+            "K == 0 must produce an all-zero MxN result, found " + std::to_string(v));
+        break;
+      }
     }
   }
 }
@@ -1155,6 +1162,40 @@ TEST(kernels, gemv_of_zero_input) {
   const std::vector<float> host = d_out.download();
   for (float v : host) {
     EXPECT_EQ(v, 0.0f);
+  }
+}
+
+TEST(kernels, gemv_and_gemv_fp16_with_k_zero_zero_output) {
+  REQUIRE_CUDA_DEVICE();
+
+  const std::int64_t N = 13;
+  {
+    const std::vector<float> poison(usize(N), 7.0f);
+    DeviceBuffer<float> d_A(1);
+    DeviceBuffer<float> d_x(1);
+    DeviceBuffer<float> d_out(poison);
+    d_A.zero();
+    d_x.zero();
+
+    engine::cuda::gemv(d_A.get(), d_x.get(), d_out.get(), N, /*K=*/0);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    for (float v : d_out.download()) {
+      EXPECT_EQ(v, 0.0f);
+    }
+  }
+  {
+    const std::vector<engine::half> poison(usize(N), engine::float_to_half(7.0f));
+    DeviceBuffer<engine::half> d_A(1);
+    DeviceBuffer<engine::half> d_x(1);
+    DeviceBuffer<engine::half> d_out(poison);
+    d_A.zero();
+    d_x.zero();
+
+    engine::cuda::gemv_fp16(d_A.get(), d_x.get(), d_out.get(), N, /*K=*/0);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    for (engine::half h : d_out.download()) {
+      EXPECT_EQ(engine::half_to_float(h), 0.0f);
+    }
   }
 }
 
@@ -1634,16 +1675,13 @@ TEST(kernels, empty_work_is_a_no_op_not_an_error) {
   EXPECT_NO_THROW(engine::cuda::rmsnorm_linear(p, p, p, p, 8, 0, 8, 1e-5f));
   EXPECT_NO_THROW(engine::cuda::rmsnorm_linear(p, p, p, p, 8, 8, 0, 1e-5f));
   EXPECT_NO_THROW(engine::cuda::gemv(p, p, p, 0, 8));
-  EXPECT_NO_THROW(engine::cuda::gemv(p, p, p, 8, 0));
   EXPECT_NO_THROW(engine::cuda::gemv_fp16(p_h, p_h, p_h, 0, 8));
-  EXPECT_NO_THROW(engine::cuda::gemv_fp16(p_h, p_h, p_h, 8, 0));
   EXPECT_NO_THROW(engine::cuda::embedding(p, p_i, p, 0, 8, 10));
   EXPECT_NO_THROW(engine::cuda::embedding(p, p_i, p, 8, 0, 10));
   EXPECT_NO_THROW(engine::cuda::embedding_fp16(p_h, p_i, p_h, 0, 8, 10));
   EXPECT_NO_THROW(engine::cuda::embedding_fp16(p_h, p_i, p_h, 8, 0, 10));
   EXPECT_NO_THROW(engine::cuda::matmul_register_tiled(p, p, p, 0, 8, 8));
   EXPECT_NO_THROW(engine::cuda::matmul_register_tiled(p, p, p, 8, 0, 8));
-  EXPECT_NO_THROW(engine::cuda::matmul_register_tiled(p, p, p, 8, 8, 0));
   EXPECT_NO_THROW(engine::cuda::swiglu(p, p, p, 0));
   EXPECT_NO_THROW(engine::cuda::swiglu_fp16(p_h, p_h, p_h, 0));
 
