@@ -2113,6 +2113,31 @@ namespace {
 double subblock_rtol() { return 16.0 * std::ldexp(1.0, -10); }
 double subblock_atol() { return 8.0 * std::ldexp(1.0, -10); }
 
+// Derived tolerance for the all-FP32 Llama FFN sub-block
+// (RMSNorm[F32] -> Gate/Up[F32] -> SwiGLU[F32 fast intrinsics] -> Down[F32] + Residual[F32]):
+// Gate/Up dot products accumulate K = d_model terms in FP32, SwiGLU uses __expf/__fdividef
+// (~4 * eps32), and Down accumulates K = d_ffn terms with Xavier 1/sqrt(K) scaling.
+// Componentwise error vs FP64 stays within 4 * eps32 * (sqrt(d_model) + sqrt(d_ffn)).
+double ffn_subblock_rtol(std::int64_t d_model, std::int64_t d_ffn) {
+  const double eps32 = std::ldexp(1.0, -23);
+  return 4.0 * eps32 *
+         (std::sqrt(static_cast<double>(d_model)) +
+          std::sqrt(static_cast<double>(d_ffn)));
+}
+double ffn_subblock_atol(std::int64_t d_model, std::int64_t d_ffn) {
+  return ffn_subblock_rtol(d_model, d_ffn);
+}
+
+// Derived tolerance for the full Llama Transformer Block (Attention + FFN sub-blocks):
+// Attention sub-block error propagates directly along the residual stream and is added to
+// the all-FP32 FFN error contribution.
+double block_rtol(std::int64_t d_model, std::int64_t d_ffn) {
+  return subblock_rtol() + ffn_subblock_rtol(d_model, d_ffn);
+}
+double block_atol(std::int64_t d_model, std::int64_t d_ffn) {
+  return subblock_atol() + ffn_subblock_atol(d_model, d_ffn);
+}
+
 void run_attention_subblock_gpu(const float* d_x, const float* d_rms_w, const float* d_wq,
                                 const float* d_wk, const float* d_wv, const float* d_wo,
                                 const float* d_cos, const float* d_sin,
@@ -2261,6 +2286,199 @@ std::vector<float> pseudo_normal_vec(std::size_t n, std::uint64_t seed, float sc
   }
   return out;
 }
+
+void run_ffn_subblock_gpu(const float* d_h, const float* d_ffn_norm_w,
+                          const float* d_w_gate, const float* d_w_up,
+                          const float* d_w_down, float* d_out, std::int64_t s_q,
+                          std::int64_t d_model, std::int64_t d_ffn, float eps) {
+  const std::size_t h_elems = static_cast<std::size_t>(s_q * d_model);
+  const std::size_t ffn_elems = static_cast<std::size_t>(s_q * d_ffn);
+
+  DeviceBuffer<float> d_h_norm(h_elems);
+  DeviceBuffer<float> d_gate(ffn_elems), d_up(ffn_elems), d_act(ffn_elems);
+  DeviceBuffer<float> d_down(h_elems);
+
+  engine::cuda::rmsnorm(d_h, d_ffn_norm_w, d_h_norm.get(), s_q, d_model, eps);
+  if (s_q > 1) {
+    engine::cuda::matmul_register_tiled(d_h_norm.get(), d_w_gate, d_gate.get(), s_q,
+                                        d_ffn, d_model);
+    engine::cuda::matmul_register_tiled(d_h_norm.get(), d_w_up, d_up.get(), s_q, d_ffn,
+                                        d_model);
+  } else {
+    engine::cuda::gemv(d_w_gate, d_h_norm.get(), d_gate.get(), d_ffn, d_model);
+    engine::cuda::gemv(d_w_up, d_h_norm.get(), d_up.get(), d_ffn, d_model);
+  }
+
+  engine::cuda::swiglu(d_gate.get(), d_up.get(), d_act.get(), s_q * d_ffn);
+
+  if (s_q > 1) {
+    engine::cuda::matmul_register_tiled(d_act.get(), d_w_down, d_down.get(), s_q, d_model,
+                                        d_ffn);
+  } else {
+    engine::cuda::gemv(d_w_down, d_act.get(), d_down.get(), d_model, d_ffn);
+  }
+  engine::cuda::vector_add(d_h, d_down.get(), d_out, s_q * d_model);
+}
+
+void run_ffn_subblock_cpu(const float* h, const float* ffn_norm_w, const float* w_gate,
+                          const float* w_up, const float* w_down, float* out,
+                          std::int64_t s_q, std::int64_t d_model, std::int64_t d_ffn,
+                          float eps) {
+  const std::size_t h_elems = static_cast<std::size_t>(s_q * d_model);
+  const std::size_t ffn_elems = static_cast<std::size_t>(s_q * d_ffn);
+
+  std::vector<float> h_norm(h_elems);
+  std::vector<float> gate(ffn_elems), up(ffn_elems), act(ffn_elems);
+  std::vector<float> down(h_elems);
+
+  engine::cpu::rmsnorm(h, ffn_norm_w, h_norm.data(), s_q, d_model, eps);
+  engine::cpu::matmul(h_norm.data(), w_gate, gate.data(), s_q, d_ffn, d_model);
+  engine::cpu::matmul(h_norm.data(), w_up, up.data(), s_q, d_ffn, d_model);
+  engine::cpu::swiglu(gate.data(), up.data(), act.data(), s_q * d_ffn);
+  engine::cpu::matmul(act.data(), w_down, down.data(), s_q, d_model, d_ffn);
+  engine::cpu::vector_add(h, down.data(), out, s_q * d_model);
+}
+
+void run_transformer_block_gpu(const float* d_x, const float* d_attn_rms_w,
+                               const float* d_wq, const float* d_wk, const float* d_wv,
+                               const float* d_wo, const float* d_cos, const float* d_sin,
+                               engine::half* d_k_cache, engine::half* d_v_cache,
+                               const float* d_ffn_rms_w, const float* d_w_gate,
+                               const float* d_w_up, const float* d_w_down, float* d_out,
+                               std::int64_t s_q, std::int64_t past_len,
+                               std::int64_t kv_max_seq, std::int64_t n_heads,
+                               std::int64_t n_kv_heads, std::int64_t head_dim,
+                               std::int64_t d_ffn, float eps) {
+  const std::int64_t d_model = n_heads * head_dim;
+  DeviceBuffer<float> d_h(static_cast<std::size_t>(s_q * d_model));
+  run_attention_subblock_gpu(d_x, d_attn_rms_w, d_wq, d_wk, d_wv, d_wo, d_cos, d_sin,
+                             d_k_cache, d_v_cache, d_h.get(), s_q, past_len, kv_max_seq,
+                             n_heads, n_kv_heads, head_dim, eps);
+  run_ffn_subblock_gpu(d_h.get(), d_ffn_rms_w, d_w_gate, d_w_up, d_w_down, d_out, s_q,
+                       d_model, d_ffn, eps);
+}
+
+void run_transformer_block_cpu(const float* x, const float* attn_rms_w, const float* wq,
+                               const float* wk, const float* wv, const float* wo,
+                               const float* cos_tbl, const float* sin_tbl,
+                               engine::half* k_cache, engine::half* v_cache,
+                               const float* ffn_rms_w, const float* w_gate,
+                               const float* w_up, const float* w_down, float* out,
+                               std::int64_t s_q, std::int64_t past_len,
+                               std::int64_t kv_max_seq, std::int64_t n_heads,
+                               std::int64_t n_kv_heads, std::int64_t head_dim,
+                               std::int64_t d_ffn, float eps) {
+  const std::int64_t d_model = n_heads * head_dim;
+  std::vector<float> h(static_cast<std::size_t>(s_q * d_model));
+  run_attention_subblock_cpu(x, attn_rms_w, wq, wk, wv, wo, cos_tbl, sin_tbl, k_cache,
+                             v_cache, h.data(), s_q, past_len, kv_max_seq, n_heads,
+                             n_kv_heads, head_dim, eps);
+  run_ffn_subblock_cpu(h.data(), ffn_rms_w, w_gate, w_up, w_down, out, s_q, d_model,
+                       d_ffn, eps);
+}
+
+void scatter_past_kv(const std::vector<engine::half>& k_past,
+                     const std::vector<engine::half>& v_past,
+                     std::vector<engine::half>& k_cache,
+                     std::vector<engine::half>& v_cache, std::int64_t n_kv_heads,
+                     std::int64_t past_len, std::int64_t kv_max_seq,
+                     std::int64_t head_dim) {
+  for (std::int64_t h = 0; h < n_kv_heads; ++h) {
+    const std::size_t src_off = static_cast<std::size_t>(h * past_len * head_dim);
+    const std::size_t dst_off = static_cast<std::size_t>(h * kv_max_seq * head_dim);
+    const std::size_t copy_len = static_cast<std::size_t>(past_len * head_dim);
+    std::copy_n(k_past.begin() + static_cast<std::ptrdiff_t>(src_off), copy_len,
+                k_cache.begin() + static_cast<std::ptrdiff_t>(dst_off));
+    std::copy_n(v_past.begin() + static_cast<std::ptrdiff_t>(src_off), copy_len,
+                v_cache.begin() + static_cast<std::ptrdiff_t>(dst_off));
+  }
+}
+
+struct TransformerLayerFixture {
+  std::int64_t n_heads, n_kv_heads, head_dim, d_model, d_kv, d_ffn, kv_max_seq;
+  float eps;
+
+  std::vector<float> h_attn_rms_w, h_wq, h_wk, h_wv, h_wo;
+  std::vector<float> h_ffn_rms_w, h_wgate, h_wup, h_wdown;
+  std::vector<engine::half> h_k_cache, h_v_cache;
+
+  DeviceBuffer<float> d_attn_rms_w, d_wq, d_wk, d_wv, d_wo;
+  DeviceBuffer<float> d_ffn_rms_w, d_wgate, d_wup, d_wdown;
+  DeviceBuffer<engine::half> d_k_cache, d_v_cache;
+
+  static std::vector<float> make_rms(std::int64_t d, std::uint64_t seed) {
+    std::vector<float> w(static_cast<std::size_t>(d), 1.0f);
+    const auto d_w = pseudo_normal_vec(static_cast<std::size_t>(d), seed, 0.1f);
+    for (std::size_t i = 0; i < w.size(); ++i) w[i] += d_w[i];
+    return w;
+  }
+
+  TransformerLayerFixture(std::int64_t n_h, std::int64_t n_kvh, std::int64_t hd,
+                          std::int64_t d_f, std::int64_t max_seq, std::uint64_t seed_base,
+                          float eps_val)
+      : n_heads(n_h),
+        n_kv_heads(n_kvh),
+        head_dim(hd),
+        d_model(n_h * hd),
+        d_kv(n_kvh * hd),
+        d_ffn(d_f),
+        kv_max_seq(max_seq),
+        eps(eps_val),
+        h_attn_rms_w(make_rms(d_model, seed_base + 1)),
+        h_wq(pseudo_normal_vec(static_cast<std::size_t>(d_model * d_model), seed_base + 2,
+                               1.0f / std::sqrt(static_cast<float>(d_model)))),
+        h_wk(pseudo_normal_vec(static_cast<std::size_t>(d_model * d_kv), seed_base + 3,
+                               1.0f / std::sqrt(static_cast<float>(d_model)))),
+        h_wv(pseudo_normal_vec(static_cast<std::size_t>(d_model * d_kv), seed_base + 4,
+                               1.0f / std::sqrt(static_cast<float>(d_model)))),
+        h_wo(pseudo_normal_vec(static_cast<std::size_t>(d_model * d_model), seed_base + 5,
+                               1.0f / std::sqrt(static_cast<float>(d_model)))),
+        h_ffn_rms_w(make_rms(d_model, seed_base + 6)),
+        h_wgate(pseudo_normal_vec(static_cast<std::size_t>(d_model * d_ffn),
+                                  seed_base + 7,
+                                  1.0f / std::sqrt(static_cast<float>(d_model)))),
+        h_wup(pseudo_normal_vec(static_cast<std::size_t>(d_model * d_ffn), seed_base + 8,
+                                1.0f / std::sqrt(static_cast<float>(d_model)))),
+        h_wdown(pseudo_normal_vec(static_cast<std::size_t>(d_ffn * d_model),
+                                  seed_base + 9,
+                                  1.0f / std::sqrt(static_cast<float>(d_ffn)))),
+        h_k_cache(static_cast<std::size_t>(n_kv_heads * kv_max_seq * head_dim),
+                  engine::float_to_half(0.0f)),
+        h_v_cache(static_cast<std::size_t>(n_kv_heads * kv_max_seq * head_dim),
+                  engine::float_to_half(0.0f)),
+        d_attn_rms_w(h_attn_rms_w),
+        d_wq(h_wq),
+        d_wk(h_wk),
+        d_wv(h_wv),
+        d_wo(h_wo),
+        d_ffn_rms_w(h_ffn_rms_w),
+        d_wgate(h_wgate),
+        d_wup(h_wup),
+        d_wdown(h_wdown),
+        d_k_cache(h_k_cache.size()),
+        d_v_cache(h_v_cache.size()) {
+    d_k_cache.zero();
+    d_v_cache.zero();
+  }
+
+  void run_gpu(const float* d_x, const float* d_cos, const float* d_sin, float* d_out,
+               std::int64_t s_q, std::int64_t past_len) {
+    run_transformer_block_gpu(d_x, d_attn_rms_w.get(), d_wq.get(), d_wk.get(), d_wv.get(),
+                              d_wo.get(), d_cos, d_sin, d_k_cache.get(), d_v_cache.get(),
+                              d_ffn_rms_w.get(), d_wgate.get(), d_wup.get(),
+                              d_wdown.get(), d_out, s_q, past_len, kv_max_seq, n_heads,
+                              n_kv_heads, head_dim, d_ffn, eps);
+  }
+
+  void run_cpu(const float* x, const float* cos_tbl, const float* sin_tbl, float* out,
+               std::int64_t s_q, std::int64_t past_len) {
+    run_transformer_block_cpu(
+        x, h_attn_rms_w.data(), h_wq.data(), h_wk.data(), h_wv.data(), h_wo.data(),
+        cos_tbl, sin_tbl, h_k_cache.data(), h_v_cache.data(), h_ffn_rms_w.data(),
+        h_wgate.data(), h_wup.data(), h_wdown.data(), out, s_q, past_len, kv_max_seq,
+        n_heads, n_kv_heads, head_dim, d_ffn, eps);
+  }
+};
 
 }  // namespace
 
@@ -2416,6 +2634,193 @@ TEST(kernels, attention_subblock_tinyllama_shape) {
   const auto gpu_out2 = d_out2.download();
   CHECK_CASE("tinyllama subblock decode step2 kv=66", gpu_out2.data(), cpu_out2.data(),
              gpu_out2.size(), subblock_rtol(), subblock_atol());
+}
+
+TEST(kernels, ffn_subblock_matches_reference) {
+  REQUIRE_CUDA_DEVICE();
+  struct FfnGolden {
+    const char* stem;
+    std::int64_t s_q, d_model, d_ffn;
+  };
+  const FfnGolden cases[] = {
+      {"ffn_subblock__prefill_s16_d512_ffn1408", 16, 512, 1408},
+      {"ffn_subblock__decode_s1_d512_ffn1408", 1, 512, 1408},
+  };
+
+  for (const auto& c : cases) {
+    LOAD_GOLDEN(g, c.stem);
+    DeviceBuffer<float> d_x(g.at("x").data);
+    DeviceBuffer<float> d_rms_w(g.at("ffn_rms_w").data);
+    DeviceBuffer<float> d_w_gate(g.at("w_gate").data);
+    DeviceBuffer<float> d_w_up(g.at("w_up").data);
+    DeviceBuffer<float> d_w_down(g.at("w_down").data);
+    DeviceBuffer<float> d_out(static_cast<std::size_t>(c.s_q * c.d_model));
+    d_out.zero();
+
+    run_ffn_subblock_gpu(d_x.get(), d_rms_w.get(), d_w_gate.get(), d_w_up.get(),
+                         d_w_down.get(), d_out.get(), c.s_q, c.d_model, c.d_ffn,
+                         /*eps=*/1e-5f);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    const auto got = d_out.download();
+    const auto& exp = g.at("expected").data;
+    CHECK_CASE(c.stem, got.data(), exp.data(), got.size(),
+               ffn_subblock_rtol(c.d_model, c.d_ffn),
+               ffn_subblock_atol(c.d_model, c.d_ffn));
+  }
+}
+
+TEST(kernels, transformer_block_prefill_and_decode_golden) {
+  REQUIRE_CUDA_DEVICE();
+  struct BlockGolden {
+    const char* stem;
+    std::int64_t s_q, past_len, n_heads, n_kv_heads, head_dim, d_ffn;
+  };
+  const BlockGolden cases[] = {
+      {"transformer_block__prefill_s16_h8_kv2_d64_ffn1408", 16, 0, 8, 2, 64, 1408},
+      {"transformer_block__decode_s1_kv17_h8_kv2_d64_ffn1408", 1, 16, 8, 2, 64, 1408},
+  };
+
+  for (const auto& c : cases) {
+    LOAD_GOLDEN(g, c.stem);
+    const std::int64_t kv_max_seq = c.past_len + c.s_q;
+    const std::int64_t d_model = c.n_heads * c.head_dim;
+    const std::size_t cache_elems =
+        static_cast<std::size_t>(c.n_kv_heads * kv_max_seq * c.head_dim);
+
+    DeviceBuffer<float> d_x(g.at("x").data);
+    DeviceBuffer<float> d_attn_rms_w(g.at("attn_rms_w").data);
+    DeviceBuffer<float> d_wq(g.at("w_q").data);
+    DeviceBuffer<float> d_wk(g.at("w_k").data);
+    DeviceBuffer<float> d_wv(g.at("w_v").data);
+    DeviceBuffer<float> d_wo(g.at("w_o").data);
+    DeviceBuffer<float> d_cos(g.at("cos").data);
+    DeviceBuffer<float> d_sin(g.at("sin").data);
+    DeviceBuffer<float> d_ffn_rms_w(g.at("ffn_rms_w").data);
+    DeviceBuffer<float> d_w_gate(g.at("w_gate").data);
+    DeviceBuffer<float> d_w_up(g.at("w_up").data);
+    DeviceBuffer<float> d_w_down(g.at("w_down").data);
+    DeviceBuffer<float> d_out(static_cast<std::size_t>(c.s_q * d_model));
+    d_out.zero();
+
+    std::vector<engine::half> h_k_cache(cache_elems, engine::float_to_half(0.0f));
+    std::vector<engine::half> h_v_cache(cache_elems, engine::float_to_half(0.0f));
+    if (c.past_len > 0) {
+      scatter_past_kv(to_half_vec(g.at("k_past").data), to_half_vec(g.at("v_past").data),
+                      h_k_cache, h_v_cache, c.n_kv_heads, c.past_len, kv_max_seq,
+                      c.head_dim);
+    }
+    DeviceBuffer<engine::half> d_k_cache(h_k_cache);
+    DeviceBuffer<engine::half> d_v_cache(h_v_cache);
+
+    run_transformer_block_gpu(
+        d_x.get(), d_attn_rms_w.get(), d_wq.get(), d_wk.get(), d_wv.get(), d_wo.get(),
+        d_cos.get(), d_sin.get(), d_k_cache.get(), d_v_cache.get(), d_ffn_rms_w.get(),
+        d_w_gate.get(), d_w_up.get(), d_w_down.get(), d_out.get(), c.s_q, c.past_len,
+        kv_max_seq, c.n_heads, c.n_kv_heads, c.head_dim, c.d_ffn, /*eps=*/1e-5f);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    const auto got = d_out.download();
+    const auto& exp = g.at("expected").data;
+    CHECK_CASE(c.stem, got.data(), exp.data(), got.size(), block_rtol(d_model, c.d_ffn),
+               block_atol(d_model, c.d_ffn));
+  }
+}
+
+TEST(kernels, transformer_block_tinyllama_shape) {
+  REQUIRE_CUDA_DEVICE();
+  // Exact TinyLlama-1.1B transformer layer dimensions: prefill (s_q=16) followed
+  // sequentially by two single-token decode steps (kv_len=17, 18) sharing the KV cache.
+  constexpr std::int64_t n_heads = 32;
+  constexpr std::int64_t n_kv_heads = 4;
+  constexpr std::int64_t head_dim = 64;
+  constexpr std::int64_t d_model = n_heads * head_dim;  // 2048
+  constexpr std::int64_t d_ffn = 5632;
+  constexpr std::int64_t s_prefill = 16;
+  constexpr std::int64_t kv_max_seq = 32;
+  constexpr float eps = 1e-5f;
+
+  TransformerLayerFixture layer(n_heads, n_kv_heads, head_dim, d_ffn, kv_max_seq,
+                                /*seed_base=*/1000u, eps);
+
+  std::vector<float> h_cos(static_cast<std::size_t>(kv_max_seq * (head_dim / 2)));
+  std::vector<float> h_sin(static_cast<std::size_t>(kv_max_seq * (head_dim / 2)));
+  engine::cpu::rope_precompute_tables(h_cos.data(), h_sin.data(), kv_max_seq, head_dim);
+  DeviceBuffer<float> d_cos(h_cos), d_sin(h_sin);
+
+  const auto run_step = [&](const char* label, std::uint64_t x_seed, std::int64_t s_q,
+                            std::int64_t past_len) {
+    const auto h_x =
+        pseudo_normal_vec(static_cast<std::size_t>(s_q * d_model), x_seed, 1.0f);
+    DeviceBuffer<float> d_x(h_x), d_out(h_x.size());
+    d_out.zero();
+    std::vector<float> cpu_out(h_x.size());
+
+    layer.run_gpu(d_x.get(), d_cos.get(), d_sin.get(), d_out.get(), s_q, past_len);
+    layer.run_cpu(h_x.data(), h_cos.data(), h_sin.data(), cpu_out.data(), s_q, past_len);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    const auto gpu_out = d_out.download();
+    CHECK_CASE(label, gpu_out.data(), cpu_out.data(), gpu_out.size(),
+               block_rtol(d_model, d_ffn), block_atol(d_model, d_ffn));
+  };
+
+  run_step("tinyllama block prefill s=16", 1201u, s_prefill, /*past_len=*/0);
+  run_step("tinyllama block decode step1 kv=17", 1202u, /*s_q=*/1, /*past_len=*/16);
+  run_step("tinyllama block decode step2 kv=18", 1203u, /*s_q=*/1, /*past_len=*/17);
+}
+
+TEST(kernels, transformer_block_two_layers) {
+  REQUIRE_CUDA_DEVICE();
+  // Chain two independent TinyLlama-shaped layers sequentially across prefill (s_q=8)
+  // and decode (kv_len=9) to verify residual precision accumulation & KV isolation.
+  constexpr std::int64_t n_heads = 32;
+  constexpr std::int64_t n_kv_heads = 4;
+  constexpr std::int64_t head_dim = 64;
+  constexpr std::int64_t d_model = n_heads * head_dim;  // 2048
+  constexpr std::int64_t d_ffn = 5632;
+  constexpr std::int64_t kv_max_seq = 16;
+  constexpr float eps = 1e-5f;
+
+  TransformerLayerFixture layer0(n_heads, n_kv_heads, head_dim, d_ffn, kv_max_seq,
+                                 /*seed_base=*/2000u, eps);
+  TransformerLayerFixture layer1(n_heads, n_kv_heads, head_dim, d_ffn, kv_max_seq,
+                                 /*seed_base=*/3000u, eps);
+
+  std::vector<float> h_cos(static_cast<std::size_t>(kv_max_seq * (head_dim / 2)));
+  std::vector<float> h_sin(static_cast<std::size_t>(kv_max_seq * (head_dim / 2)));
+  engine::cpu::rope_precompute_tables(h_cos.data(), h_sin.data(), kv_max_seq, head_dim);
+  DeviceBuffer<float> d_cos(h_cos), d_sin(h_sin);
+
+  // Two stacked layers compound single-layer rounding error additively along the
+  // residual stream (~2x single-layer block bound).
+  const double two_layer_rtol = 2.0 * block_rtol(d_model, d_ffn);
+  const double two_layer_atol = 2.0 * block_atol(d_model, d_ffn);
+
+  const auto run_two_layer_step = [&](const char* label, std::uint64_t x_seed,
+                                      std::int64_t s_q, std::int64_t past_len) {
+    const auto h_x =
+        pseudo_normal_vec(static_cast<std::size_t>(s_q * d_model), x_seed, 1.0f);
+    DeviceBuffer<float> d_x(h_x), d_mid(h_x.size()), d_out(h_x.size());
+    d_mid.zero();
+    d_out.zero();
+    std::vector<float> cpu_mid(h_x.size()), cpu_out(h_x.size());
+
+    layer0.run_gpu(d_x.get(), d_cos.get(), d_sin.get(), d_mid.get(), s_q, past_len);
+    layer1.run_gpu(d_mid.get(), d_cos.get(), d_sin.get(), d_out.get(), s_q, past_len);
+
+    layer0.run_cpu(h_x.data(), h_cos.data(), h_sin.data(), cpu_mid.data(), s_q, past_len);
+    layer1.run_cpu(cpu_mid.data(), h_cos.data(), h_sin.data(), cpu_out.data(), s_q,
+                   past_len);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    const auto gpu_out = d_out.download();
+    CHECK_CASE(label, gpu_out.data(), cpu_out.data(), gpu_out.size(), two_layer_rtol,
+               two_layer_atol);
+  };
+
+  run_two_layer_step("two-layer prefill s=8", 2201u, /*s_q=*/8, /*past_len=*/0);
+  run_two_layer_step("two-layer decode kv=9", 2202u, /*s_q=*/1, /*past_len=*/8);
 }
 
 #endif  // ENGINE_HAS_CUDA

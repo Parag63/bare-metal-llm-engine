@@ -483,6 +483,20 @@ SUBBLOCK_CASES = [
     ("decode_s1_kv257_h8_kv2_d64", 1, 256, 8, 2, 64),
 ]
 
+# Module 4 Phase 10 -- FFN Sub-Block cases:
+# (name, s_q, d_model, d_ffn)
+FFN_SUBBLOCK_CASES = [
+    ("prefill_s16_d512_ffn1408", 16, 512, 1408),
+    ("decode_s1_d512_ffn1408", 1, 512, 1408),
+]
+
+# Module 4 Phase 10 -- Full Transformer Block cases (Attention + FFN):
+# (name, s_q, past_len, n_heads, n_kv_heads, head_dim, d_ffn)
+TRANSFORMER_BLOCK_CASES = [
+    ("prefill_s16_h8_kv2_d64_ffn1408", 16, 0, 8, 2, 64, 1408),
+    ("decode_s1_kv17_h8_kv2_d64_ffn1408", 1, 16, 8, 2, 64, 1408),
+]
+
 
 def run_attention_subblock(
     backend,
@@ -523,6 +537,60 @@ def run_attention_subblock(
     )
     o_proj = backend.matmul(attn_out.reshape(s_q, d_attn), w_o)
     return backend.vector_add(x, o_proj)
+
+
+def run_ffn_subblock(backend, x, ffn_rms_w, w_gate, w_up, w_down, eps):
+    """Float64 Tier-1 reference for the Llama SwiGLU FFN sub-block."""
+    x_norm = backend.rmsnorm(x, ffn_rms_w, eps)
+    gate = backend.matmul(x_norm, w_gate)
+    up = backend.matmul(x_norm, w_up)
+    act = backend.swiglu(gate, up)
+    down = backend.matmul(act, w_down)
+    return backend.vector_add(x, down)
+
+
+def run_transformer_block(
+    backend,
+    x,
+    attn_rms_w,
+    w_q,
+    w_k,
+    w_v,
+    w_o,
+    cos,
+    sin,
+    k_past,
+    v_past,
+    ffn_rms_w,
+    w_gate,
+    w_up,
+    w_down,
+    n_heads,
+    n_kv_heads,
+    head_dim,
+    past_len,
+    eps,
+):
+    """Float64 Tier-1 reference for one complete Llama transformer layer."""
+    h = run_attention_subblock(
+        backend,
+        x,
+        attn_rms_w,
+        w_q,
+        w_k,
+        w_v,
+        w_o,
+        cos,
+        sin,
+        k_past,
+        v_past,
+        n_heads,
+        n_kv_heads,
+        head_dim,
+        past_len,
+        eps,
+    )
+    return run_ffn_subblock(backend, h, ffn_rms_w, w_gate, w_up, w_down, eps)
 
 
 def build_cases(rng, backend):
@@ -834,6 +902,102 @@ def build_cases(rng, backend):
             tensors["k_past"] = k_past
             tensors["v_past"] = v_past
         yield f"attn_subblock__{name}", tensors
+
+    def sample_ffn_weights(d_model: int, d_ffn: int):
+        inv_in = np.float32(1.0 / np.sqrt(float(d_model)))
+        inv_ffn = np.float32(1.0 / np.sqrt(float(d_ffn)))
+        ffn_rms_w = (
+            rng.standard_normal(d_model, dtype=np.float32) * np.float32(0.1) + np.float32(1.0)
+        ).astype(np.float32)
+        w_gate = (rng.standard_normal((d_model, d_ffn), dtype=np.float32) * inv_in).astype(np.float32)
+        w_up = (rng.standard_normal((d_model, d_ffn), dtype=np.float32) * inv_in).astype(np.float32)
+        w_down = (rng.standard_normal((d_ffn, d_model), dtype=np.float32) * inv_ffn).astype(np.float32)
+        return ffn_rms_w, w_gate, w_up, w_down
+
+    # --- Module 4 Phase 10: FFN Sub-Block Integration -----------------------
+    for name, s_q, d_model, d_ffn in FFN_SUBBLOCK_CASES:
+        x = rng.standard_normal((s_q, d_model), dtype=np.float32)
+        ffn_rms_w, w_gate, w_up, w_down = sample_ffn_weights(d_model, d_ffn)
+        expected = run_ffn_subblock(backend, x, ffn_rms_w, w_gate, w_up, w_down, eps)
+        yield f"ffn_subblock__{name}", {
+            "x": x,
+            "ffn_rms_w": ffn_rms_w,
+            "w_gate": w_gate,
+            "w_up": w_up,
+            "w_down": w_down,
+            "expected": expected,
+        }
+
+    # --- Module 4 Phase 10: Full Transformer Block Integration --------------
+    for name, s_q, past_len, n_heads, n_kv_heads, head_dim, d_ffn in TRANSFORMER_BLOCK_CASES:
+        d_model = n_heads * head_dim
+        d_kv = n_kv_heads * head_dim
+        inv_in = np.float32(1.0 / np.sqrt(float(d_model)))
+        x = rng.standard_normal((s_q, d_model), dtype=np.float32)
+        attn_rms_w = (
+            rng.standard_normal(d_model, dtype=np.float32) * np.float32(0.1) + np.float32(1.0)
+        ).astype(np.float32)
+        w_q = (rng.standard_normal((d_model, d_model), dtype=np.float32) * inv_in).astype(np.float32)
+        w_k = (rng.standard_normal((d_model, d_kv), dtype=np.float32) * inv_in).astype(np.float32)
+        w_v = (rng.standard_normal((d_model, d_kv), dtype=np.float32) * inv_in).astype(np.float32)
+        w_o = (rng.standard_normal((d_model, d_model), dtype=np.float32) * inv_in).astype(np.float32)
+        ffn_rms_w, w_gate, w_up, w_down = sample_ffn_weights(d_model, d_ffn)
+
+        cos_table_64, sin_table_64 = NumpyBackend.rope_tables(past_len + s_q, head_dim)
+        cos_table = cos_table_64.astype(np.float32)
+        sin_table = sin_table_64.astype(np.float32)
+
+        k_past = None
+        v_past = None
+        if past_len > 0:
+            k_past = rng.standard_normal((n_kv_heads, past_len, head_dim), dtype=np.float32).astype(
+                np.float16
+            )
+            v_past = rng.standard_normal((n_kv_heads, past_len, head_dim), dtype=np.float32).astype(
+                np.float16
+            )
+
+        expected = run_transformer_block(
+            backend,
+            x,
+            attn_rms_w,
+            w_q,
+            w_k,
+            w_v,
+            w_o,
+            cos_table[past_len:].astype(np.float64),
+            sin_table[past_len:].astype(np.float64),
+            k_past,
+            v_past,
+            ffn_rms_w,
+            w_gate,
+            w_up,
+            w_down,
+            n_heads,
+            n_kv_heads,
+            head_dim,
+            past_len,
+            eps,
+        )
+        tensors = {
+            "x": x,
+            "attn_rms_w": attn_rms_w,
+            "w_q": w_q,
+            "w_k": w_k,
+            "w_v": w_v,
+            "w_o": w_o,
+            "cos": cos_table,
+            "sin": sin_table,
+            "ffn_rms_w": ffn_rms_w,
+            "w_gate": w_gate,
+            "w_up": w_up,
+            "w_down": w_down,
+            "expected": expected,
+        }
+        if k_past is not None:
+            tensors["k_past"] = k_past
+            tensors["v_past"] = v_past
+        yield f"transformer_block__{name}", tensors
 
 
 def main() -> int:

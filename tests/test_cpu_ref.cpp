@@ -1140,3 +1140,201 @@ TEST(cpu_ref, rope_matches_reference) {
   EXPECT_THROWS(engine::cpu::rope(q_buf.data(), q_buf.data(), tab.data(), tab.data(), 1,
                                   1, 1, 64, -1));
 }
+
+namespace {
+
+// Derived tolerances for Phase 10 integrated blocks:
+//   * FFN Sub-Block (FP32-only path: RMSNorm -> Gate/Up GEMM -> SwiGLU -> Down GEMM -> Residual):
+//     Expectations come from float64 Tier-1 reference; CPU oracle accumulates GEMMs in double
+//     and rounds intermediate activations at FP32 boundaries (eps32 = 2^-23). With unit-scale RMS
+//     inputs and Xavier 1/sqrt(K) weights, rounding noise after two contractions (K=d_model then
+//     K=d_ffn) plus SiLU evaluation stays bounded within 4 * eps32 * (sqrt(d_model) + sqrt(d_ffn)).
+double ffn_subblock_rtol(std::int64_t d_model, std::int64_t d_ffn) {
+  const double eps32 = std::ldexp(1.0, -23);
+  return 4.0 * eps32 *
+         (std::sqrt(static_cast<double>(d_model)) +
+          std::sqrt(static_cast<double>(d_ffn)));
+}
+double ffn_subblock_atol(std::int64_t d_model, std::int64_t d_ffn) {
+  return ffn_subblock_rtol(d_model, d_ffn);
+}
+
+//   * Attention Sub-Block: two binary16 truncation boundaries (Q/K/V cast and Attention output)
+//     with unit-RMS inputs and W_o spectral norm ~ 2 -> 16 * eps16 relative, 8 * eps16 absolute.
+double subblock_rtol() { return 16.0 * std::ldexp(1.0, -10); }
+double subblock_atol() { return 8.0 * std::ldexp(1.0, -10); }
+
+//   * Full Transformer Block (Attention Sub-Block followed by FFN Sub-Block):
+//     Additive error bound over the two sequential sub-blocks: attention output error + FFN error.
+double block_rtol(std::int64_t d_model, std::int64_t d_ffn) {
+  return subblock_rtol() + ffn_subblock_rtol(d_model, d_ffn);
+}
+double block_atol(std::int64_t d_model, std::int64_t d_ffn) {
+  return subblock_atol() + ffn_subblock_atol(d_model, d_ffn);
+}
+
+void run_attention_subblock_cpu(const float* x, const float* rms_w, const float* wq,
+                                const float* wk, const float* wv, const float* wo,
+                                const float* cos_tbl, const float* sin_tbl,
+                                engine::half* k_cache, engine::half* v_cache, float* out,
+                                std::int64_t s_q, std::int64_t past_len,
+                                std::int64_t kv_max_seq, std::int64_t n_heads,
+                                std::int64_t n_kv_heads, std::int64_t head_dim,
+                                float eps) {
+  const std::int64_t d_model = n_heads * head_dim;
+  const std::int64_t d_kv = n_kv_heads * head_dim;
+  const std::size_t q_elems = static_cast<std::size_t>(s_q * d_model);
+  const std::size_t kv_elems = static_cast<std::size_t>(s_q * d_kv);
+
+  std::vector<float> x_norm(q_elems);
+  std::vector<float> q_f32(q_elems), k_f32(kv_elems), v_f32(kv_elems);
+  engine::cpu::rmsnorm(x, rms_w, x_norm.data(), s_q, d_model, eps);
+  engine::cpu::matmul(x_norm.data(), wq, q_f32.data(), s_q, d_model, d_model);
+  engine::cpu::matmul(x_norm.data(), wk, k_f32.data(), s_q, d_kv, d_model);
+  engine::cpu::matmul(x_norm.data(), wv, v_f32.data(), s_q, d_kv, d_model);
+
+  auto q_f16 = to_half_vec(q_f32);
+  auto k_f16 = to_half_vec(k_f32);
+  auto v_f16 = to_half_vec(v_f32);
+  engine::cpu::rope(q_f16.data(), k_f16.data(), cos_tbl, sin_tbl, s_q, n_heads,
+                    n_kv_heads, head_dim, past_len, engine::RopeConvention::RotateHalf);
+
+  for (std::int64_t t = 0; t < s_q; ++t) {
+    for (std::int64_t h = 0; h < n_kv_heads; ++h) {
+      const std::size_t src_off =
+          static_cast<std::size_t>((t * n_kv_heads + h) * head_dim);
+      const std::size_t dst_off =
+          static_cast<std::size_t>((h * kv_max_seq + past_len + t) * head_dim);
+      for (std::int64_t d = 0; d < head_dim; ++d) {
+        k_cache[dst_off + static_cast<std::size_t>(d)] =
+            k_f16[src_off + static_cast<std::size_t>(d)];
+        v_cache[dst_off + static_cast<std::size_t>(d)] =
+            v_f16[src_off + static_cast<std::size_t>(d)];
+      }
+    }
+  }
+
+  std::vector<engine::half> attn_f16(q_elems);
+  const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+  engine::cpu::attention(q_f16.data(), k_cache, v_cache, attn_f16.data(), s_q,
+                         past_len + s_q, n_heads, n_kv_heads, head_dim,
+                         kv_max_seq * head_dim, scale, past_len,
+                         /*is_causal=*/(s_q > 1));
+
+  const auto attn_f32 = to_float_vec(attn_f16);
+  std::vector<float> o_proj(q_elems);
+  engine::cpu::matmul(attn_f32.data(), wo, o_proj.data(), s_q, d_model, d_model);
+  engine::cpu::vector_add(x, o_proj.data(), out, s_q * d_model);
+}
+
+void run_ffn_subblock_cpu(const float* h, const float* ffn_rms_w, const float* w_gate,
+                          const float* w_up, const float* w_down, float* out,
+                          std::int64_t s_q, std::int64_t d_model, std::int64_t d_ffn,
+                          float eps) {
+  const std::size_t h_elems = static_cast<std::size_t>(s_q * d_model);
+  const std::size_t ffn_elems = static_cast<std::size_t>(s_q * d_ffn);
+
+  std::vector<float> h_norm(h_elems);
+  std::vector<float> gate(ffn_elems), up(ffn_elems), act(ffn_elems);
+  std::vector<float> down(h_elems);
+
+  engine::cpu::rmsnorm(h, ffn_rms_w, h_norm.data(), s_q, d_model, eps);
+  engine::cpu::matmul(h_norm.data(), w_gate, gate.data(), s_q, d_ffn, d_model);
+  engine::cpu::matmul(h_norm.data(), w_up, up.data(), s_q, d_ffn, d_model);
+  engine::cpu::swiglu(gate.data(), up.data(), act.data(), s_q * d_ffn);
+  engine::cpu::matmul(act.data(), w_down, down.data(), s_q, d_model, d_ffn);
+  engine::cpu::vector_add(h, down.data(), out, s_q * d_model);
+}
+
+void run_transformer_block_cpu(const float* x, const float* attn_rms_w, const float* w_q,
+                               const float* w_k, const float* w_v, const float* w_o,
+                               const float* cos_tbl, const float* sin_tbl,
+                               engine::half* k_cache, engine::half* v_cache,
+                               const float* ffn_rms_w, const float* w_gate,
+                               const float* w_up, const float* w_down, float* out,
+                               std::int64_t s_q, std::int64_t past_len,
+                               std::int64_t kv_max_seq, std::int64_t n_heads,
+                               std::int64_t n_kv_heads, std::int64_t head_dim,
+                               std::int64_t d_ffn, float eps) {
+  const std::int64_t d_model = n_heads * head_dim;
+  std::vector<float> h(static_cast<std::size_t>(s_q * d_model));
+  run_attention_subblock_cpu(x, attn_rms_w, w_q, w_k, w_v, w_o, cos_tbl, sin_tbl, k_cache,
+                             v_cache, h.data(), s_q, past_len, kv_max_seq, n_heads,
+                             n_kv_heads, head_dim, eps);
+  run_ffn_subblock_cpu(h.data(), ffn_rms_w, w_gate, w_up, w_down, out, s_q, d_model,
+                       d_ffn, eps);
+}
+
+}  // namespace
+
+TEST(cpu_ref, ffn_subblock_matches_reference) {
+  struct FfnGolden {
+    const char* stem;
+    std::int64_t s_q, d_model, d_ffn;
+  };
+  const FfnGolden cases[] = {
+      {"ffn_subblock__prefill_s16_d512_ffn1408", 16, 512, 1408},
+      {"ffn_subblock__decode_s1_d512_ffn1408", 1, 512, 1408},
+  };
+
+  for (const auto& c : cases) {
+    LOAD_GOLDEN(g, c.stem);
+    std::vector<float> out(static_cast<std::size_t>(c.s_q * c.d_model));
+    run_ffn_subblock_cpu(g.at("x").data.data(), g.at("ffn_rms_w").data.data(),
+                         g.at("w_gate").data.data(), g.at("w_up").data.data(),
+                         g.at("w_down").data.data(), out.data(), c.s_q, c.d_model,
+                         c.d_ffn, kEps);
+    const auto& exp = g.at("expected").data;
+    CHECK_CASE(c.stem, out.data(), exp.data(), out.size(),
+               ffn_subblock_rtol(c.d_model, c.d_ffn),
+               ffn_subblock_atol(c.d_model, c.d_ffn));
+  }
+}
+
+TEST(cpu_ref, transformer_block_matches_reference) {
+  struct TransformerGolden {
+    const char* stem;
+    std::int64_t s_q, past_len, n_heads, n_kv_heads, head_dim, d_ffn;
+  };
+  const TransformerGolden cases[] = {
+      {"transformer_block__prefill_s16_h8_kv2_d64_ffn1408", 16, 0, 8, 2, 64, 1408},
+      {"transformer_block__decode_s1_kv17_h8_kv2_d64_ffn1408", 1, 16, 8, 2, 64, 1408},
+  };
+
+  for (const auto& c : cases) {
+    LOAD_GOLDEN(g, c.stem);
+    const std::int64_t kv_max_seq = c.past_len + c.s_q;
+    const std::int64_t d_model = c.n_heads * c.head_dim;
+    const std::size_t cache_elems =
+        static_cast<std::size_t>(c.n_kv_heads * kv_max_seq * c.head_dim);
+
+    std::vector<engine::half> k_cache(cache_elems, engine::float_to_half(0.0f));
+    std::vector<engine::half> v_cache(cache_elems, engine::float_to_half(0.0f));
+    if (c.past_len > 0) {
+      const auto k_past = to_half_vec(g.at("k_past").data);
+      const auto v_past = to_half_vec(g.at("v_past").data);
+      for (std::int64_t h = 0; h < c.n_kv_heads; ++h) {
+        const std::size_t src_off = static_cast<std::size_t>(h * c.past_len * c.head_dim);
+        const std::size_t dst_off = static_cast<std::size_t>(h * kv_max_seq * c.head_dim);
+        const std::size_t copy_len = static_cast<std::size_t>(c.past_len * c.head_dim);
+        std::copy_n(k_past.begin() + static_cast<std::ptrdiff_t>(src_off), copy_len,
+                    k_cache.begin() + static_cast<std::ptrdiff_t>(dst_off));
+        std::copy_n(v_past.begin() + static_cast<std::ptrdiff_t>(src_off), copy_len,
+                    v_cache.begin() + static_cast<std::ptrdiff_t>(dst_off));
+      }
+    }
+
+    std::vector<float> out(static_cast<std::size_t>(c.s_q * d_model));
+    run_transformer_block_cpu(
+        g.at("x").data.data(), g.at("attn_rms_w").data.data(), g.at("w_q").data.data(),
+        g.at("w_k").data.data(), g.at("w_v").data.data(), g.at("w_o").data.data(),
+        g.at("cos").data.data(), g.at("sin").data.data(), k_cache.data(), v_cache.data(),
+        g.at("ffn_rms_w").data.data(), g.at("w_gate").data.data(),
+        g.at("w_up").data.data(), g.at("w_down").data.data(), out.data(), c.s_q,
+        c.past_len, kv_max_seq, c.n_heads, c.n_kv_heads, c.head_dim, c.d_ffn, kEps);
+
+    const auto& exp = g.at("expected").data;
+    CHECK_CASE(c.stem, out.data(), exp.data(), out.size(), block_rtol(d_model, c.d_ffn),
+               block_atol(d_model, c.d_ffn));
+  }
+}

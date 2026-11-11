@@ -7,9 +7,9 @@ inference path.
 
 B.Tech CSE major project · Parag Das (2303344) · Jul 2026 – Jun 2027
 
-> **Status: Modules 1, 2, 3 & 4 complete (FlashAttention-2, FlashDecoding & RoPE). Moving to Quantization (Module 5).**
+> **Status: Modules 1, 2, 3 & 4 complete (FlashAttention-2, FlashDecoding, RoPE & Transformer Block Integration). Moving to Quantization (Module 5).**
 > The tensor library, 18 hand-written CUDA kernels (including FlashAttention-2 prefill, FlashDecoding split-KV, RoPE, FP16 GEMV, fused SwiGLU, and 2D register-tiled GEMM), and the full
-> verification/benchmark infrastructure are implemented and verified. `passed 141  failed 0  pending 0` across
+> verification/benchmark infrastructure are implemented and verified. `passed 147  failed 0  pending 0` across
 > 8 test suites (`dtype`, `golden`, `cpu_ref`, `storage`, `tensor`, `allocator`, `kernels`, `all`) on the CUDA-enabled build (RTX 4070 SUPER, nvcc 12.6). Decode attention hits **463.6 GB/s (92.0% peak BW)** at `L=8192`,
 > FlashAttention-2 prefill reaches **14.0 TFLOP/s** at `S=4096` (**16.1×** faster than naive), and 2D register-tiled GEMM reaches **16.6+ TFLOP/s** at `4096³`.
 
@@ -35,7 +35,7 @@ measured against. Neither is linked into the engine
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build -j
-python3 tools/gen_reference.py           # writes ~56 MiB of float64 reference data
+python3 tools/gen_reference.py           # writes ~105 MiB of float64 reference data
 ctest --test-dir build --output-on-failure
 build/bin/bench_cpu_ref
 ```
@@ -59,7 +59,7 @@ src/                C++ implementation (tensor, allocator, pool_allocator)
 src/cpu_ref/        the CPU oracle: scalar, FP64 accumulators (13 ops incl. attention & RoPE)
 kernels/            CUDA kernels — 18 implemented (ladder + fusion + attention/RoPE + bridge)
 tests/              custom harness + suites: dtype, golden, cpu_ref, storage, tensor,
-                    allocator, kernels (141 tests across 8 CTest suites, all passing)
+                    allocator, kernels (147 tests across 8 CTest suites, all passing)
 tests/golden/       generated float64 reference data — gitignored, regenerate it
 bench/              bench_cpu_ref (the denominator) and bench_kernels (with --json support)
 tools/              gen_reference.py, generate_results_table.py, roofline_plot.py
@@ -230,7 +230,7 @@ files; `--target bench` runs the benchmark binaries.
 - [x] **Module 4 — FlashAttention-2 & FlashDecoding** (complete). In-place RoPE (`RotateHalf` & `AdjacentPair`),
   causal naive attention baseline, tiled online-softmax FlashAttention-2 prefill (14.0 TFLOP/s at `S=4096`, 16.1× vs naive,
   115× DRAM traffic reduction verified via `ncu`), FlashDecoding split-KV decode (463.6 GB/s / 92.0% peak BW on Llama-2-7B `L=8192`),
-  and prefill+decode bridge integration tests (`141 / 141` unit tests passing across 8 CTest suites).
+  and end-to-end prefill/decode attention + FFN transformer block integration tests (`147 / 147` unit tests passing across 8 CTest suites).
 - [ ] **Module 5 — Quantization** — packed INT4 / INT8 weights with fused dequantisation GEMV kernels.
 - [ ] **Module 6 — KV-Cache** — ring-buffer cache with zero-copy slicing via the Tensor view system.
 - [ ] **Module 7 — Model Loader** — GGUF-style mmap'd weights, ~50 weight tensors aliasing one
