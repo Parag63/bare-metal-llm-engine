@@ -161,6 +161,7 @@ set(ENGINE_CUDA_SOURCES
   kernels/rope.cu
   kernels/attention_prefill.cu
   kernels/attention_decode.cu
+  kernels/attention_bridge.cu
 )
 
 if(ENGINE_CUDA_ENABLED)

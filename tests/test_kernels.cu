@@ -2103,4 +2103,319 @@ TEST(kernels, attention_decode_splits_and_contracts) {
       engine::cuda::attention_decode(p, p, p, p, 4, hq, hkv, D, 4 * D, scale, -1));
 }
 
+namespace {
+
+// Derived tolerance for the full Attention Sub-Block pipeline
+// (RMSNorm[F32] -> QKV[F32->F16] -> RoPE[F16] -> Attention[F16] -> O[F16->F32] + Residual[F32]):
+// Two binary16 truncation boundaries (Q/K/V and Attention output), with RMS ~ 1 and
+// projection W_o spectral norm ~ 2 (Xavier 1/sqrt(d_model)), give componentwise error
+// bounded well within 16 * eps16 (~1.56e-2) relative and 8 * eps16 (~7.8e-3) absolute.
+double subblock_rtol() { return 16.0 * std::ldexp(1.0, -10); }
+double subblock_atol() { return 8.0 * std::ldexp(1.0, -10); }
+
+void run_attention_subblock_gpu(const float* d_x, const float* d_rms_w, const float* d_wq,
+                                const float* d_wk, const float* d_wv, const float* d_wo,
+                                const float* d_cos, const float* d_sin,
+                                engine::half* d_k_cache, engine::half* d_v_cache,
+                                float* d_out, std::int64_t s_q, std::int64_t past_len,
+                                std::int64_t kv_max_seq, std::int64_t n_heads,
+                                std::int64_t n_kv_heads, std::int64_t head_dim,
+                                float eps) {
+  const std::int64_t d_model = n_heads * head_dim;
+  const std::int64_t d_kv = n_kv_heads * head_dim;
+  const std::size_t q_elems = static_cast<std::size_t>(s_q * d_model);
+  const std::size_t kv_elems = static_cast<std::size_t>(s_q * d_kv);
+
+  DeviceBuffer<float> d_x_norm(q_elems);
+  DeviceBuffer<float> d_q_f32(q_elems);
+  DeviceBuffer<float> d_k_f32(kv_elems);
+  DeviceBuffer<float> d_v_f32(kv_elems);
+  DeviceBuffer<float> d_attn_f32(q_elems);
+  DeviceBuffer<float> d_o_proj(q_elems);
+
+  DeviceBuffer<engine::half> d_q_f16(q_elems);
+  DeviceBuffer<engine::half> d_k_f16(kv_elems);
+  DeviceBuffer<engine::half> d_v_f16(kv_elems);
+  DeviceBuffer<engine::half> d_attn_f16(q_elems);
+
+  engine::cuda::rmsnorm(d_x, d_rms_w, d_x_norm.get(), s_q, d_model, eps);
+
+  if (s_q > 1) {
+    engine::cuda::matmul_register_tiled(d_x_norm.get(), d_wq, d_q_f32.get(), s_q, d_model,
+                                        d_model);
+    engine::cuda::matmul_register_tiled(d_x_norm.get(), d_wk, d_k_f32.get(), s_q, d_kv,
+                                        d_model);
+    engine::cuda::matmul_register_tiled(d_x_norm.get(), d_wv, d_v_f32.get(), s_q, d_kv,
+                                        d_model);
+  } else {
+    engine::cuda::gemv(d_wq, d_x_norm.get(), d_q_f32.get(), d_model, d_model);
+    engine::cuda::gemv(d_wk, d_x_norm.get(), d_k_f32.get(), d_kv, d_model);
+    engine::cuda::gemv(d_wv, d_x_norm.get(), d_v_f32.get(), d_kv, d_model);
+  }
+
+  engine::cuda::detail::cast_f32_to_f16(d_q_f32.get(), d_q_f16.get(), s_q * d_model);
+  engine::cuda::detail::cast_f32_to_f16(d_k_f32.get(), d_k_f16.get(), s_q * d_kv);
+  engine::cuda::detail::cast_f32_to_f16(d_v_f32.get(), d_v_f16.get(), s_q * d_kv);
+
+  engine::cuda::rope(d_q_f16.get(), d_k_f16.get(), d_cos, d_sin, s_q, n_heads, n_kv_heads,
+                     head_dim, past_len, engine::RopeConvention::RotateHalf);
+
+  engine::cuda::detail::kv_cache_write(d_k_f16.get(), d_v_f16.get(), d_k_cache, d_v_cache,
+                                       s_q, n_kv_heads, head_dim, past_len, kv_max_seq);
+
+  const std::int64_t kv_len = past_len + s_q;
+  const std::int64_t kv_head_stride = kv_max_seq * head_dim;
+  const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+  if (s_q > 1) {
+    engine::cuda::attention_prefill(d_q_f16.get(), d_k_cache, d_v_cache, d_attn_f16.get(),
+                                    s_q, kv_len, n_heads, n_kv_heads, head_dim,
+                                    kv_head_stride, scale, past_len, /*is_causal=*/true);
+  } else {
+    engine::cuda::attention_decode(d_q_f16.get(), d_k_cache, d_v_cache, d_attn_f16.get(),
+                                   kv_len, n_heads, n_kv_heads, head_dim, kv_head_stride,
+                                   scale, /*split_kv=*/0);
+  }
+
+  engine::cuda::detail::cast_f16_to_f32(d_attn_f16.get(), d_attn_f32.get(),
+                                        s_q * d_model);
+  if (s_q > 1) {
+    engine::cuda::matmul_register_tiled(d_attn_f32.get(), d_wo, d_o_proj.get(), s_q,
+                                        d_model, d_model);
+  } else {
+    engine::cuda::gemv(d_wo, d_attn_f32.get(), d_o_proj.get(), d_model, d_model);
+  }
+  engine::cuda::vector_add(d_x, d_o_proj.get(), d_out, s_q * d_model);
+}
+
+void run_attention_subblock_cpu(const float* x, const float* rms_w, const float* wq,
+                                const float* wk, const float* wv, const float* wo,
+                                const float* cos_tbl, const float* sin_tbl,
+                                engine::half* k_cache, engine::half* v_cache, float* out,
+                                std::int64_t s_q, std::int64_t past_len,
+                                std::int64_t kv_max_seq, std::int64_t n_heads,
+                                std::int64_t n_kv_heads, std::int64_t head_dim,
+                                float eps) {
+  const std::int64_t d_model = n_heads * head_dim;
+  const std::int64_t d_kv = n_kv_heads * head_dim;
+  const std::size_t q_elems = static_cast<std::size_t>(s_q * d_model);
+  const std::size_t kv_elems = static_cast<std::size_t>(s_q * d_kv);
+
+  std::vector<float> x_norm(q_elems);
+  std::vector<float> q_f32(q_elems), k_f32(kv_elems), v_f32(kv_elems);
+  engine::cpu::rmsnorm(x, rms_w, x_norm.data(), s_q, d_model, eps);
+  engine::cpu::matmul(x_norm.data(), wq, q_f32.data(), s_q, d_model, d_model);
+  engine::cpu::matmul(x_norm.data(), wk, k_f32.data(), s_q, d_kv, d_model);
+  engine::cpu::matmul(x_norm.data(), wv, v_f32.data(), s_q, d_kv, d_model);
+
+  auto q_f16 = to_half_vec(q_f32);
+  auto k_f16 = to_half_vec(k_f32);
+  auto v_f16 = to_half_vec(v_f32);
+  engine::cpu::rope(q_f16.data(), k_f16.data(), cos_tbl, sin_tbl, s_q, n_heads,
+                    n_kv_heads, head_dim, past_len, engine::RopeConvention::RotateHalf);
+
+  for (std::int64_t t = 0; t < s_q; ++t) {
+    for (std::int64_t h = 0; h < n_kv_heads; ++h) {
+      const std::size_t src_off =
+          static_cast<std::size_t>((t * n_kv_heads + h) * head_dim);
+      const std::size_t dst_off =
+          static_cast<std::size_t>((h * kv_max_seq + past_len + t) * head_dim);
+      for (std::int64_t d = 0; d < head_dim; ++d) {
+        k_cache[dst_off + static_cast<std::size_t>(d)] =
+            k_f16[src_off + static_cast<std::size_t>(d)];
+        v_cache[dst_off + static_cast<std::size_t>(d)] =
+            v_f16[src_off + static_cast<std::size_t>(d)];
+      }
+    }
+  }
+
+  std::vector<engine::half> attn_f16(q_elems);
+  const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+  engine::cpu::attention(q_f16.data(), k_cache, v_cache, attn_f16.data(), s_q,
+                         past_len + s_q, n_heads, n_kv_heads, head_dim,
+                         kv_max_seq * head_dim, scale, past_len,
+                         /*is_causal=*/(s_q > 1));
+
+  const auto attn_f32 = to_float_vec(attn_f16);
+  std::vector<float> o_proj(q_elems);
+  engine::cpu::matmul(attn_f32.data(), wo, o_proj.data(), s_q, d_model, d_model);
+  engine::cpu::vector_add(x, o_proj.data(), out, s_q * d_model);
+}
+
+std::vector<float> pseudo_normal_vec(std::size_t n, std::uint64_t seed, float scale) {
+  std::vector<float> out(n);
+  std::uint64_t s = seed;
+  auto next_u32 = [&s]() -> std::uint32_t {
+    s += 0x9e3779b97f4a7c15ULL;
+    std::uint64_t z = s;
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+    return static_cast<std::uint32_t>((z ^ (z >> 31)) >> 32);
+  };
+  for (std::size_t i = 0; i < n; ++i) {
+    // Sum of 6 uniforms centered at 0 (~std 1/sqrt(2)) scaled cleanly without <random>.
+    double acc = -3.0;
+    for (int k = 0; k < 6; ++k) {
+      acc += static_cast<double>(next_u32()) / 4294967296.0;
+    }
+    out[i] = static_cast<float>(acc * std::sqrt(2.0) * static_cast<double>(scale));
+  }
+  return out;
+}
+
+}  // namespace
+
+TEST(kernels, attention_subblock_prefill_and_decode_golden) {
+  REQUIRE_CUDA_DEVICE();
+  struct SubBlockGolden {
+    const char* stem;
+    std::int64_t s_q, past_len, n_heads, n_kv_heads, head_dim;
+  };
+  const SubBlockGolden cases[] = {
+      {"attn_subblock__prefill_s16_h8_kv2_d64", 16, 0, 8, 2, 64},
+      {"attn_subblock__decode_s1_kv257_h8_kv2_d64", 1, 256, 8, 2, 64},
+  };
+
+  for (const auto& c : cases) {
+    LOAD_GOLDEN(g, c.stem);
+    const std::int64_t kv_max_seq = c.past_len + c.s_q;
+    const std::int64_t d_model = c.n_heads * c.head_dim;
+
+    DeviceBuffer<float> d_x(g.at("x").data);
+    DeviceBuffer<float> d_rms_w(g.at("rms_w").data);
+    DeviceBuffer<float> d_wq(g.at("w_q").data);
+    DeviceBuffer<float> d_wk(g.at("w_k").data);
+    DeviceBuffer<float> d_wv(g.at("w_v").data);
+    DeviceBuffer<float> d_wo(g.at("w_o").data);
+    DeviceBuffer<float> d_cos(g.at("cos").data);
+    DeviceBuffer<float> d_sin(g.at("sin").data);
+    DeviceBuffer<float> d_out(static_cast<std::size_t>(c.s_q * d_model));
+
+    const std::size_t cache_elems =
+        static_cast<std::size_t>(c.n_kv_heads * kv_max_seq * c.head_dim);
+    std::vector<engine::half> h_k_cache(cache_elems, engine::float_to_half(0.0f));
+    std::vector<engine::half> h_v_cache(cache_elems, engine::float_to_half(0.0f));
+    if (c.past_len > 0) {
+      const auto k_past = to_half_vec(g.at("k_past").data);
+      const auto v_past = to_half_vec(g.at("v_past").data);
+      for (std::int64_t h = 0; h < c.n_kv_heads; ++h) {
+        const std::size_t src_off = static_cast<std::size_t>(h * c.past_len * c.head_dim);
+        const std::size_t dst_off = static_cast<std::size_t>(h * kv_max_seq * c.head_dim);
+        const std::size_t copy_len = static_cast<std::size_t>(c.past_len * c.head_dim);
+        std::copy_n(k_past.begin() + static_cast<std::ptrdiff_t>(src_off), copy_len,
+                    h_k_cache.begin() + static_cast<std::ptrdiff_t>(dst_off));
+        std::copy_n(v_past.begin() + static_cast<std::ptrdiff_t>(src_off), copy_len,
+                    h_v_cache.begin() + static_cast<std::ptrdiff_t>(dst_off));
+      }
+    }
+    DeviceBuffer<engine::half> d_k_cache(h_k_cache);
+    DeviceBuffer<engine::half> d_v_cache(h_v_cache);
+
+    run_attention_subblock_gpu(
+        d_x.get(), d_rms_w.get(), d_wq.get(), d_wk.get(), d_wv.get(), d_wo.get(),
+        d_cos.get(), d_sin.get(), d_k_cache.get(), d_v_cache.get(), d_out.get(), c.s_q,
+        c.past_len, kv_max_seq, c.n_heads, c.n_kv_heads, c.head_dim, /*eps=*/1e-5f);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    const auto got = d_out.download();
+    const auto& exp = g.at("expected").data;
+    CHECK_CASE(c.stem, got.data(), exp.data(), got.size(), subblock_rtol(),
+               subblock_atol());
+  }
+}
+
+TEST(kernels, attention_subblock_tinyllama_shape) {
+  REQUIRE_CUDA_DEVICE();
+  // Exact TinyLlama-1.1B attention sub-block dimensions: prefill (s_q=64) followed
+  // sequentially by 2 decode steps (kv_len=65, 66) sharing the same KV cache.
+  constexpr std::int64_t n_heads = 32;
+  constexpr std::int64_t n_kv_heads = 4;
+  constexpr std::int64_t head_dim = 64;
+  constexpr std::int64_t d_model = n_heads * head_dim;  // 2048
+  constexpr std::int64_t d_kv = n_kv_heads * head_dim;  // 256
+  constexpr std::int64_t s_prefill = 64;
+  constexpr std::int64_t kv_max_seq = 128;
+  constexpr float eps = 1e-5f;
+
+  const float inv_s = 1.0f / std::sqrt(static_cast<float>(d_model));
+  std::vector<float> h_rms_w(static_cast<std::size_t>(d_model), 1.0f);
+  const auto rms_delta = pseudo_normal_vec(static_cast<std::size_t>(d_model), 101u, 0.1f);
+  for (std::size_t i = 0; i < h_rms_w.size(); ++i) h_rms_w[i] += rms_delta[i];
+
+  const auto h_wq =
+      pseudo_normal_vec(static_cast<std::size_t>(d_model * d_model), 102u, inv_s);
+  const auto h_wk =
+      pseudo_normal_vec(static_cast<std::size_t>(d_model * d_kv), 103u, inv_s);
+  const auto h_wv =
+      pseudo_normal_vec(static_cast<std::size_t>(d_model * d_kv), 104u, inv_s);
+  const auto h_wo =
+      pseudo_normal_vec(static_cast<std::size_t>(d_model * d_model), 105u, inv_s);
+
+  std::vector<float> h_cos(static_cast<std::size_t>(kv_max_seq * (head_dim / 2)));
+  std::vector<float> h_sin(static_cast<std::size_t>(kv_max_seq * (head_dim / 2)));
+  engine::cpu::rope_precompute_tables(h_cos.data(), h_sin.data(), kv_max_seq, head_dim);
+
+  const auto h_x0 =
+      pseudo_normal_vec(static_cast<std::size_t>(s_prefill * d_model), 201u, 1.0f);
+  const auto h_x1 = pseudo_normal_vec(static_cast<std::size_t>(d_model), 202u, 1.0f);
+  const auto h_x2 = pseudo_normal_vec(static_cast<std::size_t>(d_model), 203u, 1.0f);
+
+  DeviceBuffer<float> d_rms_w(h_rms_w), d_wq(h_wq), d_wk(h_wk), d_wv(h_wv), d_wo(h_wo);
+  DeviceBuffer<float> d_cos(h_cos), d_sin(h_sin);
+  const std::size_t cache_elems =
+      static_cast<std::size_t>(n_kv_heads * kv_max_seq * head_dim);
+  DeviceBuffer<engine::half> d_k_cache(cache_elems), d_v_cache(cache_elems);
+  d_k_cache.zero();
+  d_v_cache.zero();
+  std::vector<engine::half> cpu_k_cache(cache_elems, engine::float_to_half(0.0f));
+  std::vector<engine::half> cpu_v_cache(cache_elems, engine::float_to_half(0.0f));
+
+  // Step 0: Prefill s_q=64.
+  DeviceBuffer<float> d_x0(h_x0), d_out0(h_x0.size());
+  std::vector<float> cpu_out0(h_x0.size());
+  run_attention_subblock_gpu(
+      d_x0.get(), d_rms_w.get(), d_wq.get(), d_wk.get(), d_wv.get(), d_wo.get(),
+      d_cos.get(), d_sin.get(), d_k_cache.get(), d_v_cache.get(), d_out0.get(), s_prefill,
+      /*past_len=*/0, kv_max_seq, n_heads, n_kv_heads, head_dim, eps);
+  run_attention_subblock_cpu(
+      h_x0.data(), h_rms_w.data(), h_wq.data(), h_wk.data(), h_wv.data(), h_wo.data(),
+      h_cos.data(), h_sin.data(), cpu_k_cache.data(), cpu_v_cache.data(), cpu_out0.data(),
+      s_prefill, /*past_len=*/0, kv_max_seq, n_heads, n_kv_heads, head_dim, eps);
+  CUDA_CHECK(cudaDeviceSynchronize());
+  const auto gpu_out0 = d_out0.download();
+  CHECK_CASE("tinyllama subblock prefill s=64", gpu_out0.data(), cpu_out0.data(),
+             gpu_out0.size(), subblock_rtol(), subblock_atol());
+
+  // Step 1: Decode s_q=1 at past_len=64 (kv_len=65), reusing prefill KV cache.
+  DeviceBuffer<float> d_x1(h_x1), d_out1(h_x1.size());
+  std::vector<float> cpu_out1(h_x1.size());
+  run_attention_subblock_gpu(
+      d_x1.get(), d_rms_w.get(), d_wq.get(), d_wk.get(), d_wv.get(), d_wo.get(),
+      d_cos.get(), d_sin.get(), d_k_cache.get(), d_v_cache.get(), d_out1.get(), /*s_q=*/1,
+      /*past_len=*/64, kv_max_seq, n_heads, n_kv_heads, head_dim, eps);
+  run_attention_subblock_cpu(
+      h_x1.data(), h_rms_w.data(), h_wq.data(), h_wk.data(), h_wv.data(), h_wo.data(),
+      h_cos.data(), h_sin.data(), cpu_k_cache.data(), cpu_v_cache.data(), cpu_out1.data(),
+      /*s_q=*/1, /*past_len=*/64, kv_max_seq, n_heads, n_kv_heads, head_dim, eps);
+  CUDA_CHECK(cudaDeviceSynchronize());
+  const auto gpu_out1 = d_out1.download();
+  CHECK_CASE("tinyllama subblock decode step1 kv=65", gpu_out1.data(), cpu_out1.data(),
+             gpu_out1.size(), subblock_rtol(), subblock_atol());
+
+  // Step 2: Decode s_q=1 at past_len=65 (kv_len=66), verifying KV cache growth.
+  DeviceBuffer<float> d_x2(h_x2), d_out2(h_x2.size());
+  std::vector<float> cpu_out2(h_x2.size());
+  run_attention_subblock_gpu(
+      d_x2.get(), d_rms_w.get(), d_wq.get(), d_wk.get(), d_wv.get(), d_wo.get(),
+      d_cos.get(), d_sin.get(), d_k_cache.get(), d_v_cache.get(), d_out2.get(), /*s_q=*/1,
+      /*past_len=*/65, kv_max_seq, n_heads, n_kv_heads, head_dim, eps);
+  run_attention_subblock_cpu(
+      h_x2.data(), h_rms_w.data(), h_wq.data(), h_wk.data(), h_wv.data(), h_wo.data(),
+      h_cos.data(), h_sin.data(), cpu_k_cache.data(), cpu_v_cache.data(), cpu_out2.data(),
+      /*s_q=*/1, /*past_len=*/65, kv_max_seq, n_heads, n_kv_heads, head_dim, eps);
+  CUDA_CHECK(cudaDeviceSynchronize());
+  const auto gpu_out2 = d_out2.download();
+  CHECK_CASE("tinyllama subblock decode step2 kv=66", gpu_out2.data(), cpu_out2.data(),
+             gpu_out2.size(), subblock_rtol(), subblock_atol());
+}
+
 #endif  // ENGINE_HAS_CUDA

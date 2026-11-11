@@ -172,6 +172,19 @@ void attention_decode_with_mode(const half* q, const half* k, const half* v, hal
                                 std::int64_t n_kv_heads, std::int64_t head_dim,
                                 std::int64_t kv_head_stride, float scale, int split_kv,
                                 bool share_gqa_kv, cudaStream_t stream);
+
+/// Elementwise FP32 -> FP16 conversion on device.
+void cast_f32_to_f16(const float* in, half* out, std::int64_t n, cudaStream_t stream = 0);
+
+/// Elementwise FP16 -> FP32 conversion on device.
+void cast_f16_to_f32(const half* in, float* out, std::int64_t n, cudaStream_t stream = 0);
+
+/// Scatter token-major K/V [s_new, n_kv_heads, head_dim] into head-major
+/// KV caches [n_kv_heads, kv_max_seq_len, head_dim] starting at pos_offset.
+void kv_cache_write(const half* k_new, const half* v_new, half* k_cache, half* v_cache,
+                    std::int64_t s_new, std::int64_t n_kv_heads, std::int64_t head_dim,
+                    std::int64_t pos_offset, std::int64_t kv_max_seq_len,
+                    cudaStream_t stream = 0);
 }  // namespace detail
 
 /// Single-token decode attention with Split-KV FlashDecoding (ADR-0013).

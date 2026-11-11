@@ -476,6 +476,54 @@ ATTENTION_CASES = [
     ("s16_kv32_h4_d64_stress_causal", 16, 32, 4, 4, 64, 0, True, 4.0),
 ]
 
+# Module 4 -- End-to-end Attention Sub-Block cases:
+# (name, s_q, past_len, n_heads, n_kv_heads, head_dim)
+SUBBLOCK_CASES = [
+    ("prefill_s16_h8_kv2_d64", 16, 0, 8, 2, 64),
+    ("decode_s1_kv257_h8_kv2_d64", 1, 256, 8, 2, 64),
+]
+
+
+def run_attention_subblock(
+    backend,
+    x,
+    rms_w,
+    w_q,
+    w_k,
+    w_v,
+    w_o,
+    cos,
+    sin,
+    k_past,
+    v_past,
+    n_heads,
+    n_kv_heads,
+    head_dim,
+    past_len,
+    eps,
+):
+    s_q = x.shape[0]
+    d_attn = n_heads * head_dim
+    x_norm = backend.rmsnorm(x, rms_w, eps)
+    q = backend.matmul(x_norm, w_q).reshape(s_q, n_heads, head_dim)
+    k_new = backend.matmul(x_norm, w_k).reshape(s_q, n_kv_heads, head_dim)
+    v_new = backend.matmul(x_norm, w_v).reshape(s_q, n_kv_heads, head_dim)
+    q_rot, k_rot = backend.rope(q, k_new, cos, sin, "rotate_half")
+    k_hm = np.transpose(k_rot, (1, 0, 2))
+    v_hm = np.transpose(v_new, (1, 0, 2))
+    if k_past is not None:
+        k_all = np.concatenate([k_past.astype(np.float64), k_hm], axis=1)
+        v_all = np.concatenate([v_past.astype(np.float64), v_hm], axis=1)
+    else:
+        k_all = k_hm
+        v_all = v_hm
+    scale = 1.0 / np.sqrt(float(head_dim))
+    attn_out, _ = backend.attention(
+        q_rot, k_all, v_all, scale, q_pos_offset=past_len, is_causal=(s_q > 1)
+    )
+    o_proj = backend.matmul(attn_out.reshape(s_q, d_attn), w_o)
+    return backend.vector_add(x, o_proj)
+
 
 def build_cases(rng, backend):
     """Yield (stem, tensors) pairs."""
@@ -727,6 +775,65 @@ def build_cases(rng, backend):
             "expected": expected,
             "lse": lse,
         }
+
+    # --- Module 4: Attention Sub-Block Integration --------------------------
+    for name, s_q, past_len, n_heads, n_kv_heads, head_dim in SUBBLOCK_CASES:
+        d_model = n_heads * head_dim
+        d_kv = n_kv_heads * head_dim
+        inv_s_in = 1.0 / np.sqrt(float(d_model))
+        x = rng.standard_normal((s_q, d_model), dtype=np.float32)
+        rms_w = rng.standard_normal(d_model, dtype=np.float32) * 0.1 + 1.0
+        w_q = (rng.standard_normal((d_model, d_model), dtype=np.float32) * inv_s_in)
+        w_k = (rng.standard_normal((d_model, d_kv), dtype=np.float32) * inv_s_in)
+        w_v = (rng.standard_normal((d_model, d_kv), dtype=np.float32) * inv_s_in)
+        w_o = (rng.standard_normal((d_model, d_model), dtype=np.float32) * inv_s_in)
+
+        i_idx = np.arange(head_dim // 2, dtype=np.float64)
+        inv_freq = 10000.0 ** (-2.0 * i_idx / float(head_dim))
+        pos = np.arange(0, past_len + s_q, dtype=np.float64)[:, None]
+        angles = pos * inv_freq[None, :]
+        cos_table = np.cos(angles).astype(np.float32)
+        sin_table = np.sin(angles).astype(np.float32)
+
+        k_past = None
+        v_past = None
+        if past_len > 0:
+            k_past = rng.standard_normal((n_kv_heads, past_len, head_dim), dtype=np.float32).astype(np.float16)
+            v_past = rng.standard_normal((n_kv_heads, past_len, head_dim), dtype=np.float32).astype(np.float16)
+
+        expected = run_attention_subblock(
+            backend,
+            x,
+            rms_w,
+            w_q,
+            w_k,
+            w_v,
+            w_o,
+            cos_table[past_len:].astype(np.float64),
+            sin_table[past_len:].astype(np.float64),
+            k_past,
+            v_past,
+            n_heads,
+            n_kv_heads,
+            head_dim,
+            past_len,
+            eps,
+        )
+        tensors = {
+            "x": x,
+            "rms_w": rms_w,
+            "w_q": w_q,
+            "w_k": w_k,
+            "w_v": w_v,
+            "w_o": w_o,
+            "cos": cos_table,
+            "sin": sin_table,
+            "expected": expected,
+        }
+        if k_past is not None:
+            tensors["k_past"] = k_past
+            tensors["v_past"] = v_past
+        yield f"attn_subblock__{name}", tensors
 
 
 def main() -> int:
