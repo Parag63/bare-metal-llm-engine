@@ -1,6 +1,6 @@
 # Current Status
 
-> **Last updated:** 2026-10-01
+> **Last updated:** 2026-11-11
 >
 > This file is the single source of truth for "what's done, what's in progress, and
 > what's next." Update it whenever a milestone is completed.
@@ -8,21 +8,22 @@
 ## Test score (verified on Machine B, RTX 4070 SUPER, sm_89)
 
 ```
-passed 119   failed 0   pending 0   skipped 0
+passed 126   failed 0   pending 0   skipped 0
 ```
-*(CUDA-enabled build with nvcc 12.6, RTX 4070 SUPER — 2026-10-02)*
+*(CUDA-enabled build with nvcc 12.6, RTX 4070 SUPER — 2026-11-11, from `./build/bin/engine_tests --list`)*
 
 ### Test suite breakdown
 
 | Suite | Tests | Status |
-|---|---|---|
+|---|---:|---|
 | `dtype` | 10 | ✅ All passing |
 | `golden` | 6 | ✅ All passing |
-| `cpu_ref` | 25 | ✅ All 25 passing (includes SwiGLU, FP16 GEMV, embedding, argmax) |
-| `storage` | 4 | ✅ All passing |
-| `tensor` | 24 | ✅ All passing (GPU + CPU verified, const and half accessors) |
-| `allocator` | 5 | ✅ All 5 passing (PoolAllocator: alignment, recycling, peak tracking, 100k cycles, device memory) |
-| `kernels` | 45 | ✅ All 45 passing (14 kernels + non-tile multiples register GEMM test) |
+| `cpu_ref` | 26 | ✅ All 26 passing (includes SwiGLU, FP16 GEMV, embedding, argmax) |
+| `storage` | 3 | ✅ All passing |
+| `tensor` | 35 | ✅ All passing (GPU + CPU verified, const and half accessors) |
+| `allocator` | 8 | ✅ All 8 passing (PoolAllocator: alignment, recycling, peak tracking, 100k cycles, multi-stream events) |
+| `kernels` | 38 | ✅ All 38 passing (14 kernels + non-tile multiples register GEMM, `K==0`, `-inf` argmax, multi-stream pool safety) |
+| **Total (`all`)** | **126** | **✅ All passing across 8 CTest entries (7 suites + `all`)** |
 
 ---
 

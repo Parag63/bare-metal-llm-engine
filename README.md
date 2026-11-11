@@ -9,8 +9,8 @@ B.Tech CSE major project · Parag Das (2303344) · Jul 2026 – Jun 2027
 
 > **Status: Modules 1, 2 & 3 complete + Phase 4 Foundational Kernels. Moving to FlashAttention (Module 4).**
 > The tensor library, 14 hand-written CUDA kernels (including FP16 GEMV, fused SwiGLU, 2D register-tiled GEMM, embedding gather, and argmax), and the full
-> verification/benchmark infrastructure are implemented and verified. `passed 119  failed 0  pending 0` across
-> 8 test suites on the CUDA-enabled build (RTX 4070 SUPER, nvcc 12.6). Memory-bound
+> verification/benchmark infrastructure are implemented and verified. `passed 126  failed 0  pending 0` across
+> 8 test suites (`dtype`, `golden`, `cpu_ref`, `storage`, `tensor`, `allocator`, `kernels`, `all`) on the CUDA-enabled build (RTX 4070 SUPER, nvcc 12.6). Memory-bound
 > kernels achieve 85–94% of peak bandwidth (GEMV reaches 473.5 GB/s / 94.0% peak BW, beating cuBLAS by +13.7%);
 > 2D register-tiled matmul reaches 16,173 GFLOP/s at 4096³ (73.0% of cuBLAS).
 
@@ -36,7 +36,7 @@ measured against. Neither is linked into the engine
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build -j
-python3 tools/gen_reference.py           # writes ~28 MiB of float64 reference data
+python3 tools/gen_reference.py           # writes ~56 MiB of float64 reference data
 ctest --test-dir build --output-on-failure
 build/bin/bench_cpu_ref
 ```
@@ -60,7 +60,7 @@ src/                C++ implementation (tensor.cpp: 559 lines, Module 1)
 src/cpu_ref/        the CPU oracle: scalar, FP64 accumulators, obvious over fast (9 ops)
 kernels/            CUDA kernels — all nine implemented (7 ladder + 2 fused ops)
 tests/              custom harness + suites: dtype, golden, cpu_ref, storage, tensor,
-                    kernels (107 tests, all passing)
+                    allocator, kernels (126 tests across 8 CTest suites, all passing)
 tests/golden/       generated float64 reference data — gitignored, regenerate it
 bench/              bench_cpu_ref (the denominator) and bench_kernels (with --json support)
 tools/              gen_reference.py, generate_results_table.py, roofline_plot.py
@@ -132,20 +132,20 @@ SUPER (504.0 GB/s peak, sm_89) with locked GPU clocks (2475 MHz):
 
 | # | Kernel | New idea | GPU result |
 |---|---|---|---|
-| 1 | `vector_add` | threads, blocks, grid-stride loops | ✅ 419.3 GB/s (83.2% peak) |
-| 2 | `reduce_sum` | shared memory, `__syncthreads`, warp shuffles | ✅ 453.9 GB/s (90.1% peak) |
-| 3 | `softmax_rows` | per-row reduction, numerical stability | ✅ 435.0 GB/s (86.3% peak) |
-| 4 | `rmsnorm` | reusing the reduction pattern | ✅ 431.9 GB/s (85.7% peak) |
-| 5 | `matmul_naive` | 2-D indexing, memory traffic problem | ✅ 1755 GFLOP/s @ 4096^3 |
-| 6 | `matmul_tiled` | shared-memory tiling and data reuse | ✅ 2402 GFLOP/s @ 4096^3 (+37%) |
-| 7 | `gemv` | decode token projection (M=1), 128-bit vector loads | ✅ 464.9 GB/s (92.2% peak) |
-| 8 | `residual_rmsnorm` | fused elementwise add + row reduction in 1 pass | ✅ 0.036 ms (+12.5% over separate) |
-| 9 | `rmsnorm_linear` | fused activation normalization + linear projection | ✅ 0.151 ms (+81.2% decode M=1) |
+| 1 | `vector_add` | threads, blocks, grid-stride loops | ✅ 428.7 GB/s (85.1% peak) |
+| 2 | `reduce_sum` | shared memory, `__syncthreads`, warp shuffles | ✅ 445.1 GB/s (88.3% peak) |
+| 3 | `softmax_rows` | per-row reduction, numerical stability | ✅ 435.7 GB/s (86.4% peak) |
+| 4 | `rmsnorm` | reusing the reduction pattern | ✅ 434.3 GB/s (86.2% peak) |
+| 5 | `matmul_naive` | 2-D indexing, memory traffic problem | ✅ 1914 GFLOP/s @ 4096^3 |
+| 6 | `matmul_tiled` | shared-memory tiling and data reuse | ✅ 2648 GFLOP/s @ 4096^3 (+38%) |
+| 7 | `gemv` | decode token projection (M=1), 128-bit vector loads | ✅ 465.3 GB/s (92.3% peak) |
+| 8 | `residual_rmsnorm` | fused elementwise add + row reduction in 1 pass | ✅ 0.019 ms (+10.8% over separate) |
+| 9 | `rmsnorm_linear` | fused activation normalization + linear projection | ✅ 0.150 ms (+71.5% decode M=1) |
 | 10 | `gemv_fp16` | decode token projection in FP16 with FP32 accumulator | ✅ 0.075 ms (1.92× speedup over FP32) |
 | 11 | `embedding` | token gather from row-major embedding table (FP32 & FP16) | ✅ 0.019 ms (128-bit vector loads) |
-| 12 | `argmax` | greedy token sampling via 16-warp shuffle reduction | ✅ 0.014 ms (deterministic tie-breaking) |
-| 13 | `matmul_register_tiled` | 2D register tiling (8x8 thread tile, outer products, float4) | ✅ 16087 GFLOP/s @ 4096^3 (6.7× over tiled) |
-| 14 | `swiglu` | fused SiLU + elementwise multiply (40% memory traffic reduction) | ✅ 0.287 ms (1.49× over unfused SiLU+Mul) |
+| 12 | `argmax` | greedy token sampling via 16-warp shuffle reduction | ✅ 0.005 ms (deterministic tie-breaking) |
+| 13 | `matmul_register_tiled` | 2D register tiling (8x8 thread tile, outer products, float4) | ✅ 17179 GFLOP/s @ 4096^3 (6.5× over tiled) |
+| 14 | `swiglu` | fused SiLU + elementwise multiply (40% memory traffic reduction) | ✅ 0.155 ms (1.43× over unfused SiLU+Mul) |
 
 ### Kernel fusion (Module 3 — complete)
 
@@ -168,10 +168,10 @@ kernel in the project, and the only one where being clever about arithmetic wins
 
 | Baseline Comparison | Configuration | Baseline Result | Engine Result | Ratio / Notes |
 |---|---|---:|---:|---|
-| **cuBLAS SGEMM vs Tiled GEMM** | 4096³ FP32 | 25781 GFLOP/s (cuBLAS) | 2402 GFLOP/s (tiled) | 9.3% of cuBLAS (hand-written FP32 SIMT vs Tensor Cores) |
-| **Register-Tiled GEMM vs cuBLAS** | 4096³ FP32 | 25781 GFLOP/s (cuBLAS) | 16087 GFLOP/s (register-tiled) | 62.4% of cuBLAS (6.7× over tiled) |
-| **GEMV Cold DRAM vs Warm L2** | 1x4096x4096 (decode) | 462.7 GB/s (warm L2) | 462.7 GB/s (cold DRAM) | 91.8% peak DRAM (pure streaming via rotating weight buffers) |
-| **Fused vs Unfused SwiGLU** | 512x11008 (prefill MLP) | 0.428 ms (unfused) | 0.287 ms (fused) | 1.49× speedup (12N vs 20N bytes DRAM traffic) |
+| **cuBLAS SGEMM vs Tiled GEMM** | 4096³ FP32 | 25069 GFLOP/s (cuBLAS) | 2648 GFLOP/s (tiled) | 10.6% of cuBLAS (hand-written FP32 SIMT vs Tensor Cores) |
+| **Register-Tiled GEMM vs cuBLAS** | 4096³ FP32 | 25069 GFLOP/s (cuBLAS) | 17179 GFLOP/s (register-tiled) | 68.5% of cuBLAS (6.5× over tiled) |
+| **GEMV Cold DRAM vs Warm L2** | 1x4096x4096 (decode) | 465.9 GB/s (warm L2) | 465.9 GB/s (cold DRAM) | 92.4% peak DRAM (pure streaming via rotating weight buffers) |
+| **Fused vs Unfused SwiGLU** | 512x11008 (prefill MLP) | 0.222 ms (unfused) | 0.155 ms (fused) | 1.43× speedup (12N vs 20N bytes DRAM traffic) |
 | **llama-bench External Baseline** | TinyLlama-1.1B (Q4_K_M) | 18,512.0 t/s (pp512) | 391.2 t/s (tg128) | 4-bit quantized weights (~249 GB/s effective) |
 | **llama-bench External Baseline** | TinyLlama-1.1B (Q8_0) | 18,767.1 t/s (pp512) | 275.2 t/s (tg128) | 8-bit quantized weights (~300 GB/s effective) |
 | **llama-bench External Baseline** | TinyLlama-1.1B (FP16) | 21,357.9 t/s (pp512) | 181.3 t/s (tg128) | 16-bit unquantized weights (~372 GB/s effective) |
@@ -210,16 +210,16 @@ files; `--target bench` runs the benchmark binaries.
 ## Roadmap
 
 - [x] **Module 1 — Tensor Library** (complete). `Storage` + `Tensor` with refcounted
-  views, reshape, transpose, slice, contiguous, clone, device transfer. 24 tensor tests,
-  4 storage tests, all passing.
+  views, reshape, transpose, slice, contiguous, clone, device transfer. 35 tensor tests,
+  3 storage tests, all passing.
 - [x] **Module 2 — CUDA Kernel Ladder & GEMV** (complete). Seven hand-written kernels from
   `vector_add` through `gemv` (decode specialization), with three-tier verification and GPU benchmarks.
-  35 kernel tests, all passing. Memory-bound kernels reach up to 94.0% peak bandwidth.
+  Memory-bound kernels reach up to 92–94% peak bandwidth.
 - [x] **Module 3 — Kernel Fusion** (complete). Fused RMSNorm + Linear (dynamic winning-path dispatch via ADR-0006 addendum)
   and Fused Residual Add + RMSNorm ($1.24\times$ speedup at cold DRAM). Verified against golden reference data.
-- [x] **Phase 4 Deliverables — Foundational Kernels & Infrastructure** (complete). FP16 GEMV, Fused SwiGLU (87.2% peak BW at boost clock),
-  2D Register-Tiled GEMM (16.2 TFLOP/s), Embedding Lookup, Argmax Greedy Sampling, Stream-ordered Pool Allocator,
-  RAII CUDA Streams & Events, and Multi-Arch Compilation (ADR 0010). 119 / 119 unit tests passing across 8 suites.
+- [x] **Phase 4 Deliverables — Foundational Kernels & Infrastructure** (complete). FP16 GEMV, Fused SwiGLU,
+  2D Register-Tiled GEMM (17.2 TFLOP/s), Embedding Lookup, Argmax Greedy Sampling, Stream-ordered Pool Allocator,
+  RAII CUDA Streams & Events, and Multi-Arch Compilation (ADR 0010). 126 / 126 unit tests passing across 8 CTest suites.
 - [ ] **Module 4 — FlashAttention-2** — tiled online softmax + GEMM fusion, avoiding materialisation
   of the full S = QK^T attention-score matrix; causal masking + GQA support; RoPE and SwiGLU.
 - [ ] **Module 5 — Quantization** — packed INT4 / INT8 weights with fused dequantisation GEMV kernels.
