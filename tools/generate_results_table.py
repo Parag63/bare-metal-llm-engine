@@ -242,6 +242,8 @@ def format_baselines_table(data: dict) -> str:
     lines.append("| **llama-bench External Baseline** | TinyLlama-1.1B (Q4_K_M) | 18,512.0 t/s (pp512) | 391.2 t/s (tg128) | 4-bit quantized weights (~249 GB/s effective) |")
     lines.append("| **llama-bench External Baseline** | TinyLlama-1.1B (Q8_0) | 18,767.1 t/s (pp512) | 275.2 t/s (tg128) | 8-bit quantized weights (~300 GB/s effective) |")
     lines.append("| **llama-bench External Baseline** | TinyLlama-1.1B (FP16) | 21,357.9 t/s (pp512) | 181.3 t/s (tg128) | 16-bit unquantized weights (~372 GB/s effective) |")
+    lines.append("")
+    lines.append("*Note: TinyLlama-1.1B's native context length is `2048` (`max_position_embeddings = 2048`); TinyLlama decode rows at `L > 2048` (`8192–32768`) are synthetic long-context kernel scaling benchmarks.*")
     return "\n".join(lines)
 
 

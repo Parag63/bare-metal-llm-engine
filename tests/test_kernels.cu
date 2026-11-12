@@ -42,6 +42,7 @@
 #include "golden.hpp"
 #include "test_framework.hpp"
 
+#include <engine/pool_allocator.hpp>
 #include <engine/check.hpp>
 #include <engine/cpu_ref.hpp>
 #include <engine/cuda_device.hpp>
@@ -2105,19 +2106,502 @@ TEST(kernels, attention_decode_splits_and_contracts) {
 
 namespace {
 
-// Derived tolerance for the full Attention Sub-Block pipeline
+#ifdef ENGINE_LOG_MARGINS
+void log_error_margin(const char* label, const float* got, const float* exp,
+                      std::size_t n, double rtol, double atol) {
+  double max_abs = 0.0;
+  double max_rel = 0.0;
+  double max_budget_ratio = 0.0;
+  for (std::size_t i = 0; i < n; ++i) {
+    const double g = static_cast<double>(got[i]);
+    const double e = static_cast<double>(exp[i]);
+    const double diff = std::abs(g - e);
+    const double budget = atol + rtol * std::abs(e);
+    max_abs = std::max(max_abs, diff);
+    if (std::abs(e) >= 1e-3) max_rel = std::max(max_rel, diff / std::abs(e));
+    if (budget > 0.0) max_budget_ratio = std::max(max_budget_ratio, diff / budget);
+  }
+  const double headroom = (max_budget_ratio > 0.0) ? (1.0 / max_budget_ratio) : 0.0;
+  std::printf(
+      "[margin] %-46s max_abs=%.3e max_rel=%.3e rtol=%.3e atol=%.3e headroom=%.1fx\n",
+      label, max_abs, max_rel, rtol, atol, headroom);
+}
+#define LOG_MARGIN(label, got, exp, n, rtol, atol) \
+  log_error_margin((label), (got), (exp), (n), (rtol), (atol))
+#else
+#define LOG_MARGIN(label, got, exp, n, rtol, atol) \
+  do {                                             \
+  } while (0)
+#endif
+
+std::vector<float> pseudo_normal_vec(std::size_t n, std::uint64_t seed, float scale) {
+  std::vector<float> out(n);
+  std::uint64_t s = seed;
+  auto next_u32 = [&s]() -> std::uint32_t {
+    s += 0x9e3779b97f4a7c15ULL;
+    std::uint64_t z = s;
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+    return static_cast<std::uint32_t>((z ^ (z >> 31)) >> 32);
+  };
+  for (std::size_t i = 0; i < n; ++i) {
+    // Sum of 6 uniforms centered at 0 (~std 1/sqrt(2)) scaled cleanly without <random>.
+    double acc = -3.0;
+    for (int k = 0; k < 6; ++k) {
+      acc += static_cast<double>(next_u32()) / 4294967296.0;
+    }
+    out[i] = static_cast<float>(acc * std::sqrt(2.0) * static_cast<double>(scale));
+  }
+  return out;
+}
+
+}  // namespace
+
+TEST(kernels, attention_adversarial_softmax) {
+  REQUIRE_CUDA_DEVICE();
+  // Adversarial online-softmax / LSE tests directly on Module 4 attention kernels
+  // (prefill naive, prefill GQA + per-head, decode Split-KV=0/1/8 + per-head) against
+  // the FP64 CPU oracle and closed forms, without golden files.
+  constexpr std::int64_t D = 64;
+  constexpr std::int64_t hq = 8;
+  constexpr std::int64_t hkv = 2;
+  const float scale = 1.0f / std::sqrt(static_cast<float>(D));  // 0.125f exact in FP16
+  const engine::half h_zero = engine::float_to_half(0.0f);
+
+  auto fill_v = [&](std::int64_t kv_len) {
+    std::vector<engine::half> v(usize(hkv * kv_len * D), h_zero);
+    for (std::int64_t hk = 0; hk < hkv; ++hk) {
+      for (std::int64_t j = 0; j < kv_len; ++j) {
+        for (std::int64_t d = 0; d < D; ++d) {
+          const std::int64_t code = (j * 17 + d * 5 + hk * 11 + 3) % 31 - 15;
+          v[usize((hk * kv_len + j) * D + d)] =
+              engine::float_to_half(static_cast<float>(code) * 0.0625f);
+        }
+      }
+    }
+    return v;
+  };
+
+  auto check_prefill_variants = [&](const char* label, const std::vector<engine::half>& q,
+                                    const std::vector<engine::half>& k,
+                                    const std::vector<engine::half>& v, std::int64_t s_q,
+                                    std::int64_t s_kv, std::int64_t q_pos_offset,
+                                    bool is_causal, const std::vector<float>& cpu_out,
+                                    const std::vector<float>& cpu_lse) {
+    DeviceBuffer<engine::half> d_q(q), d_k(k), d_v(v);
+    DeviceBuffer<engine::half> d_out(usize(s_q * hq * D));
+    DeviceBuffer<float> d_lse(usize(s_q * hq));
+
+    auto run_one = [&](const char* variant, auto launch_fn) {
+      d_out.zero();
+      d_lse.zero();
+      launch_fn(d_q.get(), d_k.get(), d_v.get(), d_out.get(), d_lse.get());
+      CUDA_CHECK(cudaDeviceSynchronize());
+      const auto out_f = to_float_vec(d_out.download());
+      const auto lse_f = d_lse.download();
+      for (float val : out_f) EXPECT_TRUE(std::isfinite(val));
+      for (float val : lse_f) EXPECT_TRUE(std::isfinite(val));
+      const std::string tag_out = std::string(label) + " (" + variant + ")";
+      const std::string tag_lse = std::string(label) + " (" + variant + " lse)";
+      LOG_MARGIN(tag_out.c_str(), out_f.data(), cpu_out.data(), out_f.size(),
+                 attention_rtol(), attention_atol(s_kv));
+      CHECK_CASE(tag_out, out_f.data(), cpu_out.data(), out_f.size(), attention_rtol(),
+                 attention_atol(s_kv));
+      CHECK_CASE(tag_lse, lse_f.data(), cpu_lse.data(), lse_f.size(), lse_rtol(),
+                 lse_atol(s_kv));
+    };
+
+    run_one("naive", [&](const engine::half* dq, const engine::half* dk,
+                         const engine::half* dv, engine::half* dout, float* dlse) {
+      engine::cuda::attention_naive(dq, dk, dv, dout, s_q, s_kv, hq, hkv, D, s_kv * D,
+                                    scale, q_pos_offset, is_causal, dlse, nullptr);
+    });
+    run_one("prefill gqa", [&](const engine::half* dq, const engine::half* dk,
+                               const engine::half* dv, engine::half* dout, float* dlse) {
+      engine::cuda::attention_prefill(dq, dk, dv, dout, s_q, s_kv, hq, hkv, D, s_kv * D,
+                                      scale, q_pos_offset, is_causal, dlse, nullptr);
+    });
+    run_one("prefill per-head",
+            [&](const engine::half* dq, const engine::half* dk, const engine::half* dv,
+                engine::half* dout, float* dlse) {
+              engine::cuda::detail::attention_prefill_with_mode(
+                  dq, dk, dv, dout, s_q, s_kv, hq, hkv, D, s_kv * D, scale, q_pos_offset,
+                  is_causal, dlse, /*share_gqa_kv=*/false, nullptr);
+            });
+  };
+
+  auto check_decode_variants =
+      [&](const char* label, const std::vector<engine::half>& q,
+          const std::vector<engine::half>& k, const std::vector<engine::half>& v,
+          std::int64_t kv_len, const std::vector<float>& cpu_out) {
+        DeviceBuffer<engine::half> d_q(q), d_k(k), d_v(v), d_out(usize(hq * D));
+        auto run_one = [&](const char* variant, int split_kv, bool share_gqa) {
+          d_out.zero();
+          engine::cuda::detail::attention_decode_with_mode(
+              d_q.get(), d_k.get(), d_v.get(), d_out.get(), kv_len, hq, hkv, D,
+              kv_len * D, scale, split_kv, share_gqa, nullptr);
+          CUDA_CHECK(cudaDeviceSynchronize());
+          const auto out_f = to_float_vec(d_out.download());
+          for (float val : out_f) EXPECT_TRUE(std::isfinite(val));
+          const std::string tag_out = std::string(label) + " (" + variant + ")";
+          LOG_MARGIN(tag_out.c_str(), out_f.data(), cpu_out.data(), out_f.size(),
+                     attention_rtol(), attention_atol(kv_len));
+          CHECK_CASE(tag_out, out_f.data(), cpu_out.data(), out_f.size(),
+                     attention_rtol(), attention_atol(kv_len));
+        };
+
+        run_one("decode auto", 0, true);
+        run_one("decode split=1", 1, true);
+        run_one("decode split=8", 8, true);
+        run_one("decode per-head split=8", 8, false);
+      };
+
+  // Prefill stress cases spanning multiple kTileK=(32|64) tiles:
+  // 1) All-negative -30..-33 and -100..-103 (would underflow expf to 0/0=NaN without max).
+  // 2) Mixed +-30 forcing cross-tile online rescaling (+10 in early tiles -> +30 at j=73).
+  // 3) All-equal large logits {+25, +100, -30, -100} per head (+100 overflows without max).
+  {
+    constexpr std::int64_t s_q = 70, s_kv = 130, q_off = 60;
+    const auto v = fill_v(s_kv);
+
+    auto run_prefill_case = [&](const char* label, auto init_qk, auto extra_verify) {
+      std::vector<engine::half> q(usize(s_q * hq * D), h_zero);
+      std::vector<engine::half> k(usize(hkv * s_kv * D), h_zero);
+      init_qk(q, k);
+      std::vector<engine::half> cpu_h(usize(s_q * hq * D), h_zero);
+      std::vector<float> cpu_lse(usize(s_q * hq), 0.0f);
+      engine::cpu::attention(q.data(), k.data(), v.data(), cpu_h.data(), s_q, s_kv, hq,
+                             hkv, D, s_kv * D, scale, q_off, /*is_causal=*/true,
+                             cpu_lse.data());
+      const auto cpu_f = to_float_vec(cpu_h);
+      check_prefill_variants(label, q, k, v, s_q, s_kv, q_off, true, cpu_f, cpu_lse);
+      extra_verify(cpu_f, cpu_lse);
+    };
+
+    run_prefill_case(
+        "adversarial prefill neg-30/-100",
+        [&](std::vector<engine::half>& q, std::vector<engine::half>& k) {
+          for (std::int64_t i = 0; i < s_q; ++i)
+            for (std::int64_t h = 0; h < hq; ++h)
+              for (std::int64_t d = 0; d < 4; ++d)
+                q[usize((i * hq + h) * D + d)] = engine::float_to_half(2.0f);
+          for (std::int64_t hk = 0; hk < hkv; ++hk)
+            for (std::int64_t j = 0; j < s_kv; ++j) {
+              const float base = (hk == 0) ? -30.0f : -100.0f;
+              const float s = base - static_cast<float>(j % 4);
+              for (std::int64_t d = 0; d < 4; ++d)
+                k[usize((hk * s_kv + j) * D + d)] = engine::float_to_half(s);
+            }
+        },
+        [](const std::vector<float>&, const std::vector<float>&) {});
+
+    run_prefill_case(
+        "adversarial prefill mixed +-30",
+        [&](std::vector<engine::half>& q, std::vector<engine::half>& k) {
+          for (std::int64_t i = 0; i < s_q; ++i)
+            for (std::int64_t h = 0; h < hq; ++h)
+              for (std::int64_t d = 0; d < 4; ++d)
+                q[usize((i * hq + h) * D + d)] = engine::float_to_half(2.0f);
+          for (std::int64_t hk = 0; hk < hkv; ++hk)
+            for (std::int64_t j = 0; j < s_kv; ++j) {
+              const float s = (j == 73 || j == 105) ? 30.0f
+                              : (j % 2 == 0)        ? 10.0f
+                                                    : -30.0f;
+              for (std::int64_t d = 0; d < 4; ++d)
+                k[usize((hk * s_kv + j) * D + d)] = engine::float_to_half(s);
+            }
+        },
+        [](const std::vector<float>&, const std::vector<float>&) {});
+
+    constexpr float kConstScores[4] = {25.0f, 100.0f, -30.0f, -100.0f};
+    run_prefill_case(
+        "adversarial prefill all-equal",
+        [&](std::vector<engine::half>& q, std::vector<engine::half>& k) {
+          for (std::int64_t i = 0; i < s_q; ++i)
+            for (std::int64_t h = 0; h < hq; ++h)
+              for (std::int64_t d = 0; d < 4; ++d)
+                q[usize((i * hq + h) * D + d)] =
+                    engine::float_to_half(kConstScores[h % 4]);
+          for (std::int64_t hk = 0; hk < hkv; ++hk)
+            for (std::int64_t j = 0; j < s_kv; ++j)
+              for (std::int64_t d = 0; d < 4; ++d)
+                k[usize((hk * s_kv + j) * D + d)] = engine::float_to_half(2.0f);
+        },
+        [&](const std::vector<float>& cpu_f, const std::vector<float>& cpu_lse) {
+          const std::int64_t group = hq / hkv;
+          std::vector<float> exact_out(usize(s_q * hq * D));
+          std::vector<float> exact_lse(usize(s_q * hq));
+          for (std::int64_t i = 0; i < s_q; ++i) {
+            const std::int64_t n_valid = q_off + i + 1;
+            for (std::int64_t h = 0; h < hq; ++h) {
+              const std::int64_t hk = h / group;
+              exact_lse[usize(i * hq + h)] =
+                  static_cast<float>(static_cast<double>(kConstScores[h % 4]) +
+                                     std::log(static_cast<double>(n_valid)));
+              for (std::int64_t d = 0; d < D; ++d) {
+                double sum_v = 0.0;
+                for (std::int64_t j = 0; j < n_valid; ++j) {
+                  sum_v += static_cast<double>(
+                      engine::half_to_float(v[usize((hk * s_kv + j) * D + d)]));
+                }
+                exact_out[usize((i * hq + h) * D + d)] =
+                    static_cast<float>(sum_v / static_cast<double>(n_valid));
+              }
+            }
+          }
+          CHECK_CASE("adversarial prefill all-equal closed form", cpu_f.data(),
+                     exact_out.data(), cpu_f.size(), attention_rtol(),
+                     attention_atol(s_kv));
+          CHECK_CASE("adversarial prefill all-equal closed form lse", cpu_lse.data(),
+                     exact_lse.data(), cpu_lse.size(), lse_rtol(), lse_atol(s_kv));
+        });
+  }
+
+  // 4) One dominant key (j_dom=97 at +30 vs -20) + causal row 0 single valid key (j=0).
+  {
+    constexpr std::int64_t s_q = 130, s_kv = 130, j_dom = 97;
+    const auto v = fill_v(s_kv);
+    std::vector<engine::half> q(usize(s_q * hq * D), h_zero);
+    std::vector<engine::half> k(usize(hkv * s_kv * D), h_zero);
+    for (std::int64_t i = 0; i < s_q; ++i)
+      for (std::int64_t h = 0; h < hq; ++h)
+        for (std::int64_t d = 0; d < 4; ++d)
+          q[usize((i * hq + h) * D + d)] = engine::float_to_half(2.0f);
+    for (std::int64_t hk = 0; hk < hkv; ++hk)
+      for (std::int64_t j = 0; j < s_kv; ++j) {
+        const float s = (j == j_dom) ? 30.0f : (j == 0 ? 0.0f : -20.0f);
+        for (std::int64_t d = 0; d < 4; ++d)
+          k[usize((hk * s_kv + j) * D + d)] = engine::float_to_half(s);
+      }
+    std::vector<engine::half> cpu_h(usize(s_q * hq * D), h_zero);
+    std::vector<float> cpu_lse(usize(s_q * hq), 0.0f);
+    engine::cpu::attention(q.data(), k.data(), v.data(), cpu_h.data(), s_q, s_kv, hq, hkv,
+                           D, s_kv * D, scale, /*q_pos_offset=*/0, /*is_causal=*/true,
+                           cpu_lse.data());
+    const auto cpu_f = to_float_vec(cpu_h);
+    check_prefill_variants("adversarial prefill dominant/row0", q, k, v, s_q, s_kv, 0,
+                           true, cpu_f, cpu_lse);
+
+    // Closed-form check on GPU GQA output: row 0 == V[0], row 129 == V[97].
+    DeviceBuffer<engine::half> d_q(q), d_k(k), d_v(v), d_out(usize(s_q * hq * D));
+    DeviceBuffer<float> d_lse(usize(s_q * hq));
+    engine::cuda::attention_prefill(d_q.get(), d_k.get(), d_v.get(), d_out.get(), s_q,
+                                    s_kv, hq, hkv, D, s_kv * D, scale, 0, true,
+                                    d_lse.get());
+    CUDA_CHECK(cudaDeviceSynchronize());
+    const auto got_f = to_float_vec(d_out.download());
+    const auto got_lse = d_lse.download();
+    const std::int64_t group = hq / hkv;
+    for (std::int64_t h = 0; h < hq; ++h) {
+      const std::int64_t hk = h / group;
+      EXPECT_NEAR(got_lse[usize(h)], 0.0f, 1e-4f);
+      EXPECT_NEAR(got_lse[usize((s_q - 1) * hq + h)], 30.0f, 1e-4f);
+      for (std::int64_t d = 0; d < D; ++d) {
+        EXPECT_NEAR(got_f[usize(h * D + d)],
+                    engine::half_to_float(v[usize((hk * s_kv + 0) * D + d)]), 1e-3f);
+        EXPECT_NEAR(got_f[usize(((s_q - 1) * hq + h) * D + d)],
+                    engine::half_to_float(v[usize((hk * s_kv + j_dom) * D + d)]), 1e-3f);
+      }
+    }
+  }
+
+  // Decode adversarial softmax cases spanning Split-KV=8 splits (kv_len=260).
+  {
+    constexpr std::int64_t kv_len = 260;
+    const auto v = fill_v(kv_len);
+    auto run_decode_case = [&](const char* label, auto init_qk) {
+      std::vector<engine::half> q(usize(hq * D), h_zero);
+      std::vector<engine::half> k(usize(hkv * kv_len * D), h_zero);
+      init_qk(q, k);
+      std::vector<engine::half> cpu_h(usize(hq * D), h_zero);
+      engine::cpu::attention(q.data(), k.data(), v.data(), cpu_h.data(), 1, kv_len, hq,
+                             hkv, D, kv_len * D, scale, /*q_pos_offset=*/0,
+                             /*is_causal=*/false);
+      check_decode_variants(label, q, k, v, kv_len, to_float_vec(cpu_h));
+    };
+
+    run_decode_case("adversarial decode neg-30/-100", [&](std::vector<engine::half>& q,
+                                                          std::vector<engine::half>& k) {
+      for (std::int64_t h = 0; h < hq; ++h)
+        for (std::int64_t d = 0; d < 4; ++d)
+          q[usize(h * D + d)] = engine::float_to_half(2.0f);
+      for (std::int64_t hk = 0; hk < hkv; ++hk)
+        for (std::int64_t j = 0; j < kv_len; ++j) {
+          const float s = ((hk == 0) ? -30.0f : -100.0f) - static_cast<float>(j % 4);
+          for (std::int64_t d = 0; d < 4; ++d)
+            k[usize((hk * kv_len + j) * D + d)] = engine::float_to_half(s);
+        }
+    });
+
+    run_decode_case("adversarial decode mixed +-30", [&](std::vector<engine::half>& q,
+                                                         std::vector<engine::half>& k) {
+      for (std::int64_t h = 0; h < hq; ++h)
+        for (std::int64_t d = 0; d < 4; ++d)
+          q[usize(h * D + d)] = engine::float_to_half(2.0f);
+      for (std::int64_t hk = 0; hk < hkv; ++hk)
+        for (std::int64_t j = 0; j < kv_len; ++j) {
+          const float s = (j == 199) ? 30.0f : (j % 2 == 0) ? 10.0f : -30.0f;
+          for (std::int64_t d = 0; d < 4; ++d)
+            k[usize((hk * kv_len + j) * D + d)] = engine::float_to_half(s);
+        }
+    });
+
+    constexpr float kConstScores[4] = {25.0f, 100.0f, -30.0f, -100.0f};
+    run_decode_case("adversarial decode all-equal", [&](std::vector<engine::half>& q,
+                                                        std::vector<engine::half>& k) {
+      for (std::int64_t h = 0; h < hq; ++h)
+        for (std::int64_t d = 0; d < 4; ++d)
+          q[usize(h * D + d)] = engine::float_to_half(kConstScores[h % 4]);
+      for (std::int64_t hk = 0; hk < hkv; ++hk)
+        for (std::int64_t j = 0; j < kv_len; ++j)
+          for (std::int64_t d = 0; d < 4; ++d)
+            k[usize((hk * kv_len + j) * D + d)] = engine::float_to_half(2.0f);
+    });
+
+    run_decode_case("adversarial decode dominant key", [&](std::vector<engine::half>& q,
+                                                           std::vector<engine::half>& k) {
+      for (std::int64_t h = 0; h < hq; ++h)
+        for (std::int64_t d = 0; d < 4; ++d)
+          q[usize(h * D + d)] = engine::float_to_half(2.0f);
+      for (std::int64_t hk = 0; hk < hkv; ++hk)
+        for (std::int64_t j = 0; j < kv_len; ++j) {
+          const float s = (j == 197) ? 30.0f : -20.0f;
+          for (std::int64_t d = 0; d < 4; ++d)
+            k[usize((hk * kv_len + j) * D + d)] = engine::float_to_half(s);
+        }
+    });
+  }
+}
+
+TEST(kernels, attention_prefill_long_sequence) {
+  REQUIRE_CUDA_DEVICE();
+  // Long-sequence causal prefill correctness without golden files: preserves TinyLlama's
+  // 8:1 GQA head ratio (hq=8, hkv=1, D=64) at S=2048 against the FP64 CPU oracle.
+  constexpr std::int64_t S = 2048, hq = 8, hkv = 1, D = 64;
+  const float scale = 1.0f / std::sqrt(static_cast<float>(D));
+
+  const auto q = to_half_vec(pseudo_normal_vec(usize(S * hq * D), 4101u, 0.5f));
+  const auto k = to_half_vec(pseudo_normal_vec(usize(hkv * S * D), 4102u, 0.5f));
+  const auto v = to_half_vec(pseudo_normal_vec(usize(hkv * S * D), 4103u, 0.5f));
+
+  std::vector<engine::half> cpu_out_h(usize(S * hq * D));
+  std::vector<float> cpu_lse(usize(S * hq));
+  engine::cpu::attention(q.data(), k.data(), v.data(), cpu_out_h.data(), S, S, hq, hkv, D,
+                         S * D, scale, /*q_pos_offset=*/0, /*is_causal=*/true,
+                         cpu_lse.data());
+  const auto cpu_out_f = to_float_vec(cpu_out_h);
+
+  DeviceBuffer<engine::half> d_q(q), d_k(k), d_v(v), d_out(usize(S * hq * D));
+  DeviceBuffer<float> d_lse(usize(S * hq));
+
+  d_out.zero();
+  d_lse.zero();
+  engine::cuda::attention_prefill(d_q.get(), d_k.get(), d_v.get(), d_out.get(), S, S, hq,
+                                  hkv, D, S * D, scale, 0, true, d_lse.get());
+  CUDA_CHECK(cudaDeviceSynchronize());
+  const auto gqa_out_f = to_float_vec(d_out.download());
+  const auto gqa_lse_f = d_lse.download();
+  LOG_MARGIN("long prefill S=2048 GQA", gqa_out_f.data(), cpu_out_f.data(),
+             gqa_out_f.size(), attention_rtol(), attention_atol(S));
+  CHECK_CASE("long prefill S=2048 GQA", gqa_out_f.data(), cpu_out_f.data(),
+             gqa_out_f.size(), attention_rtol(), attention_atol(S));
+  CHECK_CASE("long prefill S=2048 GQA lse", gqa_lse_f.data(), cpu_lse.data(),
+             gqa_lse_f.size(), lse_rtol(), lse_atol(S));
+
+  d_out.zero();
+  d_lse.zero();
+  engine::cuda::detail::attention_prefill_with_mode(
+      d_q.get(), d_k.get(), d_v.get(), d_out.get(), S, S, hq, hkv, D, S * D, scale, 0,
+      true, d_lse.get(), /*share_gqa_kv=*/false, nullptr);
+  CUDA_CHECK(cudaDeviceSynchronize());
+  const auto ph_out_f = to_float_vec(d_out.download());
+  const auto ph_lse_f = d_lse.download();
+  LOG_MARGIN("long prefill S=2048 per-head", ph_out_f.data(), cpu_out_f.data(),
+             ph_out_f.size(), attention_rtol(), attention_atol(S));
+  CHECK_CASE("long prefill S=2048 per-head", ph_out_f.data(), cpu_out_f.data(),
+             ph_out_f.size(), attention_rtol(), attention_atol(S));
+  CHECK_CASE("long prefill S=2048 per-head lse", ph_lse_f.data(), cpu_lse.data(),
+             ph_lse_f.size(), lse_rtol(), lse_atol(S));
+}
+
+TEST(kernels, attention_decode_long_sequence) {
+  REQUIRE_CUDA_DEVICE();
+  // Long-sequence decode correctness without golden files: verifies L=8192 and L=32768
+  // with 8:1 GQA heads (hq=8, hkv=1, D=64) and strided NaN-padded KV cache against CPU.
+  constexpr std::int64_t hq = 8, hkv = 1, D = 64;
+  const float scale = 1.0f / std::sqrt(static_cast<float>(D));
+  const engine::half h_nan =
+      engine::float_to_half(std::numeric_limits<float>::quiet_NaN());
+
+  for (const std::int64_t kv_len : {std::int64_t{8192}, std::int64_t{32768}}) {
+    const std::int64_t max_seq = kv_len + 17;
+    const std::int64_t kv_stride = max_seq * D;
+    const auto q = to_half_vec(pseudo_normal_vec(
+        usize(hq * D), static_cast<std::uint64_t>(5000 + kv_len), 0.5f));
+    const auto k_pack = to_half_vec(pseudo_normal_vec(
+        usize(hkv * kv_len * D), static_cast<std::uint64_t>(6000 + kv_len), 0.5f));
+    const auto v_pack = to_half_vec(pseudo_normal_vec(
+        usize(hkv * kv_len * D), static_cast<std::uint64_t>(7000 + kv_len), 0.5f));
+
+    std::vector<engine::half> k_cache(usize(hkv * kv_stride), h_nan);
+    std::vector<engine::half> v_cache(usize(hkv * kv_stride), h_nan);
+    for (std::int64_t hk = 0; hk < hkv; ++hk) {
+      std::copy_n(k_pack.data() + hk * kv_len * D, usize(kv_len * D),
+                  k_cache.data() + hk * kv_stride);
+      std::copy_n(v_pack.data() + hk * kv_len * D, usize(kv_len * D),
+                  v_cache.data() + hk * kv_stride);
+    }
+
+    std::vector<engine::half> cpu_out_h(usize(hq * D));
+    engine::cpu::attention(q.data(), k_cache.data(), v_cache.data(), cpu_out_h.data(), 1,
+                           kv_len, hq, hkv, D, kv_stride, scale, /*q_pos_offset=*/0,
+                           /*is_causal=*/false);
+    const auto cpu_out_f = to_float_vec(cpu_out_h);
+
+    DeviceBuffer<engine::half> d_q(q), d_k(k_cache), d_v(v_cache), d_out(usize(hq * D));
+    const std::string tag = "long decode L=" + std::to_string(kv_len);
+
+    auto run_decode_check = [&](const char* mode, int split_kv, bool share_gqa) {
+      d_out.zero();
+      engine::cuda::detail::attention_decode_with_mode(
+          d_q.get(), d_k.get(), d_v.get(), d_out.get(), kv_len, hq, hkv, D, kv_stride,
+          scale, split_kv, share_gqa, nullptr);
+      CUDA_CHECK(cudaDeviceSynchronize());
+      const auto got_f = to_float_vec(d_out.download());
+      for (float val : got_f) EXPECT_TRUE(std::isfinite(val));
+      const std::string case_name = tag + " (" + mode + ")";
+      LOG_MARGIN(case_name.c_str(), got_f.data(), cpu_out_f.data(), got_f.size(),
+                 attention_rtol(), attention_atol(kv_len));
+      CHECK_CASE(case_name, got_f.data(), cpu_out_f.data(), got_f.size(),
+                 attention_rtol(), attention_atol(kv_len));
+    };
+
+    run_decode_check("auto GQA", 0, true);
+    run_decode_check("split=1 GQA", 1, true);
+    run_decode_check("auto per-head", 0, false);
+  }
+  engine::pool_allocator(engine::Device::CUDA).reset();
+}
+
+namespace {
+
+// Empirical bound with measured headroom for the full Attention Sub-Block pipeline
 // (RMSNorm[F32] -> QKV[F32->F16] -> RoPE[F16] -> Attention[F16] -> O[F16->F32] + Residual[F32]):
-// Two binary16 truncation boundaries (Q/K/V and Attention output), with RMS ~ 1 and
-// projection W_o spectral norm ~ 2 (Xavier 1/sqrt(d_model)), give componentwise error
-// bounded well within 16 * eps16 (~1.56e-2) relative and 8 * eps16 (~7.8e-3) absolute.
+// Empirically calibrated for two binary16 truncation boundaries (Q/K/V and Attention output)
+// through Xavier-scaled W_o (1/sqrt(d_model)) plus residual addition:
+// rtol = 16 * 2^-10 (1.5625e-2), atol = 8 * 2^-10 (7.8125e-3).
+// Measured worst-case across the suite (sm_89, -DENGINE_LOG_MARGINS):
+//   attn_subblock__prefill_s16_h8_kv2_d64 : max_abs = 1.026e-3, headroom = 12.5x
+//   tinyllama subblock prefill/decode     : max_abs = 1.372e-4, headroom = 70.6x..162.6x
 double subblock_rtol() { return 16.0 * std::ldexp(1.0, -10); }
 double subblock_atol() { return 8.0 * std::ldexp(1.0, -10); }
 
-// Derived tolerance for the all-FP32 Llama FFN sub-block
+// Structurally derived tolerance for the all-FP32 Llama FFN sub-block
 // (RMSNorm[F32] -> Gate/Up[F32] -> SwiGLU[F32 fast intrinsics] -> Down[F32] + Residual[F32]):
 // Gate/Up dot products accumulate K = d_model terms in FP32, SwiGLU uses __expf/__fdividef
 // (~4 * eps32), and Down accumulates K = d_ffn terms with Xavier 1/sqrt(K) scaling.
 // Componentwise error vs FP64 stays within 4 * eps32 * (sqrt(d_model) + sqrt(d_ffn)).
+// Measured (d_model=512, d_ffn=1408, bound=2.868e-5): prefill max_abs=3.792e-6 (7.8x headroom).
 double ffn_subblock_rtol(std::int64_t d_model, std::int64_t d_ffn) {
   const double eps32 = std::ldexp(1.0, -23);
   return 4.0 * eps32 *
@@ -2128,9 +2612,11 @@ double ffn_subblock_atol(std::int64_t d_model, std::int64_t d_ffn) {
   return ffn_subblock_rtol(d_model, d_ffn);
 }
 
-// Derived tolerance for the full Llama Transformer Block (Attention + FFN sub-blocks):
-// Attention sub-block error propagates directly along the residual stream and is added to
-// the all-FP32 FFN error contribution.
+// Empirical bound with measured headroom for the full Llama Transformer Block (Attention + FFN):
+// Adds the empirical Attention sub-block bound and the structurally derived FFN bound.
+// Measured worst-case:
+//   golden prefill s=16   : max_abs = 1.183e-3, headroom = 7.9x
+//   tinyllama prefill/dec : max_abs = 1.975e-4, headroom = 50.4x..200.9x
 double block_rtol(std::int64_t d_model, std::int64_t d_ffn) {
   return subblock_rtol() + ffn_subblock_rtol(d_model, d_ffn);
 }
@@ -2264,27 +2750,6 @@ void run_attention_subblock_cpu(const float* x, const float* rms_w, const float*
   std::vector<float> o_proj(q_elems);
   engine::cpu::matmul(attn_f32.data(), wo, o_proj.data(), s_q, d_model, d_model);
   engine::cpu::vector_add(x, o_proj.data(), out, s_q * d_model);
-}
-
-std::vector<float> pseudo_normal_vec(std::size_t n, std::uint64_t seed, float scale) {
-  std::vector<float> out(n);
-  std::uint64_t s = seed;
-  auto next_u32 = [&s]() -> std::uint32_t {
-    s += 0x9e3779b97f4a7c15ULL;
-    std::uint64_t z = s;
-    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
-    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
-    return static_cast<std::uint32_t>((z ^ (z >> 31)) >> 32);
-  };
-  for (std::size_t i = 0; i < n; ++i) {
-    // Sum of 6 uniforms centered at 0 (~std 1/sqrt(2)) scaled cleanly without <random>.
-    double acc = -3.0;
-    for (int k = 0; k < 6; ++k) {
-      acc += static_cast<double>(next_u32()) / 4294967296.0;
-    }
-    out[i] = static_cast<float>(acc * std::sqrt(2.0) * static_cast<double>(scale));
-  }
-  return out;
 }
 
 void run_ffn_subblock_gpu(const float* d_h, const float* d_ffn_norm_w,
@@ -2536,6 +3001,8 @@ TEST(kernels, attention_subblock_prefill_and_decode_golden) {
 
     const auto got = d_out.download();
     const auto& exp = g.at("expected").data;
+    LOG_MARGIN(c.stem, got.data(), exp.data(), got.size(), subblock_rtol(),
+               subblock_atol());
     CHECK_CASE(c.stem, got.data(), exp.data(), got.size(), subblock_rtol(),
                subblock_atol());
   }
@@ -2600,6 +3067,8 @@ TEST(kernels, attention_subblock_tinyllama_shape) {
       s_prefill, /*past_len=*/0, kv_max_seq, n_heads, n_kv_heads, head_dim, eps);
   CUDA_CHECK(cudaDeviceSynchronize());
   const auto gpu_out0 = d_out0.download();
+  LOG_MARGIN("tinyllama subblock prefill s=64", gpu_out0.data(), cpu_out0.data(),
+             gpu_out0.size(), subblock_rtol(), subblock_atol());
   CHECK_CASE("tinyllama subblock prefill s=64", gpu_out0.data(), cpu_out0.data(),
              gpu_out0.size(), subblock_rtol(), subblock_atol());
 
@@ -2616,6 +3085,8 @@ TEST(kernels, attention_subblock_tinyllama_shape) {
       /*s_q=*/1, /*past_len=*/64, kv_max_seq, n_heads, n_kv_heads, head_dim, eps);
   CUDA_CHECK(cudaDeviceSynchronize());
   const auto gpu_out1 = d_out1.download();
+  LOG_MARGIN("tinyllama subblock decode step1 kv=65", gpu_out1.data(), cpu_out1.data(),
+             gpu_out1.size(), subblock_rtol(), subblock_atol());
   CHECK_CASE("tinyllama subblock decode step1 kv=65", gpu_out1.data(), cpu_out1.data(),
              gpu_out1.size(), subblock_rtol(), subblock_atol());
 
@@ -2632,6 +3103,8 @@ TEST(kernels, attention_subblock_tinyllama_shape) {
       /*s_q=*/1, /*past_len=*/65, kv_max_seq, n_heads, n_kv_heads, head_dim, eps);
   CUDA_CHECK(cudaDeviceSynchronize());
   const auto gpu_out2 = d_out2.download();
+  LOG_MARGIN("tinyllama subblock decode step2 kv=66", gpu_out2.data(), cpu_out2.data(),
+             gpu_out2.size(), subblock_rtol(), subblock_atol());
   CHECK_CASE("tinyllama subblock decode step2 kv=66", gpu_out2.data(), cpu_out2.data(),
              gpu_out2.size(), subblock_rtol(), subblock_atol());
 }
@@ -2664,6 +3137,9 @@ TEST(kernels, ffn_subblock_matches_reference) {
 
     const auto got = d_out.download();
     const auto& exp = g.at("expected").data;
+    LOG_MARGIN(c.stem, got.data(), exp.data(), got.size(),
+               ffn_subblock_rtol(c.d_model, c.d_ffn),
+               ffn_subblock_atol(c.d_model, c.d_ffn));
     CHECK_CASE(c.stem, got.data(), exp.data(), got.size(),
                ffn_subblock_rtol(c.d_model, c.d_ffn),
                ffn_subblock_atol(c.d_model, c.d_ffn));
@@ -2722,6 +3198,8 @@ TEST(kernels, transformer_block_prefill_and_decode_golden) {
 
     const auto got = d_out.download();
     const auto& exp = g.at("expected").data;
+    LOG_MARGIN(c.stem, got.data(), exp.data(), got.size(), block_rtol(d_model, c.d_ffn),
+               block_atol(d_model, c.d_ffn));
     CHECK_CASE(c.stem, got.data(), exp.data(), got.size(), block_rtol(d_model, c.d_ffn),
                block_atol(d_model, c.d_ffn));
   }
@@ -2761,6 +3239,8 @@ TEST(kernels, transformer_block_tinyllama_shape) {
     CUDA_CHECK(cudaDeviceSynchronize());
 
     const auto gpu_out = d_out.download();
+    LOG_MARGIN(label, gpu_out.data(), cpu_out.data(), gpu_out.size(),
+               block_rtol(d_model, d_ffn), block_atol(d_model, d_ffn));
     CHECK_CASE(label, gpu_out.data(), cpu_out.data(), gpu_out.size(),
                block_rtol(d_model, d_ffn), block_atol(d_model, d_ffn));
   };
@@ -2792,8 +3272,10 @@ TEST(kernels, transformer_block_two_layers) {
   engine::cpu::rope_precompute_tables(h_cos.data(), h_sin.data(), kv_max_seq, head_dim);
   DeviceBuffer<float> d_cos(h_cos), d_sin(h_sin);
 
-  // Two stacked layers compound single-layer rounding error additively along the
-  // residual stream (~2x single-layer block bound).
+  // Empirical bound with measured headroom for two stacked layers: uses a 2x multiplier
+  // over the single-layer empirical bound to account for residual error compounding.
+  // Measured (rtol=3.136e-2, atol=1.574e-2): prefill max_abs=7.795e-4 (33.1x headroom),
+  // decode max_abs=4.165e-4 (60.3x headroom).
   const double two_layer_rtol = 2.0 * block_rtol(d_model, d_ffn);
   const double two_layer_atol = 2.0 * block_atol(d_model, d_ffn);
 
@@ -2815,6 +3297,8 @@ TEST(kernels, transformer_block_two_layers) {
     CUDA_CHECK(cudaDeviceSynchronize());
 
     const auto gpu_out = d_out.download();
+    LOG_MARGIN(label, gpu_out.data(), cpu_out.data(), gpu_out.size(), two_layer_rtol,
+               two_layer_atol);
     CHECK_CASE(label, gpu_out.data(), cpu_out.data(), gpu_out.size(), two_layer_rtol,
                two_layer_atol);
   };

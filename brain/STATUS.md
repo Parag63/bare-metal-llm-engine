@@ -1,6 +1,6 @@
 # Current Status
 
-> **Last updated:** 2026-11-11
+> **Last updated:** 2026-11-12
 >
 > This file is the single source of truth for "what's done, what's in progress, and
 > what's next." Update it whenever a milestone is completed.
@@ -8,9 +8,9 @@
 ## Test score (verified on Machine B, RTX 4070 SUPER, sm_89)
 
 ```
-passed 147   failed 0   pending 0   skipped 0
+passed 151   failed 0   pending 0   skipped 0
 ```
-*(CUDA-enabled build with nvcc 12.6, RTX 4070 SUPER — 2026-11-11, from `./build/bin/engine_tests --list`)*
+*(CUDA-enabled build with nvcc 12.6, RTX 4070 SUPER — 2026-11-12, from `./build/bin/engine_tests --list`)*
 
 ### Test suite breakdown
 
@@ -18,23 +18,27 @@ passed 147   failed 0   pending 0   skipped 0
 |---|---:|---|
 | `dtype` | 10 | ✅ All passing |
 | `golden` | 6 | ✅ All passing |
-| `cpu_ref` | 32 | ✅ All 32 passing (includes SwiGLU, FP16 GEMV, embedding, argmax, RoPE, attention, attention_online, FFN & full transformer block) |
+| `cpu_ref` | 33 | ✅ All 33 passing (includes SwiGLU, FP16 GEMV, embedding, argmax, RoPE, attention, attention_online, adversarial softmax, FFN & full transformer block) |
 | `storage` | 3 | ✅ All passing |
 | `tensor` | 35 | ✅ All passing (GPU + CPU verified, const and half accessors) |
 | `allocator` | 8 | ✅ All 8 passing (PoolAllocator: alignment, recycling, peak tracking, 100k cycles, multi-stream events) |
-| `kernels` | 53 | ✅ All 53 passing (18 kernels: ladder, fusion, RoPE, attention naive/prefill/decode, bridge/subblock, full Llama transformer block & 2-layer stack) |
-| **Total (`all`)** | **147** | **✅ All passing across 8 CTest entries (7 suites + `all`)** |
+| `kernels` | 56 | ✅ All 56 passing (18 kernels: ladder, fusion, RoPE, attention naive/prefill/decode, long-seq S=2048/L=8192/32768 & adversarial softmax, bridge/subblock, full Llama transformer block & 2-layer stack) |
+| **Total (`all`)** | **151** | **✅ All passing across 8 CTest entries (7 suites + `all`)** |
 
 ---
 
 ## Module 4 Completion: Attention, RoPE, FlashAttention-2 & FlashDecoding
 - [x] **ADRs & Contracts (`ADR-0011`, `ADR-0012`, `ADR-0013`):** Native FP16 I/O with FP32 accumulation/online-softmax; token-major `Q`/`Out` `[S, H_q, D]`, head-major strided `K`/`V` `[H_kv, S_max, D]`, FP32 `cos`/`sin` tables.
 - [x] **CPU Reference Oracles & Golden Reference Suite:** `cpu::rope_precompute_tables`, `cpu::rope`, `cpu::attention`, and tiled `cpu::attention_online` verified across 103 binary reference files (105.0 MiB).
+- [x] **Long-Sequence & Adversarial Softmax Correctness (`tests/test_kernels.cu`, `tests/test_cpu_ref.cpp`):** Verified `S=2048` causal prefill (`max_abs=6.104e-5`, `42.1×` headroom), `L=8192` & `L=32768` strided decode (`max_abs <= 9.537e-7`) using `8:1` GQA heads directly against the FP64 CPU oracle without golden files, plus adversarial softmax stress cases (`-30/-100` underflow guard, mixed `±30` tile rescale, all-equal `+25/+100/-30/-100` overflow guard, dominant key + causal row-0 isolation).
 - [x] **Rotary Position Embeddings (`kernels/rope.cu`):** Fused single-launch Q+K RoPE supporting `RotateHalf` & `AdjacentPair`; **0.044 ms (439.1 GB/s, 87.1% peak BW)** at prefill `S=2048`.
 - [x] **Naive Baseline & FlashAttention-2 Prefill (`kernels/attention_naive.cu`, `kernels/attention_prefill.cu`):** Eliminated `[H_q, S, S]` score matrix (**115× DRAM reduction** before softmax via `ncu`: `10.56 MB` vs `>1.16 GiB`), reaching **14.02 TFLOP/s** causal at `S=4096` (**4.89 ms**, **16.1×** faster than naive `78.61 ms`, **+20.9%** from GQA SMEM group sharing).
-- [x] **FlashDecoding Split-KV & Warp-Per-Head GQA Broadcast (`kernels/attention_decode.cu`):** Solved `kGChunk=8` 138-reg collapse (`53 regs`, `66.7%` occ, 0 spills, 0 bank conflicts); reaches **463.6 GB/s (91.97% peak BW)** on Llama-2-7B `L=8192` and **0.088 ms (381.7 GB/s, 17.8× vs single-pass)** on TinyLlama `L=32768`.
-- [x] **Phase 10 Full Llama Transformer Block Integration (`tests/test_kernels.cu`, `tests/test_cpu_ref.cpp`):** Composed `run_ffn_subblock_gpu/cpu` (`RMSNorm -> Gate/Up -> SwiGLU -> Down -> Residual`) and `run_transformer_block_gpu/cpu` (Attention + FFN); verified against float64 Tier-1 goldens at prefill/decode shapes, sequential prefill (`s_q=16`) -> decode (`kv=17, 18`) KV reuse at exact TinyLlama dimensions (`d_model=2048, d_ffn=5632`), and 2-layer residual stacking.
-- [x] **Nsight Compute, Roofline & `PoolAllocator` Fix (`src/pool_allocator.cpp`):** Confirmed prefill math-bound (`62–84%` math throttle) and decode memory-bound (`1.005×` cold DRAM bytes); capped auto-slab growth at `64 MiB` + reverse slab scan to prevent `4 GiB` WDDM spill after naive `S=4096`.
+- [x] **FlashDecoding Split-KV & Warp-Per-Head GQA Broadcast (`kernels/attention_decode.cu`):** Solved `kGChunk=8` 138-reg collapse (`53 regs`, `66.7%` occ, 0 spills, 0 bank conflicts); reaches **463.6 GB/s (91.97% peak BW)** on Llama-2-7B `L=8192` and **0.088 ms (381.7 GB/s, 17.8× vs single-pass)** on synthetic TinyLlama `L=32768` (*note: TinyLlama's context length is 2048; `L > 2048` rows are synthetic kernel scaling tests*).
+- [x] **Phase 10 Full Llama Transformer Block Integration (`tests/test_kernels.cu`, `tests/test_cpu_ref.cpp`):** Composed `run_ffn_subblock_gpu/cpu` (`RMSNorm -> Gate/Up -> SwiGLU -> Down -> Residual`) and `run_transformer_block_gpu/cpu` (Attention + FFN); verified against float64 Tier-1 goldens at prefill/decode shapes, sequential prefill (`s_q=16`) -> decode (`kv=17, 18`) KV reuse at exact TinyLlama dimensions (`d_model=2048, d_ffn=5632`), and 2-layer residual stacking with empirical bounds (`12.5×–200.9×` measured headroom) + structurally derived FFN bound (`7.8×–50.3×` headroom).
+- [x] **Nsight Compute, Roofline & `PoolAllocator` Fix (`src/pool_allocator.cpp`):** Using a consistent `Q+K+V+Out` (Reads+Writes) ideal-bytes baseline, confirmed prefill math-bound (**62–84% math throttle**, **`1.017×` R+W** on Llama-2-7B `S=2048`, **`0.56×` R+W / `1.007×` reads-only** on TinyLlama `S=2048` where `48 MiB` L2 holds `Out` on-chip) and decode memory-bound (**`1.005×` R+W** cold DRAM bytes); capped auto-slab growth at `64 MiB` + reverse slab scan to prevent `4 GiB` WDDM spill after naive `S=4096`.
+- [ ] **Module 8 Architectural & Oracle Gates (tracked for Module 8):**
+  - Compare one real TinyLlama transformer layer against a Hugging Face PyTorch oracle in `tools/` before Module 8 (preventing any shared NumPy/C++ formula assumption while keeping `engine` C++ framework-free).
+  - Promote block composition helpers (`run_attention_subblock`, `run_ffn_subblock`, `run_transformer_block`) out of `tests/` into `src/model/` when building Module 8 inference, keeping the existing tests as its regression suite.
 - [x] **Decode `rmsnorm_linear` Baseline Reality:** Exposed strawman baseline; fair baseline `rmsnorm + gemv` achieves **0.149 ms (465 GB/s)**, beating 1D strip fusion (0.366 ms) by **$2.45\times$**. Updated dispatch and recorded in `docs/negative-results.md`.
 - [x] **`swiglu` Accounting Discrepancy Resolved:** Fused FP32 SwiGLU achieves **0.286 ms** (moving 67.6 MB at **236.4 GB/s / 46.9% peak BW**, yielding a **$1.55\times$ speedup** over unfused 0.444 ms). Erroneous 410 GB/s accounting claim removed.
 - [x] **`residual_rmsnorm` L2 Residency Disclosed:** $512 \times 4096$ working set (33.55 MB) resides in 48 MB L2; true cold DRAM streaming measured at $4096 \times 4096$ (268 MB) achieving **436.3 GB/s (86.56% peak BW)** in **0.615 ms**.

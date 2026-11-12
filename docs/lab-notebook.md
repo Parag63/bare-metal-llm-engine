@@ -201,20 +201,22 @@ Implemented in [kernels/attention_decode.cu](../kernels/attention_decode.cu) and
 
 1. **Nsight Compute (`ncu`) Hardware Counter Breakdown (`sm_89` RTX 4070 SUPER):**
 
-| Kernel | Workload | `dram__bytes.sum` | SMEM Load Bank Conflicts | L2 Hit Rate | Active Warps | Primary Warp Stall Drivers (per active issue) |
-|---|---|---:|---:|---:|---:|---|
-| `attention_naive_scores_kernel<64>` | TinyLlama `S=2048` | **633.4 MB** | **3,483,558** | — | — | Untiled `[H, S, S]` global writes + bank conflicts |
-| `attention_naive_pv_kernel<64>` | TinyLlama `S=2048` | **580.1 MB** | — | — | — | `>1.16 GiB` DRAM before even counting `softmax_rows` |
-| `flash_prefill_kernel<64,128,32,1>` | TinyLlama `S=2048` GQA | **10.56 MB** (`10.07 MiB`, `1.007×` ideal) | **0** | 92.98% | 31.15% | **Math pipe throttle 62.35%**, short 25.16%, MIO 13.79%, long 12.64% |
-| `flash_prefill_kernel<64,64,64,0>` | TinyLlama `S=2048` per-head | **10.52 MB** | **0** | 96.35% | 32.48% | **Math pipe throttle 74.45%**, **MIO throttle 69.71%**, long 10.82% |
-| `flash_prefill_kernel<128,64,32,0>` | Llama2-7B `S=2048` | **68.24 MB** (`65.08 MiB`, `1.017×` ideal) | 26,662 | 91.02% | 32.53% | **Math pipe throttle 83.79%**, short 45.31%, MIO 18.98%, long 13.54% |
-| `flash_decode_gqa_warp_kernel<64,8>` | TinyLlama `L=8192` | **8.43 MB** (`8.04 MiB`, `1.005×` ideal) | **0** | 6.27% (cold slab) | 32.46% | **Wait 143.3% / short 147.7% / long scoreboard 131.0%**, math **11.5%** |
-| `flash_decode_split_kernel<64,1>` | TinyLlama `L=2048` unshared | **2.13 MB** | 0 | **86.67%** (`8×` L2 reread) | — | **Long scoreboard 821.2%**, barrier 86.9% |
-| `flash_decode_reduce_kernel<128>` | TinyLlama `L=32768` | minimal | 0 | — | — | **Long scoreboard 1364.5%** (streaming partials), math **0.54%** |
+   *Ideal bytes definition (consistent across every row):* **`Q+K+V+Out` Reads + Writes** (`18.00 MiB` for TinyLlama `S=2048` = `10.00 MiB` reads + `8.00 MiB` writes; `64.00 MiB` for Llama2-7B `S=2048` = `48.00 MiB` reads + `16.00 MiB` writes; `8.008 MiB` for TinyLlama `L=8192` = `8.002 MiB` reads + `0.006 MiB` writes).
+
+| Kernel | Workload | Ideal (R+W) | `dram__bytes.sum` | DRAM / Ideal (R+W) | SMEM Bank Conflicts | L2 Hit Rate | Active Warps | Primary Warp Stall Drivers (per active issue) |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| `attention_naive_scores_kernel<64>` | TinyLlama `S=2048` | `18.00 MiB` | **633.4 MB** (`604.1 MiB`) | `33.6×` (scores only) | **3,483,558** | — | — | Untiled `[H, S, S]` global writes + bank conflicts |
+| `attention_naive_pv_kernel<64>` | TinyLlama `S=2048` | `18.00 MiB` | **580.1 MB** (`553.2 MiB`) | `30.7×` (PV only) | — | — | — | `>1.16 GiB` DRAM combined before `softmax_rows` |
+| `flash_prefill_kernel<64,128,32,1>` | TinyLlama `S=2048` GQA | `18.00 MiB` | **10.56 MB** (`10.07 MiB`) | **`0.56×`** (`1.007×` reads; `Out` in L2) | **0** | 92.98% | 31.15% | **Math pipe throttle 62.35%**, short 25.16%, MIO 13.79%, long 12.64% |
+| `flash_prefill_kernel<64,64,64,0>` | TinyLlama `S=2048` per-head | `18.00 MiB` | **10.52 MB** (`10.03 MiB`) | **`0.56×`** (`Out` in L2) | **0** | 96.35% | 32.48% | **Math pipe throttle 74.45%**, **MIO throttle 69.71%**, long 10.82% |
+| `flash_prefill_kernel<128,64,32,0>` | Llama2-7B `S=2048` | `64.00 MiB` | **68.24 MB** (`65.08 MiB`) | **`1.017×`** | 26,662 | 91.02% | 32.53% | **Math pipe throttle 83.79%**, short 45.31%, MIO 18.98%, long 13.54% |
+| `flash_decode_gqa_warp_kernel<64,8>` | TinyLlama `L=8192` | `8.008 MiB` | **8.43 MB** (`8.04 MiB`) | **`1.005×`** | **0** | 6.27% (cold slab) | 32.46% | **Wait 143.3% / short 147.7% / long scoreboard 131.0%**, math **11.5%** |
+| `flash_decode_split_kernel<64,1>` | TinyLlama `L=2048` unshared | `2.008 MiB` | **2.13 MB** (`2.03 MiB`) | **`1.01×`** (excl. partials) | 0 | **86.67%** (`8×` L2 reread) | — | **Long scoreboard 821.2%**, barrier 86.9% |
+| `flash_decode_reduce_kernel<128>` | TinyLlama `L=32768` | `0.004 MiB` (`Out`) | minimal | — | 0 | — | — | **Long scoreboard 1364.5%** (streaming partials), math **0.54%** |
 
    - **Hardware Counter Proof of Architecture:**
-     - **Prefill (`attention_prefill`) is definitively SIMT math-bound** as predicted: DRAM traffic hits **`1.007×` (`10.07 MiB` vs `10.00 MiB` ideal)** and **`1.017×` (`65.08 MiB` vs `64.00 MiB` ideal)** theoretical minimum, SMEM `+2` padding achieves **0 SMEM load bank conflicts** at `D=64`, `stalled_long_scoreboard` is only **10.8–13.5%**, and **62.4–83.8% `math_pipe_throttle`** confirms the SIMT FP32 FMA unit (rather than memory) limits v1 prefill at **12.70–14.02 TFLOP/s**. Moreover, GQA group sharing (`M_thr=4`) cuts MIO/SMEM stall contention from **69.71% → 13.79% (5.1× lower)**.
-     - **Decode (`flash_decode_gqa_warp_kernel`) is strictly memory-bound** as predicted: cold slab DRAM bytes hit **`1.005×` (`8.04 MiB` vs `8.00 MiB` ideal)** with `6.27%` L2 hit rate (honest cold DRAM measurement), **0 SMEM bank conflicts**, only **11.5% math throttle**, and DRAM latency/sync wait dominating warps. Meanwhile unshared decode relies on `86.67%` L2 hits across 8 independent reads of KV.
+     - **Prefill (`attention_prefill`) is definitively SIMT math-bound** as predicted: using a single consistent `Q+K+V+Out` (Reads + Writes) ideal-bytes baseline, Llama-2-7B `S=2048` (`64.00 MiB > 48 MiB` L2) measures **`1.017×` (`65.08 MiB` vs `64.00 MiB` ideal)**, while TinyLlama `S=2048` (`18.00 MiB < 48 MiB` L2) holds its `8.00 MiB` `Out` write lines dirty inside L2 on isolated `ncu` replay so DRAM traffic measures **`10.07 MiB` (`0.56×` R+W, `1.007×` of the `10.00 MiB` input reads)**. SMEM `+2` padding achieves **0 SMEM load bank conflicts** at `D=64`, `stalled_long_scoreboard` is only **10.8–13.5%**, and **62.4–83.8% `math_pipe_throttle`** confirms the SIMT FP32 FMA unit (rather than memory) limits v1 prefill at **12.70–14.02 TFLOP/s**. Moreover, GQA group sharing (`M_thr=4`) cuts MIO/SMEM stall contention from **69.71% → 13.79% (5.1× lower)**.
+     - **Decode (`flash_decode_gqa_warp_kernel`) is strictly memory-bound** as predicted: cold slab DRAM bytes hit **`1.005×` (`8.04 MiB` vs `8.008 MiB` ideal R+W)** with `6.27%` L2 hit rate (honest cold DRAM measurement), **0 SMEM bank conflicts**, only **11.5% math throttle**, and DRAM latency/sync wait dominating warps. Meanwhile unshared decode relies on `86.67%` L2 hits across 8 independent reads of KV.
 
 2. **PoolAllocator Bug Discovered During Full-Suite Benchmarking (`src/pool_allocator.cpp`):**
    - Full `bench_kernels --json` initially showed `Llama2-7B L=8192` decode collapsing from **0.290 ms (463.6 GB/s)** to **5.35 ms (25.1 GB/s = PCIe host-RAM speed!)** right after `attention_naive S=4096`.
@@ -230,6 +232,30 @@ Implemented in [kernels/attention_decode.cu](../kernels/attention_decode.cu) and
    - **FA2 Prefill (predicted 10–18 TFLOP/s, 1.0–1.7 ms at `S=2048`):** measured **1.36 ms / 12.70 TFLOP/s** (`S=2048`) and **4.89 ms / 14.02 TFLOP/s** (`S=4096`), hitting dead-center inside prediction (`35.8%–39.5%` nominal FP32 peak, `ncu`-verified math-bound).
    - **Decode FlashDecoding:** Llama-2-7B `L=8192` (**0.290 ms / 463.6 GB/s = 91.97% peak BW**) beat prediction (300–350 µs); TinyLlama `L=8192..32768` (`0.032..0.088 ms / 264.5..381.7 GB/s`) matched latency predictions (fixed ~10 µs split+reduce overhead caps 8–16 MiB at 52–67%).
    - **RoPE:** `S=1` decode (**3.1 µs**) and `S=2048` prefill (**44.2 µs / 439.1 GB/s**, **158.1 µs / 431.2 GB/s**) landed squarely inside the Phase 1 predicted ranges (`3–5 µs` and `43–55 µs`).
+
+### Week 10 Follow-Up — 2026-11-12 · Long-Sequence Correctness, Adversarial Softmax, Empirical Bounds, and Module 8 Gates
+
+1. **Long-Sequence Correctness Verification Against CPU `double` Oracle (`tests/test_kernels.cu`):**
+   - Previous correctness goldens topped out at `S=128` (prefill), `kv=513` (decode), and `s=16 / kv=18` (Phase 10 block tests), while headline `S=4096` / `L=32768` benchmarks only checked finiteness.
+   - Added golden-free long-sequence tests using TinyLlama's `8:1` GQA ratio (`n_heads=8, n_kv_heads=1, head_dim=64`) directly against `engine::cpu::attention` (`double` oracle):
+     - `kernels.attention_prefill_long_sequence` (`S=2048`, causal, GQA + per-head + `out_lse`): **`max_abs = 6.104e-5`**, `max_rel = 9.766e-4`, **`42.1×` budget headroom** (`rtol=1.953e-3, atol=2.441e-3`).
+     - `kernels.attention_decode_long_sequence` (`L=8192` and `L=32768`, strided NaN-padded KV cache, `split=0` auto GQA, `split=1` GQA, `split=0` per-head): `L=8192` **`max_abs = 9.537e-7`** (**`5634.0×` headroom**); `L=32768` **`max_abs = 5.960e-8`** (**`286722.0×` headroom**).
+
+2. **Adversarial Online-Softmax Tests (`cpu_ref.attention_adversarial_softmax` & `kernels.attention_adversarial_softmax`):**
+   - Verified `cpu::attention`, `cpu::attention_online`, `attention_naive`, `attention_prefill` (GQA & per-head), and `attention_decode` (`split_kv=0, 1, 8`, GQA & per-head) across all four stress regimes in `plans/module4_plan.md` Section 5 plus underflow/overflow extremes:
+     - All-negative `-30..-33` & `-100..-103` (would underflow `expf` to `0/0 = NaN` without max subtraction): worst `max_abs = 7.629e-6` (`202.7×` headroom naive, `403.4×` GQA, `12810.1×` per-head; decode exact `0.0`).
+     - Mixed `±30` forcing cross-tile online rescaling (`+10 -> +30` at `j=73` prefill / `j=199` decode): `max_abs = 0.0` (exact match).
+     - All-equal constant scores (`+25, +100, -30, -100` per head; `+100` overflows `expf` to `inf/inf = NaN` without max subtraction): closed-form uniform `V` mean + `C + log(n_valid)`, `max_abs <= 4.768e-7` (`3205.9×` headroom).
+     - One dominant key (`j_dom=97` prefill, `j_dom=197` decode) + causal row-0 single-valid-key immunity (`row 0 == V[0]`): exact match (`0.0`).
+
+3. **Empirical Bounds vs Structural Derivation (`tests/test_kernels.cu`, `tests/test_cpu_ref.cpp`):**
+   - Distinguished the structurally derived all-FP32 FFN tolerance (`ffn_subblock_rtol/atol = 4 * 2^-23 * (sqrt(d_model) + sqrt(d_ffn))` = `2.868e-5` at `512/1408`, measured `max_abs = 3.792e-6`, **`7.8×` headroom**) from the **empirical bounds with measured headroom** used for FP16-quantized sub-blocks (`subblock_rtol = 16 * 2^-10`, `subblock_atol = 8 * 2^-10`: worst `max_abs = 1.026e-3`, **`12.5×` headroom** golden / **`70.6×–162.6×`** TinyLlama), full transformer blocks (`block_rtol/atol`: worst `max_abs = 1.183e-3`, **`7.9×`** golden / **`50.4×–200.9×`** TinyLlama), and 2-layer residual stacking (`2×` empirical multiplier: worst `max_abs = 7.795e-4`, **`33.1×–60.3×` headroom**).
+   - Standardized the `ncu` table above to a single **Reads + Writes (`Q+K+V+Out`)** ideal-bytes definition across every row and updated benchmark tables to label timings **`Median (ms)`** (matching `bench/bench_harness.hpp`).
+
+4. **Synthetic `L > 2048` Disclosure & Module 8 Architectural Gates:**
+   - **Synthetic decode rows:** TinyLlama-1.1B has a trained context window of **`2048`** (`max_position_embeddings = 2048`), so TinyLlama decode benchmark rows at `L = 8192, 16384, 32768` are **synthetic long-context kernel scaling measurements**, not native TinyLlama context lengths.
+   - **Oracle independence gate (before Module 8):** All current goldens in `tools/gen_reference.py` are NumPy-only (same formulas written twice could mask a shared layout/RoPE/GQA bug). Before Module 8, add a PyTorch/Hugging Face verification script under `tools/` comparing one real TinyLlama transformer layer against our engine layer (keeping the C++ engine 100% framework-free).
+   - **Code promotion gate (Module 8):** Promote block composition helpers (`run_attention_subblock`, `run_ffn_subblock`, `run_transformer_block`) out of `tests/` into `src/model/` when building the Module 8 model execution path, keeping the existing tests as its regression suite.
 
 ---
 

@@ -1089,6 +1089,208 @@ TEST(cpu_ref, attention_contracts_and_edge_cases) {
   EXPECT_THROWS(engine::cpu::attention_online(p, p, p, p, 1, 2, 6, 4, D, 2 * D, scale));
 }
 
+TEST(cpu_ref, attention_adversarial_softmax) {
+  constexpr std::int64_t D = 64;
+  constexpr std::int64_t H_q = 8;
+  constexpr std::int64_t H_kv = 2;
+  const float scale = 1.0f / std::sqrt(static_cast<float>(D));  // 0.125
+
+  auto make_v = [&](std::int64_t s_kv) {
+    std::vector<engine::half> v(static_cast<std::size_t>(H_kv * s_kv * D));
+    for (std::int64_t hk = 0; hk < H_kv; ++hk) {
+      for (std::int64_t j = 0; j < s_kv; ++j) {
+        for (std::int64_t d = 0; d < D; ++d) {
+          const int bucket = static_cast<int>((hk * 131 + j * 17 + d * 7) % 33) - 16;
+          v[static_cast<std::size_t>((hk * s_kv + j) * D + d)] =
+              engine::float_to_half(static_cast<float>(bucket) * 0.0625f);
+        }
+      }
+    }
+    return v;
+  };
+
+  auto check_two_pass_vs_online =
+      [&](const char* label, const std::vector<engine::half>& q,
+          const std::vector<engine::half>& k, const std::vector<engine::half>& v,
+          std::int64_t s_q, std::int64_t s_kv, std::int64_t q_pos_offset,
+          bool is_causal) {
+        const std::size_t out_n = static_cast<std::size_t>(s_q * H_q * D);
+        const std::size_t lse_n = static_cast<std::size_t>(s_q * H_q);
+        std::vector<engine::half> out_two(out_n), out_online(out_n);
+        std::vector<float> lse_two(lse_n), lse_online(lse_n);
+
+        engine::cpu::attention(q.data(), k.data(), v.data(), out_two.data(), s_q, s_kv,
+                               H_q, H_kv, D, s_kv * D, scale, q_pos_offset, is_causal,
+                               lse_two.data());
+        engine::cpu::attention_online(q.data(), k.data(), v.data(), out_online.data(),
+                                      s_q, s_kv, H_q, H_kv, D, s_kv * D, scale,
+                                      q_pos_offset, is_causal, lse_online.data());
+
+        for (float lv : lse_online) EXPECT_TRUE(std::isfinite(lv));
+        const auto f_two = to_float_vec(out_two);
+        const auto f_on = to_float_vec(out_online);
+        CHECK_CASE(label, f_on.data(), f_two.data(), f_on.size(), attention_rtol(),
+                   attention_atol(s_kv));
+        CHECK_CASE(std::string(label) + " (lse)", lse_online.data(), lse_two.data(),
+                   lse_online.size(), 1e-6, 1e-6);
+        return std::make_pair(out_online, lse_online);
+      };
+
+  // 1. Large all-negative logits (~ -30..-33 after scaling); catches m=0 init bugs.
+  {
+    constexpr std::int64_t s_q = 70, s_kv = 130, q_off = 60;
+    std::vector<engine::half> q(static_cast<std::size_t>(s_q * H_q * D),
+                                engine::float_to_half(0.0f));
+    std::vector<engine::half> k(static_cast<std::size_t>(H_kv * s_kv * D),
+                                engine::float_to_half(0.0f));
+    for (std::int64_t r = 0; r < s_q * H_q; ++r) {
+      for (std::int64_t d = 0; d < 4; ++d) {
+        q[static_cast<std::size_t>(r * D + d)] = engine::float_to_half(-4.0f);
+      }
+      q[static_cast<std::size_t>(r * D + 4)] = engine::float_to_half(1.0f);
+    }
+    for (std::int64_t hk = 0; hk < H_kv; ++hk) {
+      for (std::int64_t j = 0; j < s_kv; ++j) {
+        for (std::int64_t d = 0; d < 4; ++d) {
+          k[static_cast<std::size_t>((hk * s_kv + j) * D + d)] =
+              engine::float_to_half(15.0f);
+        }
+        k[static_cast<std::size_t>((hk * s_kv + j) * D + 4)] =
+            engine::float_to_half(-8.0f * static_cast<float>(j % 4));
+      }
+    }
+    const auto v = make_v(s_kv);
+    check_two_pass_vs_online("cpu adversarial neg-30", q, k, v, s_q, s_kv, q_off, true);
+  }
+
+  // 2. Mixed large +/-30 scores across tile boundaries forcing repeated online rescaling.
+  {
+    constexpr std::int64_t s_q = 70, s_kv = 130;
+    std::vector<engine::half> q(static_cast<std::size_t>(s_q * H_q * D),
+                                engine::float_to_half(0.0f));
+    std::vector<engine::half> k(static_cast<std::size_t>(H_kv * s_kv * D),
+                                engine::float_to_half(0.0f));
+    for (std::int64_t r = 0; r < s_q * H_q; ++r) {
+      for (std::int64_t d = 0; d < 4; ++d) {
+        q[static_cast<std::size_t>(r * D + d)] = engine::float_to_half(4.0f);
+      }
+    }
+    for (std::int64_t hk = 0; hk < H_kv; ++hk) {
+      for (std::int64_t j = 0; j < s_kv; ++j) {
+        float kval = -15.0f;  // -30 after scale
+        if (j == 73 || j == 128) {
+          kval = 15.0f;  // +30 in late tiles
+        } else if (j >= 10 && j < 64 && (j % 9 == 0)) {
+          kval = 5.0f;  // +10 in tile 0 -> forces alpha = exp(-20) rescale at tile 1
+        } else if (j % 5 == 0) {
+          kval = 0.0f;
+        }
+        for (std::int64_t d = 0; d < 4; ++d) {
+          k[static_cast<std::size_t>((hk * s_kv + j) * D + d)] =
+              engine::float_to_half(kval);
+        }
+      }
+    }
+    const auto v = make_v(s_kv);
+    check_two_pass_vs_online("cpu adversarial mixed +/-30", q, k, v, s_q, s_kv, 0, false);
+  }
+
+  // 3. All-equal non-zero scores (+25.0): closed-form mean of V and lse = 25 + ln(n_valid).
+  {
+    constexpr std::int64_t s_q = 70, s_kv = 130;
+    std::vector<engine::half> q(static_cast<std::size_t>(s_q * H_q * D),
+                                engine::float_to_half(0.0f));
+    std::vector<engine::half> k(static_cast<std::size_t>(H_kv * s_kv * D),
+                                engine::float_to_half(0.0f));
+    for (std::int64_t r = 0; r < s_q * H_q; ++r) {
+      for (std::int64_t d = 0; d < 5; ++d) {
+        q[static_cast<std::size_t>(r * D + d)] = engine::float_to_half(5.0f);
+      }
+    }
+    for (std::int64_t hk = 0; hk < H_kv; ++hk) {
+      for (std::int64_t j = 0; j < s_kv; ++j) {
+        for (std::int64_t d = 0; d < 5; ++d) {
+          k[static_cast<std::size_t>((hk * s_kv + j) * D + d)] =
+              engine::float_to_half(8.0f);
+        }
+      }
+    }
+    const auto v = make_v(s_kv);
+    const auto res = check_two_pass_vs_online("cpu adversarial all-equal +25 causal", q,
+                                              k, v, s_q, s_kv, 0, true);
+    const auto out_f = to_float_vec(res.first);
+    std::vector<float> closed_out(out_f.size());
+    std::vector<float> closed_lse(res.second.size());
+    const std::int64_t group = H_q / H_kv;
+    for (std::int64_t i = 0; i < s_q; ++i) {
+      const std::int64_t n_valid = i + 1;
+      for (std::int64_t h = 0; h < H_q; ++h) {
+        const std::int64_t hk = h / group;
+        closed_lse[static_cast<std::size_t>(i * H_q + h)] =
+            static_cast<float>(25.0 + std::log(static_cast<double>(n_valid)));
+        for (std::int64_t d = 0; d < D; ++d) {
+          double sum_v = 0.0;
+          for (std::int64_t j = 0; j < n_valid; ++j) {
+            sum_v += static_cast<double>(engine::half_to_float(
+                v[static_cast<std::size_t>((hk * s_kv + j) * D + d)]));
+          }
+          closed_out[static_cast<std::size_t>((i * H_q + h) * D + d)] =
+              static_cast<float>(sum_v / static_cast<double>(n_valid));
+        }
+      }
+    }
+    CHECK_CASE("cpu all-equal closed-form out", out_f.data(), closed_out.data(),
+               out_f.size(), attention_rtol(), attention_atol(s_kv));
+    CHECK_CASE("cpu all-equal closed-form lse", res.second.data(), closed_lse.data(),
+               res.second.size(), 1e-6, 1e-6);
+  }
+
+  // 4. One dominant key (j_dom=97 at +30, rest -20) + causal row 0 single-valid-key check.
+  {
+    constexpr std::int64_t s_q = 130, s_kv = 130, j_dom = 97;
+    std::vector<engine::half> q(static_cast<std::size_t>(s_q * H_q * D),
+                                engine::float_to_half(0.0f));
+    std::vector<engine::half> k(static_cast<std::size_t>(H_kv * s_kv * D),
+                                engine::float_to_half(0.0f));
+    for (std::int64_t r = 0; r < s_q * H_q; ++r) {
+      for (std::int64_t d = 0; d < 4; ++d) {
+        q[static_cast<std::size_t>(r * D + d)] = engine::float_to_half(4.0f);
+      }
+    }
+    for (std::int64_t hk = 0; hk < H_kv; ++hk) {
+      for (std::int64_t j = 0; j < s_kv; ++j) {
+        const float kval = (j == j_dom) ? 15.0f : -10.0f;
+        for (std::int64_t d = 0; d < 4; ++d) {
+          k[static_cast<std::size_t>((hk * s_kv + j) * D + d)] =
+              engine::float_to_half(kval);
+        }
+      }
+    }
+    const auto v = make_v(s_kv);
+    const auto res = check_two_pass_vs_online("cpu adversarial one-dominant-key causal",
+                                              q, k, v, s_q, s_kv, 0, true);
+    const auto out_f = to_float_vec(res.first);
+    const std::int64_t group = H_q / H_kv;
+    for (std::int64_t h = 0; h < H_q; ++h) {
+      const std::int64_t hk = h / group;
+      // Row 0 has only single valid key j=0 (masked future dominant key j=97 must not
+      // leak).
+      EXPECT_NEAR(res.second[static_cast<std::size_t>(h)], -20.0, 1e-5);
+      // Row 97 includes j_dom=97 (+30 vs -20) so output matches V[j_dom] and LSE ~ 30.0.
+      EXPECT_NEAR(res.second[static_cast<std::size_t>(j_dom * H_q + h)], 30.0, 1e-5);
+      for (std::int64_t d = 0; d < D; ++d) {
+        const float v0 =
+            engine::half_to_float(v[static_cast<std::size_t>((hk * s_kv + 0) * D + d)]);
+        const float vdom = engine::half_to_float(
+            v[static_cast<std::size_t>((hk * s_kv + j_dom) * D + d)]);
+        EXPECT_NEAR(out_f[static_cast<std::size_t>(h * D + d)], v0, 1e-3);
+        EXPECT_NEAR(out_f[static_cast<std::size_t>((j_dom * H_q + h) * D + d)], vdom,
+                    1e-3);
+      }
+    }
+  }
+}
+
 TEST(cpu_ref, rope_matches_reference) {
   for (const auto& c : kRopeCases) {
     const std::string stem = std::string("rope__") + c.name;
@@ -1159,13 +1361,17 @@ double ffn_subblock_atol(std::int64_t d_model, std::int64_t d_ffn) {
   return ffn_subblock_rtol(d_model, d_ffn);
 }
 
-//   * Attention Sub-Block: two binary16 truncation boundaries (Q/K/V cast and Attention output)
-//     with unit-RMS inputs and W_o spectral norm ~ 2 -> 16 * eps16 relative, 8 * eps16 absolute.
+//   * Attention Sub-Block: empirical bound with headroom covering two binary16 truncation
+//     boundaries (Q/K/V cast and Attention output) and W_o projection scaling ->
+//     16 * 2^-10 relative (1.5625e-2), 8 * 2^-10 absolute (7.8125e-3). Measured worst-case
+//     across test_kernels.cu: max_abs = 1.026e-3 (12.5x budget headroom; 70.6x-162.6x on
+//     TinyLlama shapes).
 double subblock_rtol() { return 16.0 * std::ldexp(1.0, -10); }
 double subblock_atol() { return 8.0 * std::ldexp(1.0, -10); }
 
 //   * Full Transformer Block (Attention Sub-Block followed by FFN Sub-Block):
-//     Additive error bound over the two sequential sub-blocks: attention output error + FFN error.
+//     Empirical sub-block bound + structurally derived all-FP32 FFN bound (measured worst
+//     max_abs = 1.183e-3, 7.9x budget headroom on golden prefill; 50.4x-200.9x TinyLlama).
 double block_rtol(std::int64_t d_model, std::int64_t d_ffn) {
   return subblock_rtol() + ffn_subblock_rtol(d_model, d_ffn);
 }

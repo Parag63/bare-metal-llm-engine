@@ -228,9 +228,11 @@ files; `--target bench` runs the benchmark binaries.
   2D Register-Tiled GEMM (17.2 TFLOP/s), Embedding Lookup, Argmax Greedy Sampling, Stream-ordered Pool Allocator,
   RAII CUDA Streams & Events, and Multi-Arch Compilation (ADR 0010). 126 / 126 unit tests passing across 8 CTest suites.
 - [x] **Module 4 — FlashAttention-2 & FlashDecoding** (complete). In-place RoPE (`RotateHalf` & `AdjacentPair`),
-  causal naive attention baseline, tiled online-softmax FlashAttention-2 prefill (14.0 TFLOP/s at `S=4096`, 16.1× vs naive,
-  115× DRAM traffic reduction verified via `ncu`), FlashDecoding split-KV decode (463.6 GB/s / 92.0% peak BW on Llama-2-7B `L=8192`),
-  and end-to-end prefill/decode attention + FFN transformer block integration tests (`147 / 147` unit tests passing across 8 CTest suites).
+  causal naive attention baseline, tiled online-softmax FlashAttention-2 prefill (14.12 TFLOP/s at `S=4096`, 16.2× vs naive,
+  115× DRAM traffic reduction verified via `ncu`), FlashDecoding split-KV decode (463.2 GB/s / 91.9% peak BW on Llama-2-7B `L=8192`;
+  synthetic `TinyLlama L > 2048` rows extend past TinyLlama's native `2048` context to stress long-sequence scaling),
+  long-sequence (`S=2048`, `L=8192/32768`) & adversarial softmax correctness, and full Llama transformer block + 2-layer stacking
+  integration (`151 / 151` unit tests passing across 8 CTest suites).
 - [ ] **Module 5 — Quantization** — packed INT4 / INT8 weights with fused dequantisation GEMV kernels.
 - [ ] **Module 6 — KV-Cache** — ring-buffer cache with zero-copy slicing via the Tensor view system.
 - [ ] **Module 7 — Model Loader** — GGUF-style mmap'd weights, ~50 weight tensors aliasing one
