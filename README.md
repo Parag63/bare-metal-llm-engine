@@ -10,8 +10,8 @@ B.Tech CSE major project · Parag Das (2303344) · Jul 2026 – Jun 2027
 > **Status: Modules 1, 2, 3 & 4 complete (FlashAttention-2, FlashDecoding, RoPE & Transformer Block Integration). Moving to Quantization (Module 5).**
 > The tensor library, 18 hand-written CUDA kernels (including FlashAttention-2 prefill, FlashDecoding split-KV, RoPE, FP16 GEMV, fused SwiGLU, and 2D register-tiled GEMM), and the full
 > verification/benchmark infrastructure are implemented and verified. `passed 151  failed 0  pending 0` across
-> 8 test suites (`dtype`, `golden`, `cpu_ref`, `storage`, `tensor`, `allocator`, `kernels`, `all`) on the CUDA-enabled build (RTX 4070 SUPER, nvcc 12.6). Decode attention hits **462.0 GB/s (91.7% peak BW)** at `L=8192`,
-> FlashAttention-2 prefill reaches **13.56 TFLOP/s** at `S=4096` (**16.3×** faster than naive), and 2D register-tiled GEMM reaches **16.6+ TFLOP/s** at `4096³`.
+> 8 test suites (`dtype`, `golden`, `cpu_ref`, `storage`, `tensor`, `allocator`, `kernels`, `all`) on the CUDA-enabled build (RTX 4070 SUPER, nvcc 12.6). Decode attention hits **465.0 GB/s (92.3% peak BW)** at `L=8192`,
+> FlashAttention-2 prefill reaches **14.01 TFLOP/s** at `S=4096` (**16.5×** faster than naive; `13.90–14.07 TFLOP/s` / `16.0×–16.5×` across 5 runs), and 2D register-tiled GEMM reaches **16.8+ TFLOP/s** at `4096³`.
 
 ## What "from scratch" means here
 
@@ -109,10 +109,12 @@ is worse than no number. It uses CUDA events rather than `std::chrono` (a launch
 in 3–10 µs, before the kernel runs), discards adaptive warmup iterations (ramping SM clocks
 before timing), reports median and min rather than mean because GPU timing noise is
 one-sided, and prints an **IQR %** column — `(p75 − p25)/median` — alongside **spread**
-(`(max − min)/median`) and per-row sampled clocks (`SM MHz (min-max)`), flagging rows with
-`IQR % > 10%` as noisy and automatically re-warming any row whose SM clock dips below 75%
-of nominal. On hosts where `nvidia-smi -lgc` is unprivileged, clocks remain unlocked across
-the Ada boost band (`2430–2790 MHz`), which is noted as a threat to validity.
+(`(max − min)/median`) and per-row sampled clocks (`SM MHz (min-max)` with `n_clock_samples`
+taken in-flight before `cudaEventSynchronize`), automatically batching back-to-back launches
+(`batch_calls`) for sub-250 µs kernels so short decode/RoPE passes clear the CUDA timer floor, flagging
+rows with `IQR % > 10%` as noisy, and re-warming any row whose SM clock dips below 75% of nominal.
+On hosts where `nvidia-smi -lgc` is unprivileged, clocks remain unlocked across the Ada boost band
+(`2475–2790 MHz` sampled live across `029b11c`), which is noted as a threat to validity.
 
 Byte counts use **ideal traffic**: each input read once, each output written once. A naive
 matmul's re-reads therefore appear as low achieved bandwidth rather than a fictitious
@@ -135,24 +137,24 @@ SUPER (504.0 GB/s peak, sm_89) with locked GPU clocks (2475 MHz):
 
 | # | Kernel | New idea | GPU result |
 |---|---|---|---|
-| 1 | `vector_add` | threads, blocks, grid-stride loops | ✅ 425.6 GB/s (84.4% peak) |
-| 2 | `reduce_sum` | shared memory, `__syncthreads`, warp shuffles | ✅ 454.4 GB/s (90.1% peak) |
-| 3 | `softmax_rows` | per-row reduction, numerical stability | ✅ 434.0 GB/s (86.1% peak) |
-| 4 | `rmsnorm` | reusing the reduction pattern | ✅ 433.1 GB/s (85.9% peak) |
-| 5 | `matmul_naive` | 2-D indexing, memory traffic problem | ✅ 1757 GFLOP/s @ 4096^3 |
-| 6 | `matmul_tiled` | shared-memory tiling and data reuse | ✅ 2497 GFLOP/s @ 4096^3 (+42%) |
-| 7 | `gemv` | decode token projection (M=1), 128-bit vector loads | ✅ 465.5 GB/s (92.3% peak) |
-| 8 | `residual_rmsnorm` | fused elementwise add + row reduction in 1 pass | ✅ 0.019 ms (+12.4% over separate) |
-| 9 | `rmsnorm_linear` | fused activation normalization + linear projection | ✅ 0.151 ms (+71.5% decode M=1) |
-| 10 | `gemv_fp16` | decode token projection in FP16 with FP32 accumulator | ✅ 0.075 ms (1.92× speedup over FP32) |
+| 1 | `vector_add` | threads, blocks, grid-stride loops | ✅ 417.9 GB/s (82.9% peak) |
+| 2 | `reduce_sum` | shared memory, `__syncthreads`, warp shuffles | ✅ 445.1 GB/s (88.3% peak) |
+| 3 | `softmax_rows` | per-row reduction, numerical stability | ✅ 431.6 GB/s (85.6% peak) |
+| 4 | `rmsnorm` | reusing the reduction pattern | ✅ 432.5 GB/s (85.8% peak) |
+| 5 | `matmul_naive` | 2-D indexing, memory traffic problem | ✅ 1956 GFLOP/s @ 4096^3 |
+| 6 | `matmul_tiled` | shared-memory tiling and data reuse | ✅ 2623 GFLOP/s @ 4096^3 (+34%) |
+| 7 | `gemv` | decode token projection (M=1), 128-bit vector loads | ✅ 468.4 GB/s (92.9% peak) |
+| 8 | `residual_rmsnorm` | fused elementwise add + row reduction in 1 pass | ✅ 0.018 ms (+22.4% over separate) |
+| 9 | `rmsnorm_linear` | fused activation normalization + linear projection | ✅ 0.149 ms (+71.9% decode M=1) |
+| 10 | `gemv_fp16` | decode token projection in FP16 with FP32 accumulator | ✅ 0.074 ms (1.92× speedup over FP32) |
 | 11 | `embedding` | token gather from row-major embedding table (FP32 & FP16) | ✅ 0.019 ms (128-bit vector loads) |
-| 12 | `argmax` | greedy token sampling via 16-warp shuffle reduction | ✅ 0.005 ms (deterministic tie-breaking) |
-| 13 | `matmul_register_tiled` | 2D register tiling (8x8 thread tile, outer products, float4) | ✅ 16677 GFLOP/s @ 4096^3 (6.7× over tiled) |
-| 14 | `swiglu` | fused SiLU + elementwise multiply (40% memory traffic reduction) | ✅ 0.155 ms (1.41× over unfused SiLU+Mul) |
-| 15 | `attention_naive` | causal FP16->FP32 GQA baseline (3-pass `[H, S, S]`) | ✅ 20.82 ms @ TinyLlama S=2048 (825 GFLOP/s) |
-| 16 | `rope` | in-place rotary embeddings (RotateHalf & AdjacentPair) | ✅ 0.043 ms @ S=2048 (446.9 GB/s, 88.7% peak) |
-| 17 | `attention_prefill` | FlashAttention-2 tiled online softmax + GQA SMEM reuse | ✅ 13.56 TFLOP/s @ S=4096 (5.07 ms, 16.3× vs naive) |
-| 18 | `attention_decode` | FlashDecoding split-KV + warp-per-head GQA broadcast | ✅ 462.0 GB/s (91.7% peak, Llama2); 0.088 ms (TinyLlama 32k) |
+| 12 | `argmax` | greedy token sampling via 16-warp shuffle reduction | ✅ 0.006 ms (deterministic tie-breaking) |
+| 13 | `matmul_register_tiled` | 2D register tiling (8x8 thread tile, outer products, float4) | ✅ 16866 GFLOP/s @ 4096^3 (6.4× over tiled) |
+| 14 | `swiglu` | fused SiLU + elementwise multiply (40% memory traffic reduction) | ✅ 0.154 ms (1.44× over unfused SiLU+Mul) |
+| 15 | `attention_naive` | causal FP16->FP32 GQA baseline (3-pass `[H, S, S]`) | ✅ 20.06 ms @ TinyLlama S=2048 (857 GFLOP/s) |
+| 16 | `rope` | in-place rotary embeddings (RotateHalf & AdjacentPair) | ✅ 0.044 ms @ S=2048 (439.6 GB/s, 87.2% peak) |
+| 17 | `attention_prefill` | FlashAttention-2 tiled online softmax + GQA SMEM reuse | ✅ 14.01 TFLOP/s @ S=4096 (4.91 ms, 16.5× vs naive) |
+| 18 | `attention_decode` | FlashDecoding split-KV + warp-per-head GQA broadcast | ✅ 465.0 GB/s (92.3% peak, Llama2); 0.087 ms (TinyLlama 32k) |
 
 ### Kernel fusion (Module 3 — complete)
 
@@ -175,12 +177,12 @@ kernel in the project, and the only one where being clever about arithmetic wins
 
 | Baseline Comparison | Configuration | Baseline Result | Engine Result | Ratio / Notes |
 |---|---|---:|---:|---|
-| **cuBLAS SGEMM vs Tiled GEMM** | 4096³ FP32 | 23690 GFLOP/s (cuBLAS) | 2497 GFLOP/s (tiled) | 10.5% of cuBLAS (hand-written FP32 SIMT vs Tensor Cores) |
-| **Register-Tiled GEMM vs cuBLAS** | 4096³ FP32 | 23690 GFLOP/s (cuBLAS) | 16677 GFLOP/s (register-tiled) | 70.4% of cuBLAS (6.7× over tiled) |
-| **GEMV Cold DRAM vs Warm L2** | 1x4096x4096 (decode) | 465.2 GB/s (warm L2) | 465.2 GB/s (cold DRAM) | 92.3% peak DRAM (pure streaming via rotating weight buffers) |
-| **Fused vs Unfused SwiGLU** | 512x11008 (prefill MLP) | 0.218 ms (unfused) | 0.155 ms (fused) | 1.41× speedup (12N vs 20N bytes DRAM traffic) |
-| **FlashAttention-2 vs Naive Prefill** | TinyLlama S=4096 (32/4, D=64) | 82.86 ms (2 GiB scores) | 5.07 ms (13.56 TFLOP/s) | 16.3× speedup (O(S) vs O(S²) DRAM via `ncu`) |
-| **FlashDecoding vs Single-Pass Decode** | TinyLlama L=32768 (32/4, D=64) | 1.57 ms (splits=1) | 0.088 ms (381.0 GB/s) | 17.8× speedup (split-KV + warp GQA broadcast) |
+| **cuBLAS SGEMM vs Tiled GEMM** | 4096³ FP32 | 24149 GFLOP/s (cuBLAS) | 2623 GFLOP/s (tiled) | 10.9% of cuBLAS (hand-written FP32 SIMT vs Tensor Cores) |
+| **Register-Tiled GEMM vs cuBLAS** | 4096³ FP32 | 24149 GFLOP/s (cuBLAS) | 16866 GFLOP/s (register-tiled) | 69.8% of cuBLAS (6.4× over tiled) |
+| **GEMV Cold DRAM vs Warm L2** | 1x4096x4096 (decode) | 468.4 GB/s (warm L2) | 468.4 GB/s (cold DRAM) | 92.9% peak DRAM (pure streaming via rotating weight buffers) |
+| **Fused vs Unfused SwiGLU** | 512x11008 (prefill MLP) | 0.222 ms (unfused) | 0.154 ms (fused) | 1.44× speedup (12N vs 20N bytes DRAM traffic) |
+| **FlashAttention-2 vs Naive Prefill** | TinyLlama S=4096 (32/4, D=64) | 80.93 ms (2 GiB scores) | 4.91 ms (14.01 TFLOP/s) | 16.5× speedup (O(S) vs O(S²) DRAM via `ncu`) |
+| **FlashDecoding vs Single-Pass Decode** | TinyLlama L=32768 (32/4, D=64) | 1.57 ms (splits=1) | 0.087 ms (385.3 GB/s) | 18.0× speedup (split-KV + warp GQA broadcast) |
 | **llama-bench External Baseline** | TinyLlama-1.1B (Q4_K_M) | 18,512.0 t/s (pp512) | 391.2 t/s (tg128) | 4-bit quantized weights (~249 GB/s effective) |
 | **llama-bench External Baseline** | TinyLlama-1.1B (Q8_0) | 18,767.1 t/s (pp512) | 275.2 t/s (tg128) | 8-bit quantized weights (~300 GB/s effective) |
 | **llama-bench External Baseline** | TinyLlama-1.1B (FP16) | 21,357.9 t/s (pp512) | 181.3 t/s (tg128) | 16-bit unquantized weights (~372 GB/s effective) |
@@ -234,10 +236,11 @@ files; `--target bench` runs the benchmark binaries.
   2D Register-Tiled GEMM (17.2 TFLOP/s), Embedding Lookup, Argmax Greedy Sampling, Stream-ordered Pool Allocator,
   RAII CUDA Streams & Events, and Multi-Arch Compilation (ADR 0010). 126 / 126 unit tests passing across 8 CTest suites.
 - [x] **Module 4 — FlashAttention-2 & FlashDecoding** (complete). In-place RoPE (`RotateHalf` & `AdjacentPair`),
-  causal naive attention baseline, tiled online-softmax FlashAttention-2 prefill (13.56 TFLOP/s at `S=4096`, 16.3× vs naive,
-  115× DRAM traffic reduction verified via `ncu`), FlashDecoding split-KV decode (462.0 GB/s / 91.7% peak BW on Llama-2-7B `L=8192`;
+  causal naive attention baseline, tiled online-softmax FlashAttention-2 prefill (14.01 TFLOP/s at `S=4096`, 16.5× vs naive,
+  115× DRAM traffic reduction verified via `ncu`), FlashDecoding split-KV decode (465.0 GB/s / 92.3% peak BW on Llama-2-7B `L=8192`;
   synthetic `TinyLlama L > 2048` rows extend past TinyLlama's native `2048` context to stress long-sequence scaling),
-  long-sequence (`S=2048`, `L=8192/32768`) with nonzero-mean `V`, needle & `2-split-LSE` mutation-verified checks, adversarial softmax correctness, and full Llama transformer block + 2-layer stacking
+  long-sequence (`S=2048`, `L=8192/32768`) with nonzero-mean `V`, needle & `2-split-LSE` checks reproducibly verified via
+  `tools/run_mutations.py` (`caught 3/3 injected faults`), adversarial softmax correctness, and full Llama transformer block + 2-layer stacking
   integration (`151 / 151` unit tests passing across 8 CTest suites).
 - [ ] **Module 5 — Quantization** — packed INT4 / INT8 weights with fused dequantisation GEMV kernels.
 - [ ] **Module 6 — KV-Cache** — ring-buffer cache with zero-copy slicing via the Tensor view system.

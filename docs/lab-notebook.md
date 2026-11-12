@@ -279,6 +279,32 @@ Implemented in [kernels/attention_decode.cu](../kernels/attention_decode.cu) and
      - `attention_prefill (FA2)`: TinyLlama `S=128..4096` all pass `IQR % <= 10%` (`3.24%, 2.25%, 2.47%, 4.41%, 7.73%`), reaching `13,561.5 GFLOP/s` (`5.0685 ms`, **`16.3×`** vs naive `82.8597 ms`, `clk=2655-2775 MHz`) at `S=4096`; Llama-2-7B `S=2048` reaches `11,295.5 GFLOP/s` (`3.0434 ms`, `IQR % = 10.00%`, `clk=2655 MHz`).
      - `attention_decode (FlashDecoding)`: All `L >= 2048` rows pass `IQR % <= 10%` (`0.75%–5.95%`), reaching `462.0 GB/s` (**`91.7%`** peak BW, `0.2905 ms`, `clk=2775 MHz`) on Llama-2-7B `L=8192` and `0.0881 ms` (`381.0 GB/s`, `75.6%` peak BW, `clk=2775 MHz`) on synthetic TinyLlama `L=32768` (while ultrashort `L=512` rows and sub-5 us `rope` decode rows flag expected timer-granularity `IQR % > 10%`).
 
+### Week 10 Follow-Up 3 — 2026-11-12 · Active Per-Rep Clock Sampling (`n_clock_samples`), Short-Kernel Batching, 5-Run Variance & Reproducible Mutation Suite
+
+1. **In-Flight Per-Rep NVML Clock Sampling & `n_clock_samples` (`bench/bench_harness.hpp`):**
+   - Previously, `clock_stride = max(1, reps / 10)` collected only ~5 samples after `cudaEventSynchronize`, which mostly landed at a single boost step (`2685-2685 MHz`) on fast rows. Updated `run_timed_pass` to sample live SM+memory clocks via `nvmlDeviceGetClockInfo` **in-flight before `cudaEventSynchronize(stop)`** with `clock_stride = 1` for all rows with `<= 100` timed reps, and exported `"n_clock_samples"` to `results.json` and `SM MHz (min-max)` table labels (`(n=50)`).
+   - **Verified on `029b11c` (`results.json`, Run 5):** `n_clock_samples` spans `5..51` across all 112 rows (`50` samples on every 50-rep row, `51` on `vector_add (launch floor)`, `15` on `attention_naive S=4096`, `5` on `4096^3` matmuls), with **`0 / 112`** rows dipping below `2400 MHz` (`live_sm_clock_min_mhz = 2475`, `live_sm_clock_max_mhz = 2790`, `live_mem_clock_mhz = 10251`). Confirms why decode/RoPE rows report equal `min == max` (`2775-2775 MHz`): Ada boost holds a steady bin across low/moderate-TDP decode work even over `50` active samples, whereas heavy prefill/naive rows (`FA2 Llama2 S=2048` `2550-2625 MHz`, `naive S=2048` `2610-2715 MHz`) actively throttle across boost bins under power limits.
+
+2. **Back-to-Back Short-Kernel Batching (`batch_calls`) for Sub-25 us Kernels (`bench/bench_harness.hpp`, `bench/bench_kernels.cu`):**
+   - When `batch_short == true` and a 16-call GPU probe reports `< 0.25 ms` per call, `time_gpu()` automatically batches `batch_calls = clamp(ceil(1.5 / est_call_ms), 2, 256)` back-to-back launches inside one `[cudaEventRecord(start), cudaEventRecord(stop)]` bracket and divides elapsed time by `batch_calls` (`batch_short = false` retained on `vector_add (launch floor)`). Updated `bench_rope()` to use orthonormal host `cos`/`sin` tables and rotate across `64` distinct `Q`/`K` device buffers so 256-call batches remain exact and non-divergent.
+   - **Verified on `029b11c` (`results.json`, Run 5):**
+     - `Llama2-7B decode L=512`: **`0.0219 ms`**, `batch = 68`, `IQR = 0.68%`, `n_clk = 50` (`clk = 2760-2775 MHz`).
+     - `TinyLlama decode L=512`: **`0.0133 ms`**, `batch = 97`, `IQR = 5.35%`, `n_clk = 50` (`clk = 2775-2775 MHz`). (Note on residual multi-run variance: unlike `Llama2 L=512` which takes the `splits=1` fast path with `0.08%` 5-run span, `TinyLlama L=512` takes `splits > 1` with 2 kernel launches + `ScopedPoolBuffer` `cudaEventRecord`/`cudaEventQuery` per call, so `97×` batching still surfaces occasional WSL2 WDDM host-launch stalls across runs: `2.73%–27.96%` IQR.)
+     - `rope (RotateHalf) decode S=1`: TinyLlama **`0.0044 ms`** (`batch = 256`, `IQR = 5.08%`), Llama2-7B **`0.0044 ms`** (`batch = 256`, `IQR = 2.87%`).
+     - `Llama2-7B FA2 S=2048` & `TinyLlama FA2 S=4096`: `3.0592 ms` (`11,237.1 GFLOP/s`, `IQR = 2.26%`) and `4.9055 ms` (`14,012.2 GFLOP/s`, **`16.5×`** vs naive, `IQR = 0.79%`). Note that `attention_naive TinyLlama S=4096` exhibits a WDDM paging/preemption tail (`iqr = 1233.74%`, `p25 = 79.10 ms`, `p75 = 1077.52 ms`, `n_clk = 15`) from allocating a `2048.0 MiB` score tensor, though its `median_ms` (`80.93 ms`) stays consistent across runs (`78.843–80.927 ms`), while `FA2 S=4096` uses `O(S)` memory and stays `< 1%` IQR.
+
+3. **Multi-Run Headline Variation Across 5 Full Same-Day Passes (`fb95f2c` Runs 1–3 + `029b11c` Runs 4–5):**
+   - **Naive `TinyLlama S=4096`:** `78.843–80.927 ms` (`2.63%` span).
+   - **FA2 `TinyLlama S=4096`:** `4.8869–4.9444 ms` / **`13,901.9–14,065.4 GFLOP/s`** (`1.17%` span); **Speedup vs Naive:** **`16.04×–16.50×`** (`2.85%` span).
+   - **FA2 `Llama2-7B S=2048`:** `3.0198–3.1201 ms` / `11,017.7–11,383.8 GFLOP/s` (`3.26%–3.28%` span).
+   - **FlashDecoding `TinyLlama L=512` / `L=2048` / `L=8192` / `L=32768`:** `0.0128–0.0179 ms` (`38.17%` span) / `0.0159–0.0177 ms` (`11.07%` span) / `0.0305–0.0306 ms` (`0.28%` span) / `0.0868–0.0872 ms` (`385.1–386.6 GB/s`, `0.39%` span; **`17.98×–18.08×`** vs `splits=1`).
+   - **FlashDecoding `Llama2-7B L=512` / `L=8192`:** `0.0219–0.0219 ms` (`0.08%` span) / `461.6–465.0 GB/s` (`0.74%` span).
+   - *(Note: Earlier unbatched/pre-warmup-gate sessions spanned `13.56–14.12 TFLOP/s` and `16.2×–16.8×`; with adaptive warmup + clock floor + batching, the 5-run FA2 prefill and long-decode spans tighten to `0.08%–3.28%`. Multi-day ambient-temperature longitudinal runs remain a thesis follow-up.)*
+
+4. **Reproducible Fault-Injection Mutation Suite (`tools/run_mutations.py`, `tools/mutations/*.patch`):**
+   - Committed `01_skip_last_split.patch`, `02_miscombine_lse.patch`, and `03_off_by_one_kv_len.patch` plus `tools/run_mutations.py`, which applies each patch with `git apply`, rebuilds `engine_tests`, asserts failure on `--filter=attention_decode_long_sequence`, restores cleanly (`try/finally` `git apply -R`), and verifies baseline pass.
+   - Executed `python3 tools/run_mutations.py` on `029b11c` -> exited `0` with `Summary: caught 3/3 injected faults.` (all 3 caught at `long decode 2-split-LSE L=32768 (auto per-head)` in `tests/test_kernels.cu:2619`, followed by clean baseline `passed 1 failed 0 filtered-out 150`).
+
 ---
 
 ## Week 09 — 2026-10-02 · Pre-Module 4 Mathematical & Microarchitectural Audit: Baseline Realities, Cache Residency, and Precision Decisions
