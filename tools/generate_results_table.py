@@ -276,8 +276,11 @@ def format_full_markdown(data: dict) -> str:
         spread_s = f"{r.get('spread_pct', 0.0):.1f}%"
         sm_min = r.get("sm_clock_min_mhz") or r.get("sm_clock_mhz") or 0
         sm_max = r.get("sm_clock_max_mhz") or r.get("sm_clock_mhz") or 0
+        n_clk = r.get("n_clock_samples") or 0
         if sm_min > 0:
             clk_s = f"{sm_min}" if sm_max == sm_min else f"{sm_min}-{sm_max}"
+            if n_clk > 0:
+                clk_s += f" (n={n_clk})"
             if dip_floor > 0 and sm_min < dip_floor:
                 clk_s += " (!clk)"
         else:

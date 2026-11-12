@@ -1,0 +1,12 @@
+diff --git a/kernels/attention_decode.cu b/kernels/attention_decode.cu
+index 745a297..ee9716e 100644
+--- a/kernels/attention_decode.cu
++++ b/kernels/attention_decode.cu
+@@ -657,6 +657,7 @@ void run_attention_decode(const half* q, const half* k, const half* v, half* out
+     CUDA_CHECK(cudaMemsetAsync(out, 0, out_bytes, stream));
+     return;
+   }
++  if (kv_len > 1) kv_len -= 1;
+ 
+   const std::int64_t group_size = n_heads / n_kv_heads;
+   const int q_heads_per_block =

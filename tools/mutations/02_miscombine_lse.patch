@@ -1,0 +1,13 @@
+diff --git a/kernels/attention_decode.cu b/kernels/attention_decode.cu
+index 745a297..1ddf4b3 100644
+--- a/kernels/attention_decode.cu
++++ b/kernels/attention_decode.cu
+@@ -460,7 +460,7 @@ __global__ void flash_decode_reduce_kernel(const float* __restrict__ partial_o,
+     const float ms = partial_ml[(base_slot + s) * 2 + 0];
+     const float ls = partial_ml[(base_slot + s) * 2 + 1];
+     if (ms > -INFINITY && ls > 0.0f) {
+-      const float w = (ms == m_glob) ? 1.0f : expf(ms - m_glob);
++      const float w = 1.0f;
+       l_glob += ls * w;
+       o_glob = fmaf(partial_o[(base_slot + s) * kHeadDim + d], w, o_glob);
+     }

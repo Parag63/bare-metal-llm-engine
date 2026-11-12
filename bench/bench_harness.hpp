@@ -198,13 +198,16 @@ inline Stats summarise(std::vector<double> samples) {
 /// Times `fn` (which must enqueue GPU work on the default stream) with CUDA events.
 ///
 /// Runs at least `warmup` iterations AND keeps running until `min_warmup_ms` has
-/// elapsed so clocks boost back to P0 after host-side data generation. During the
-/// timed repetitions, samples live SM and memory clocks while work is active on
-/// the GPU (outside the [start, stop] event pair).
+/// elapsed so clocks boost back to P0 after host-side data generation. For sub-250 us
+/// kernels (`batch_short = true`), automatically batches `batch_calls` back-to-back
+/// launches inside one `[start, stop]` event pair (~1 ms per sample) and reports per-call
+/// time, eliminating timer-quantum noise while sampling live SM/memory clocks in-flight.
 template <typename F>
 Stats time_gpu(F&& fn, int warmup = 5, int reps = 50, double min_warmup_ms = 200.0,
                int* out_sm_clock_mhz = nullptr, int* out_mem_clock_mhz = nullptr,
-               int* out_sm_clock_min_mhz = nullptr, int* out_sm_clock_max_mhz = nullptr) {
+               int* out_sm_clock_min_mhz = nullptr, int* out_sm_clock_max_mhz = nullptr,
+               int* out_n_clock_samples = nullptr, int* out_batch_calls = nullptr,
+               bool batch_short = true) {
   cudaEvent_t start, stop;
   CUDA_CHECK(cudaEventCreate(&start));
   CUDA_CHECK(cudaEventCreate(&stop));
@@ -212,7 +215,8 @@ Stats time_gpu(F&& fn, int warmup = 5, int reps = 50, double min_warmup_ms = 200
   const int nominal_sm_mhz = engine::cuda_clock_rate_khz() / 1000;
   const int steady_floor_mhz = (nominal_sm_mhz > 0) ? (nominal_sm_mhz * 3 / 4) : 0;
 
-  auto run_warmup = [&](double target_ms, double max_wait_ms) {
+  auto run_warmup = [&](double target_ms, double max_wait_ms, int& out_last_calls,
+                        double& out_last_ms) {
     int warmups_done = 0;
     int batch = std::max(1, warmup);
     const auto min_warmup = std::chrono::duration<double, std::milli>(target_ms);
@@ -229,6 +233,8 @@ Stats time_gpu(F&& fn, int warmup = 5, int reps = 50, double min_warmup_ms = 200
       const auto now = std::chrono::steady_clock::now();
       const double batch_ms =
           std::chrono::duration<double, std::milli>(now - batch_start).count();
+      out_last_calls = batch;
+      out_last_ms = batch_ms;
       if (batch_ms < 2.0 && batch < 64) {
         batch = std::min(64, batch * 2);
       }
@@ -243,16 +249,44 @@ Stats time_gpu(F&& fn, int warmup = 5, int reps = 50, double min_warmup_ms = 200
     }
   };
 
-  auto run_timed_pass = [&](int& sm_min, int& sm_med, int& sm_max, int& mem_med) {
+  auto choose_batch_calls = [&](int warm_calls, double warm_ms) {
+    if (!batch_short || warm_calls <= 0) return 1;
+    double est_call_ms = warm_ms / static_cast<double>(warm_calls);
+    if (est_call_ms >= 0.40) return 1;
+
+    constexpr int kProbeCalls = 16;
+    CUDA_CHECK(cudaEventRecord(start));
+    for (int b = 0; b < kProbeCalls; ++b) {
+      fn();
+    }
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+    float probe_ms = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&probe_ms, start, stop));
+    est_call_ms = static_cast<double>(probe_ms) / static_cast<double>(kProbeCalls);
+    if (est_call_ms <= 0.0 || est_call_ms >= 0.25) return 1;
+
+    constexpr double kTargetBatchMs = 1.5;
+    constexpr int kMaxBatchCalls = 256;
+    const int n = static_cast<int>(std::ceil(kTargetBatchMs / est_call_ms));
+    return std::min(kMaxBatchCalls, std::max(2, n));
+  };
+
+  auto run_timed_pass = [&](int batch_calls, int& sm_min, int& sm_med, int& sm_max,
+                            int& mem_med, int& n_clock_samples) {
     std::vector<double> samples;
     std::vector<int> sm_clocks;
     std::vector<int> mem_clocks;
     samples.reserve(static_cast<std::size_t>(reps));
-    const int clock_stride = std::max(1, reps / 10);
+    // Sample every repetition for standard <= 100 rep rows (50 samples/row) so
+    // per-row SM min-max reflects sustained active-batch sampling.
+    const int clock_stride = (reps <= 100) ? 1 : std::max(1, reps / 50);
 
     for (int i = 0; i < reps; ++i) {
       CUDA_CHECK(cudaEventRecord(start));
-      fn();
+      for (int b = 0; b < batch_calls; ++b) {
+        fn();
+      }
       CUDA_CHECK(cudaEventRecord(stop));
       if (i == 0 || (i + 1) == reps || (i % clock_stride == 0)) {
         const int sm = engine::cuda_live_sm_clock_mhz();
@@ -267,9 +301,10 @@ Stats time_gpu(F&& fn, int warmup = 5, int reps = 50, double min_warmup_ms = 200
 
       float ms = 0.0f;
       CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
-      samples.push_back(static_cast<double>(ms));
+      samples.push_back(static_cast<double>(ms) / static_cast<double>(batch_calls));
     }
 
+    n_clock_samples = static_cast<int>(sm_clocks.size());
     if (!sm_clocks.empty()) {
       std::sort(sm_clocks.begin(), sm_clocks.end());
       sm_min = sm_clocks.front();
@@ -287,19 +322,25 @@ Stats time_gpu(F&& fn, int warmup = 5, int reps = 50, double min_warmup_ms = 200
     return summarise(std::move(samples));
   };
 
-  run_warmup(min_warmup_ms, 800.0);
-  int sm_min = 0, sm_med = 0, sm_max = 0, mem_med = 0;
-  Stats st = run_timed_pass(sm_min, sm_med, sm_max, mem_med);
+  int warm_calls = 1;
+  double warm_ms = 0.0;
+  run_warmup(min_warmup_ms, 800.0, warm_calls, warm_ms);
+  const int batch_calls = choose_batch_calls(warm_calls, warm_ms);
+  int sm_min = 0, sm_med = 0, sm_max = 0, mem_med = 0, n_clock_samples = 0;
+  Stats st =
+      run_timed_pass(batch_calls, sm_min, sm_med, sm_max, mem_med, n_clock_samples);
   // If unlocked clocks dipped mid-pass into an idle P-state, warm up again and retry once.
   if (steady_floor_mhz > 0 && sm_min > 0 && sm_min < steady_floor_mhz) {
-    run_warmup(std::max(min_warmup_ms, 300.0), 800.0);
-    st = run_timed_pass(sm_min, sm_med, sm_max, mem_med);
+    run_warmup(std::max(min_warmup_ms, 300.0), 800.0, warm_calls, warm_ms);
+    st = run_timed_pass(batch_calls, sm_min, sm_med, sm_max, mem_med, n_clock_samples);
   }
 
   if (out_sm_clock_mhz) *out_sm_clock_mhz = sm_med;
   if (out_mem_clock_mhz) *out_mem_clock_mhz = mem_med;
   if (out_sm_clock_min_mhz) *out_sm_clock_min_mhz = sm_min;
   if (out_sm_clock_max_mhz) *out_sm_clock_max_mhz = sm_max;
+  if (out_n_clock_samples) *out_n_clock_samples = n_clock_samples;
+  if (out_batch_calls) *out_batch_calls = batch_calls;
 
   CUDA_CHECK(cudaEventDestroy(start));
   CUDA_CHECK(cudaEventDestroy(stop));
@@ -358,6 +399,8 @@ struct Result {
   int sm_clock_mhz = 0;
   int sm_clock_min_mhz = 0;
   int sm_clock_max_mhz = 0;
+  int n_clock_samples = 0;
+  int batch_calls = 1;
   int mem_clock_mhz = 0;
   bool implemented = true;
   std::string note;
@@ -416,10 +459,12 @@ struct Result {
     oss << "      \"min_ms\": " << stats.min_ms << ",\n";
     oss << "      \"max_ms\": " << stats.max_ms << ",\n";
     oss << "      \"reps\": " << stats.reps << ",\n";
+    oss << "      \"batch_calls\": " << batch_calls << ",\n";
     oss << "      \"spread_pct\": " << stats.spread_pct() << ",\n";
     oss << "      \"sm_clock_mhz\": " << sm_clock_mhz << ",\n";
     oss << "      \"sm_clock_min_mhz\": " << sm_clock_min_mhz << ",\n";
     oss << "      \"sm_clock_max_mhz\": " << sm_clock_max_mhz << ",\n";
+    oss << "      \"n_clock_samples\": " << n_clock_samples << ",\n";
     oss << "      \"mem_clock_mhz\": " << mem_clock_mhz << ",\n";
     oss << "      \"flops\": " << std::fixed << flops << ",\n";
     oss << "      \"bytes\": " << std::fixed << bytes << ",\n";
@@ -459,7 +504,7 @@ class Table {
   template <typename F>
   void measure_gpu(const std::string& name, const std::string& size, double flops,
                    double bytes, F&& fn, int warmup = 5, int reps = 50,
-                   double min_warmup_ms = 200.0) {
+                   double min_warmup_ms = 200.0, bool batch_short = true) {
     Result r;
     r.name = name;
     r.size = size;
@@ -468,7 +513,8 @@ class Table {
     try {
       r.stats =
           time_gpu(std::forward<F>(fn), warmup, reps, min_warmup_ms, &r.sm_clock_mhz,
-                   &r.mem_clock_mhz, &r.sm_clock_min_mhz, &r.sm_clock_max_mhz);
+                   &r.mem_clock_mhz, &r.sm_clock_min_mhz, &r.sm_clock_max_mhz,
+                   &r.n_clock_samples, &r.batch_calls, batch_short);
     } catch (const std::exception& e) {
       r.implemented = false;
       r.note = short_reason(e.what());
@@ -569,6 +615,7 @@ class Table {
         if (row_sm_min > 0) {
           os << " | " << row_sm_min;
           if (row_sm_max != row_sm_min) os << "-" << row_sm_max;
+          if (r.n_clock_samples > 0) os << " (n=" << r.n_clock_samples << ")";
           if (clock_dipped) os << " (!clk)";
         } else {
           os << " | --";

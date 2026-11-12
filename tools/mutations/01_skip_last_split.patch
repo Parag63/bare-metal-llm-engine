@@ -1,0 +1,25 @@
+diff --git a/kernels/attention_decode.cu b/kernels/attention_decode.cu
+index 745a297..ee2a281 100644
+--- a/kernels/attention_decode.cu
++++ b/kernels/attention_decode.cu
+@@ -443,9 +443,10 @@ __global__ void flash_decode_reduce_kernel(const float* __restrict__ partial_o,
+   const std::int64_t h = static_cast<std::int64_t>(blockIdx.x);
+   const int d = static_cast<int>(threadIdx.x);
+   const std::int64_t base_slot = h * num_splits;
++  const int active_splits = (num_splits > 1) ? (num_splits - 1) : num_splits;
+ 
+   float m_glob = -INFINITY;
+-  for (int s = 0; s < num_splits; ++s) {
++  for (int s = 0; s < active_splits; ++s) {
+     m_glob = fmaxf(m_glob, partial_ml[(base_slot + s) * 2 + 0]);
+   }
+ 
+@@ -456,7 +457,7 @@ __global__ void flash_decode_reduce_kernel(const float* __restrict__ partial_o,
+ 
+   float l_glob = 0.0f;
+   float o_glob = 0.0f;
+-  for (int s = 0; s < num_splits; ++s) {
++  for (int s = 0; s < active_splits; ++s) {
+     const float ms = partial_ml[(base_slot + s) * 2 + 0];
+     const float ls = partial_ml[(base_slot + s) * 2 + 1];
+     if (ms > -INFINITY && ls > 0.0f) {

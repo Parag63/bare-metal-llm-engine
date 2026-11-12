@@ -42,6 +42,7 @@ int main() {
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -365,7 +366,8 @@ void bench_launch_overhead(Table& t, int reps) {
   t.measure_gpu(
       "vector_add (launch floor)", "n=1", /*flops=*/0.0, /*bytes=*/0.0,
       [&] { engine::cuda::vector_add(d1.get(), d1.get(), d1.get(), 1); },
-      /*warmup=*/20, std::max(reps, 200));
+      /*warmup=*/20, std::max(reps, 200), /*min_warmup_ms=*/200.0,
+      /*batch_short=*/false);
 }
 
 //===----------------------------------------------------------------------===//
@@ -970,8 +972,20 @@ void bench_rope(Table& t, int reps) {
 
     const auto h_q = random_host_half(q_elems, 41u);
     const auto h_k = random_host_half(k_elems, 42u);
-    const auto h_cos = random_host(tab_elems, 43u);
-    const auto h_sin = random_host(tab_elems, 44u);
+    // Use valid orthonormal rotation angles so repeated in-place batch launches
+    // preserve vector magnitudes exactly.
+    std::vector<float> h_cos(tab_elems);
+    std::vector<float> h_sin(tab_elems);
+    for (std::int64_t pos = 0; pos < c.s; ++pos) {
+      for (std::int64_t pair = 0; pair < c.d_head / 2; ++pair) {
+        const double inv_freq = std::pow(
+            10000.0, -2.0 * static_cast<double>(pair) / static_cast<double>(c.d_head));
+        const double theta = static_cast<double>(pos) * inv_freq;
+        const std::size_t idx = static_cast<std::size_t>(pos * (c.d_head / 2) + pair);
+        h_cos[idx] = static_cast<float>(std::cos(theta));
+        h_sin[idx] = static_cast<float>(std::sin(theta));
+      }
+    }
 
     const std::size_t set_bytes =
         (q_elems + k_elems) * sizeof(engine::half) + tab_elems * sizeof(float) * 2;
@@ -980,7 +994,7 @@ void bench_rope(Table& t, int reps) {
         (c.s > 1)
             ? std::min<std::size_t>(
                   32, std::max<std::size_t>(4, (kColdBytes + set_bytes - 1) / set_bytes))
-            : std::size_t{1};
+            : std::size_t{64};
 
     std::vector<DeviceBuffer<engine::half>> d_qs, d_ks;
     d_qs.reserve(num_buffers);
