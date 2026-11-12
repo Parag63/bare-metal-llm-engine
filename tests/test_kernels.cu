@@ -2112,19 +2112,25 @@ void log_error_margin(const char* label, const float* got, const float* exp,
   double max_abs = 0.0;
   double max_rel = 0.0;
   double max_budget_ratio = 0.0;
+  double exp_max = 0.0;
+  double exp_sq_sum = 0.0;
   for (std::size_t i = 0; i < n; ++i) {
     const double g = static_cast<double>(got[i]);
     const double e = static_cast<double>(exp[i]);
     const double diff = std::abs(g - e);
     const double budget = atol + rtol * std::abs(e);
     max_abs = std::max(max_abs, diff);
+    exp_max = std::max(exp_max, std::abs(e));
+    exp_sq_sum += e * e;
     if (std::abs(e) >= 1e-3) max_rel = std::max(max_rel, diff / std::abs(e));
     if (budget > 0.0) max_budget_ratio = std::max(max_budget_ratio, diff / budget);
   }
+  const double exp_rms = (n > 0) ? std::sqrt(exp_sq_sum / static_cast<double>(n)) : 0.0;
   const double headroom = (max_budget_ratio > 0.0) ? (1.0 / max_budget_ratio) : 0.0;
   std::printf(
-      "[margin] %-46s max_abs=%.3e max_rel=%.3e rtol=%.3e atol=%.3e headroom=%.1fx\n",
-      label, max_abs, max_rel, rtol, atol, headroom);
+      "[margin] %-46s exp_max=%.3e exp_rms=%.3e max_abs=%.3e max_rel=%.3e "
+      "rtol=%.3e atol=%.3e headroom=%.1fx\n",
+      label, exp_max, exp_rms, max_abs, max_rel, rtol, atol, headroom);
 }
 #define LOG_MARGIN(label, got, exp, n, rtol, atol) \
   log_error_margin((label), (got), (exp), (n), (rtol), (atol))
@@ -2473,16 +2479,51 @@ TEST(kernels, attention_adversarial_softmax) {
   }
 }
 
+static double vec_rms(const std::vector<float>& v) {
+  if (v.empty()) return 0.0;
+  double sq = 0.0;
+  for (float x : v) {
+    const double dx = static_cast<double>(x);
+    sq += dx * dx;
+  }
+  return std::sqrt(sq / static_cast<double>(v.size()));
+}
+
 TEST(kernels, attention_prefill_long_sequence) {
   REQUIRE_CUDA_DEVICE();
   // Long-sequence causal prefill correctness without golden files: preserves TinyLlama's
   // 8:1 GQA head ratio (hq=8, hkv=1, D=64) at S=2048 against the FP64 CPU oracle.
+  // V uses an O(1) nonzero mean so outputs remain O(1) instead of decaying as 1/sqrt(S),
+  // plus a final-token needle at j = S - 1 to pin the end of the causal range.
   constexpr std::int64_t S = 2048, hq = 8, hkv = 1, D = 64;
   const float scale = 1.0f / std::sqrt(static_cast<float>(D));
 
-  const auto q = to_half_vec(pseudo_normal_vec(usize(S * hq * D), 4101u, 0.5f));
-  const auto k = to_half_vec(pseudo_normal_vec(usize(hkv * S * D), 4102u, 0.5f));
-  const auto v = to_half_vec(pseudo_normal_vec(usize(hkv * S * D), 4103u, 0.5f));
+  auto q_f = pseudo_normal_vec(usize(S * hq * D), 4101u, 0.5f);
+  auto k_f = pseudo_normal_vec(usize(hkv * S * D), 4102u, 0.5f);
+  auto v_f = pseudo_normal_vec(usize(hkv * S * D), 4103u, 0.5f);
+  for (std::int64_t hk = 0; hk < hkv; ++hk) {
+    for (std::int64_t j = 0; j < S; ++j) {
+      const float frac = static_cast<float>(j) / static_cast<float>(S - 1);
+      for (std::int64_t d = 0; d < D; ++d) {
+        const float sign = ((d & 1) == 0) ? 1.0f : -1.0f;
+        v_f[usize((hk * S + j) * D + d)] += sign * (0.5f + frac);
+      }
+    }
+  }
+  // Embed a needle key at j = S - 1 visible to the last query row q_pos = S - 1.
+  // Note: Q and Out are packed [S, hq, D], whereas K and V are [hkv, kv_stride].
+  std::vector<float> v_needle(usize(D));
+  for (std::int64_t d = 0; d < D; ++d) {
+    v_needle[usize(d)] = 1.0f + 0.5f * ((d & 1) == 0 ? 1.0f : -1.0f);
+    k_f[usize((S - 1) * D + d)] = 2.0f;
+    v_f[usize((S - 1) * D + d)] = v_needle[usize(d)];
+    for (std::int64_t h = 0; h < hq; ++h) {
+      q_f[usize(((S - 1) * hq + h) * D + d)] = 1.5f;
+    }
+  }
+  const auto q = to_half_vec(q_f);
+  const auto k = to_half_vec(k_f);
+  const auto v = to_half_vec(v_f);
 
   std::vector<engine::half> cpu_out_h(usize(S * hq * D));
   std::vector<float> cpu_lse(usize(S * hq));
@@ -2490,44 +2531,44 @@ TEST(kernels, attention_prefill_long_sequence) {
                          S * D, scale, /*q_pos_offset=*/0, /*is_causal=*/true,
                          cpu_lse.data());
   const auto cpu_out_f = to_float_vec(cpu_out_h);
+  const double prefill_atol = attention_rtol() * std::max(1e-3, vec_rms(cpu_out_f));
 
   DeviceBuffer<engine::half> d_q(q), d_k(k), d_v(v), d_out(usize(S * hq * D));
   DeviceBuffer<float> d_lse(usize(S * hq));
 
-  d_out.zero();
-  d_lse.zero();
-  engine::cuda::attention_prefill(d_q.get(), d_k.get(), d_v.get(), d_out.get(), S, S, hq,
-                                  hkv, D, S * D, scale, 0, true, d_lse.get());
-  CUDA_CHECK(cudaDeviceSynchronize());
-  const auto gqa_out_f = to_float_vec(d_out.download());
-  const auto gqa_lse_f = d_lse.download();
-  LOG_MARGIN("long prefill S=2048 GQA", gqa_out_f.data(), cpu_out_f.data(),
-             gqa_out_f.size(), attention_rtol(), attention_atol(S));
-  CHECK_CASE("long prefill S=2048 GQA", gqa_out_f.data(), cpu_out_f.data(),
-             gqa_out_f.size(), attention_rtol(), attention_atol(S));
-  CHECK_CASE("long prefill S=2048 GQA lse", gqa_lse_f.data(), cpu_lse.data(),
-             gqa_lse_f.size(), lse_rtol(), lse_atol(S));
+  auto verify_prefill = [&](const char* label, bool share_gqa) {
+    d_out.zero();
+    d_lse.zero();
+    engine::cuda::detail::attention_prefill_with_mode(
+        d_q.get(), d_k.get(), d_v.get(), d_out.get(), S, S, hq, hkv, D, S * D, scale, 0,
+        true, d_lse.get(), share_gqa, nullptr);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    const auto out_f = to_float_vec(d_out.download());
+    const auto lse_f = d_lse.download();
+    LOG_MARGIN(label, out_f.data(), cpu_out_f.data(), out_f.size(), attention_rtol(),
+               prefill_atol);
+    CHECK_CASE(label, out_f.data(), cpu_out_f.data(), out_f.size(), attention_rtol(),
+               prefill_atol);
+    CHECK_CASE(std::string(label) + " lse", lse_f.data(), cpu_lse.data(), lse_f.size(),
+               lse_rtol(), lse_atol(S));
+    for (std::int64_t h = 0; h < hq; ++h) {
+      CHECK_CASE(std::string(label) + " needle h=" + std::to_string(h),
+                 out_f.data() + usize(((S - 1) * hq + h) * D), v_needle.data(), usize(D),
+                 attention_rtol(), 2.0 * std::ldexp(1.0, -10));
+    }
+  };
 
-  d_out.zero();
-  d_lse.zero();
-  engine::cuda::detail::attention_prefill_with_mode(
-      d_q.get(), d_k.get(), d_v.get(), d_out.get(), S, S, hq, hkv, D, S * D, scale, 0,
-      true, d_lse.get(), /*share_gqa_kv=*/false, nullptr);
-  CUDA_CHECK(cudaDeviceSynchronize());
-  const auto ph_out_f = to_float_vec(d_out.download());
-  const auto ph_lse_f = d_lse.download();
-  LOG_MARGIN("long prefill S=2048 per-head", ph_out_f.data(), cpu_out_f.data(),
-             ph_out_f.size(), attention_rtol(), attention_atol(S));
-  CHECK_CASE("long prefill S=2048 per-head", ph_out_f.data(), cpu_out_f.data(),
-             ph_out_f.size(), attention_rtol(), attention_atol(S));
-  CHECK_CASE("long prefill S=2048 per-head lse", ph_lse_f.data(), cpu_lse.data(),
-             ph_lse_f.size(), lse_rtol(), lse_atol(S));
+  verify_prefill("long prefill S=2048 GQA", /*share_gqa=*/true);
+  verify_prefill("long prefill S=2048 per-head", /*share_gqa=*/false);
 }
 
 TEST(kernels, attention_decode_long_sequence) {
   REQUIRE_CUDA_DEVICE();
   // Long-sequence decode correctness without golden files: verifies L=8192 and L=32768
   // with 8:1 GQA heads (hq=8, hkv=1, D=64) and strided NaN-padded KV cache against CPU.
+  // Covers (1) O(1) nonzero-mean position-varying V with output-scaled tolerance,
+  // (2) single end-of-sequence needle key at j = kv_len - 1 (last split / kv_len bound),
+  // and (3) balanced multi-split needles at j = 17 vs j = kv_len - 1 (cross-split LSE).
   constexpr std::int64_t hq = 8, hkv = 1, D = 64;
   const float scale = 1.0f / std::sqrt(static_cast<float>(D));
   const engine::half h_nan =
@@ -2536,49 +2577,120 @@ TEST(kernels, attention_decode_long_sequence) {
   for (const std::int64_t kv_len : {std::int64_t{8192}, std::int64_t{32768}}) {
     const std::int64_t max_seq = kv_len + 17;
     const std::int64_t kv_stride = max_seq * D;
-    const auto q = to_half_vec(pseudo_normal_vec(
-        usize(hq * D), static_cast<std::uint64_t>(5000 + kv_len), 0.5f));
-    const auto k_pack = to_half_vec(pseudo_normal_vec(
-        usize(hkv * kv_len * D), static_cast<std::uint64_t>(6000 + kv_len), 0.5f));
-    const auto v_pack = to_half_vec(pseudo_normal_vec(
-        usize(hkv * kv_len * D), static_cast<std::uint64_t>(7000 + kv_len), 0.5f));
 
-    std::vector<engine::half> k_cache(usize(hkv * kv_stride), h_nan);
-    std::vector<engine::half> v_cache(usize(hkv * kv_stride), h_nan);
-    for (std::int64_t hk = 0; hk < hkv; ++hk) {
-      std::copy_n(k_pack.data() + hk * kv_len * D, usize(kv_len * D),
-                  k_cache.data() + hk * kv_stride);
-      std::copy_n(v_pack.data() + hk * kv_len * D, usize(kv_len * D),
-                  v_cache.data() + hk * kv_stride);
-    }
-
-    std::vector<engine::half> cpu_out_h(usize(hq * D));
-    engine::cpu::attention(q.data(), k_cache.data(), v_cache.data(), cpu_out_h.data(), 1,
-                           kv_len, hq, hkv, D, kv_stride, scale, /*q_pos_offset=*/0,
-                           /*is_causal=*/false);
-    const auto cpu_out_f = to_float_vec(cpu_out_h);
-
-    DeviceBuffer<engine::half> d_q(q), d_k(k_cache), d_v(v_cache), d_out(usize(hq * D));
-    const std::string tag = "long decode L=" + std::to_string(kv_len);
-
-    auto run_decode_check = [&](const char* mode, int split_kv, bool share_gqa) {
-      d_out.zero();
-      engine::cuda::detail::attention_decode_with_mode(
-          d_q.get(), d_k.get(), d_v.get(), d_out.get(), kv_len, hq, hkv, D, kv_stride,
-          scale, split_kv, share_gqa, nullptr);
-      CUDA_CHECK(cudaDeviceSynchronize());
-      const auto got_f = to_float_vec(d_out.download());
-      for (float val : got_f) EXPECT_TRUE(std::isfinite(val));
-      const std::string case_name = tag + " (" + mode + ")";
-      LOG_MARGIN(case_name.c_str(), got_f.data(), cpu_out_f.data(), got_f.size(),
-                 attention_rtol(), attention_atol(kv_len));
-      CHECK_CASE(case_name, got_f.data(), cpu_out_f.data(), got_f.size(),
-                 attention_rtol(), attention_atol(kv_len));
+    auto make_padded_kv = [&](const std::vector<float>& packed_f) {
+      const auto packed_h = to_half_vec(packed_f);
+      std::vector<engine::half> cache(usize(hkv * kv_stride), h_nan);
+      for (std::int64_t hk = 0; hk < hkv; ++hk) {
+        std::copy_n(packed_h.data() + hk * kv_len * D, usize(kv_len * D),
+                    cache.data() + hk * kv_stride);
+      }
+      return cache;
     };
 
-    run_decode_check("auto GQA", 0, true);
-    run_decode_check("split=1 GQA", 1, true);
-    run_decode_check("auto per-head", 0, false);
+    auto check_all_decode_modes = [&](const std::string& tag,
+                                      const std::vector<engine::half>& q,
+                                      const std::vector<engine::half>& k_cache,
+                                      const std::vector<engine::half>& v_cache,
+                                      const std::vector<float>* needle_v) {
+      std::vector<engine::half> cpu_out_h(usize(hq * D));
+      engine::cpu::attention(q.data(), k_cache.data(), v_cache.data(), cpu_out_h.data(),
+                             1, kv_len, hq, hkv, D, kv_stride, scale, /*q_pos_offset=*/0,
+                             /*is_causal=*/false);
+      const auto cpu_out_f = to_float_vec(cpu_out_h);
+      const double out_rms = vec_rms(cpu_out_f);
+      // Tolerance scales with actual O(1) output magnitude instead of O(kv_len)*u32.
+      const double rtol = attention_rtol();
+      const double atol = rtol * std::max(1e-3, out_rms);
+
+      DeviceBuffer<engine::half> d_q(q), d_k(k_cache), d_v(v_cache), d_out(usize(hq * D));
+
+      auto run_mode = [&](const char* mode, int split_kv, bool share_gqa) {
+        d_out.zero();
+        engine::cuda::detail::attention_decode_with_mode(
+            d_q.get(), d_k.get(), d_v.get(), d_out.get(), kv_len, hq, hkv, D, kv_stride,
+            scale, split_kv, share_gqa, nullptr);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        const auto got_f = to_float_vec(d_out.download());
+        for (float val : got_f) EXPECT_TRUE(std::isfinite(val));
+        const std::string case_name = tag + " (" + mode + ")";
+        LOG_MARGIN(case_name.c_str(), got_f.data(), cpu_out_f.data(), got_f.size(), rtol,
+                   atol);
+        CHECK_CASE(case_name, got_f.data(), cpu_out_f.data(), got_f.size(), rtol, atol);
+        if (needle_v != nullptr) {
+          for (std::int64_t h = 0; h < hq; ++h) {
+            CHECK_CASE(case_name + " vs V_needle h=" + std::to_string(h),
+                       got_f.data() + usize(h * D), needle_v->data(), usize(D), rtol,
+                       rtol);
+          }
+        }
+      };
+
+      run_mode("auto GQA", 0, true);
+      run_mode("split=1 GQA", 1, true);
+      run_mode("auto per-head", 0, false);
+    };
+
+    // (1) Nonzero-mean position-varying V so softmax average stays O(1) at 32k tokens.
+    {
+      const auto q = to_half_vec(pseudo_normal_vec(
+          usize(hq * D), static_cast<std::uint64_t>(5000 + kv_len), 0.5f));
+      const auto k_f = pseudo_normal_vec(usize(hkv * kv_len * D),
+                                         static_cast<std::uint64_t>(6000 + kv_len), 0.5f);
+      auto v_f = pseudo_normal_vec(usize(hkv * kv_len * D),
+                                   static_cast<std::uint64_t>(7000 + kv_len), 0.5f);
+      for (std::int64_t j = 0; j < kv_len; ++j) {
+        const float frac = static_cast<float>(j) / static_cast<float>(kv_len - 1);
+        for (std::int64_t d = 0; d < D; ++d) {
+          const float sign = ((d & 1) == 0) ? 1.0f : -1.0f;
+          v_f[usize(j * D + d)] += sign * (0.5f + frac);
+        }
+      }
+      check_all_decode_modes("long decode nonzero-V L=" + std::to_string(kv_len), q,
+                             make_padded_kv(k_f), make_padded_kv(v_f), nullptr);
+    }
+
+    // (2) Single dominant needle at j = kv_len - 1 (last split / exact kv_len bound).
+    {
+      std::vector<float> q_f(usize(hq * D));
+      for (std::int64_t h = 0; h < hq; ++h) {
+        for (std::int64_t d = 0; d < D; ++d) {
+          q_f[usize(h * D + d)] = 1.5f + 0.05f * static_cast<float>(h);
+        }
+      }
+      auto k_f = pseudo_normal_vec(usize(hkv * kv_len * D),
+                                   static_cast<std::uint64_t>(8000 + kv_len), 0.2f);
+      auto v_f = pseudo_normal_vec(usize(hkv * kv_len * D),
+                                   static_cast<std::uint64_t>(9000 + kv_len), 0.2f);
+      for (float& x : v_f) x -= 1.0f;
+      std::vector<float> v_needle(usize(D));
+      for (std::int64_t d = 0; d < D; ++d) {
+        v_needle[usize(d)] = 1.0f + 0.5f * ((d & 1) == 0 ? 1.0f : -1.0f);
+        k_f[usize((kv_len - 1) * D + d)] = 2.0f;
+        v_f[usize((kv_len - 1) * D + d)] = v_needle[usize(d)];
+      }
+      check_all_decode_modes("long decode needle L=" + std::to_string(kv_len),
+                             to_half_vec(q_f), make_padded_kv(k_f), make_padded_kv(v_f),
+                             &v_needle);
+    }
+
+    // (3) Two competing needles across first & last splits to catch LSE merge errors.
+    {
+      const std::vector<float> q_f(usize(hq * D), 1.25f);
+      auto k_f = pseudo_normal_vec(usize(hkv * kv_len * D),
+                                   static_cast<std::uint64_t>(10000 + kv_len), 0.2f);
+      auto v_f = pseudo_normal_vec(usize(hkv * kv_len * D),
+                                   static_cast<std::uint64_t>(11000 + kv_len), 0.2f);
+      for (std::int64_t d = 0; d < D; ++d) {
+        k_f[usize(17 * D + d)] = 2.0f;
+        v_f[usize(17 * D + d)] = 1.5f;
+        k_f[usize((kv_len - 1) * D + d)] = 2.125f;
+        v_f[usize((kv_len - 1) * D + d)] = -1.5f;
+      }
+      check_all_decode_modes("long decode 2-split-LSE L=" + std::to_string(kv_len),
+                             to_half_vec(q_f), make_padded_kv(k_f), make_padded_kv(v_f),
+                             nullptr);
+    }
   }
   engine::pool_allocator(engine::Device::CUDA).reset();
 }

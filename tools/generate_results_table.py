@@ -250,25 +250,42 @@ def format_baselines_table(data: dict) -> str:
 def format_full_markdown(data: dict) -> str:
     results = data.get("results", [])
     env = data.get("environment", {})
+    static_sm = env.get("static_sm_clock_mhz") or 0
+    dip_floor = int(static_sm * 0.75) if static_sm > 0 else 0
 
     lines = [
-        "| kernel | size | median (ms) | IQR (ms) | min (ms) | spread | GFLOP/s | GB/s | % peak BW | AI (FLOP/B) |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| kernel | size | median (ms) | IQR (ms) | min (ms) | IQR % | spread | GFLOP/s | GB/s | % peak BW | AI (FLOP/B) | SM MHz (min-max) |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
 
     for r in results:
         if not r.get("implemented", True):
-            lines.append(f"| `{r.get('name')}` | {r.get('size')} | -- | -- | -- | -- | -- | -- | -- | -- |")
+            lines.append(f"| `{r.get('name')}` | {r.get('size')} | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- |")
             continue
-        iqr_s = f"{r['iqr_ms']:.3f}" if "iqr_ms" in r else "--"
+        iqr_ms = r.get("iqr_ms")
+        med_ms = r.get("median_ms", 0.0)
+        iqr_s = f"{iqr_ms:.3f}" if iqr_ms is not None else "--"
+        iqr_pct = r.get("iqr_pct")
+        if iqr_pct is None and iqr_ms is not None and med_ms > 0:
+            iqr_pct = 100.0 * iqr_ms / med_ms
+        iqr_pct_s = f"{iqr_pct:.1f}%{' (!)' if iqr_pct > 10.0 else ''}" if iqr_pct is not None else "--"
         gflops_s = f"{r.get('gflops', 0.0):.1f}" if r.get("flops", 0) > 0 else "--"
         gbps_s = f"{r.get('gbps', 0.0):.1f}" if r.get("bytes", 0) > 0 else "--"
         pct_bw_s = f"{r.get('pct_peak_bw', 0.0):.1f}%" if r.get("bytes", 0) > 0 else "--"
         ai_s = f"{r.get('arithmetic_intensity', 0.0):.2f}" if r.get("bytes", 0) > 0 else "--"
         spread_s = f"{r.get('spread_pct', 0.0):.1f}%"
+        sm_min = r.get("sm_clock_min_mhz") or r.get("sm_clock_mhz") or 0
+        sm_max = r.get("sm_clock_max_mhz") or r.get("sm_clock_mhz") or 0
+        if sm_min > 0:
+            clk_s = f"{sm_min}" if sm_max == sm_min else f"{sm_min}-{sm_max}"
+            if dip_floor > 0 and sm_min < dip_floor:
+                clk_s += " (!clk)"
+        else:
+            clk_s = "--"
         lines.append(
-            f"| `{r.get('name')}` | {r.get('size')} | {r.get('median_ms', 0.0):.3f} | "
-            f"{iqr_s} | {r.get('min_ms', 0.0):.3f} | {spread_s} | {gflops_s} | {gbps_s} | {pct_bw_s} | {ai_s} |"
+            f"| `{r.get('name')}` | {r.get('size')} | {med_ms:.3f} | "
+            f"{iqr_s} | {r.get('min_ms', 0.0):.3f} | {iqr_pct_s} | {spread_s} | "
+            f"{gflops_s} | {gbps_s} | {pct_bw_s} | {ai_s} | {clk_s} |"
         )
 
     lines.append("")

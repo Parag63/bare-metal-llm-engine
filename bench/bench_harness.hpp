@@ -52,9 +52,9 @@
 //   min     -- the closest available estimate of the kernel's intrinsic cost. Best
 //              for comparing two implementations of the same thing.
 //   median  -- what you would actually observe in a run. Best for reporting.
-//   spread  -- (max - min) / median. A quality-of-measurement figure: under ~2% the
-//              measurement is trustworthy; over ~10% something else is using the GPU,
-//              or the clocks are moving, and the numbers should not be reported.
+//   IQR %   -- (p75 - p25) / median. The primary validity criterion: robust against
+//              single OS/WDDM outliers while catching real instability (> 10%).
+//   spread  -- (max - min) / median. Reported for tail-outlier transparency.
 //
 // Printing the spread is the honest part. It is what lets you say "17.3 ms +/- 0.4%"
 // rather than "17.3 ms" and hope nobody asks.
@@ -203,61 +203,107 @@ inline Stats summarise(std::vector<double> samples) {
 /// the GPU (outside the [start, stop] event pair).
 template <typename F>
 Stats time_gpu(F&& fn, int warmup = 5, int reps = 50, double min_warmup_ms = 200.0,
-               int* out_sm_clock_mhz = nullptr, int* out_mem_clock_mhz = nullptr) {
+               int* out_sm_clock_mhz = nullptr, int* out_mem_clock_mhz = nullptr,
+               int* out_sm_clock_min_mhz = nullptr, int* out_sm_clock_max_mhz = nullptr) {
   cudaEvent_t start, stop;
   CUDA_CHECK(cudaEventCreate(&start));
   CUDA_CHECK(cudaEventCreate(&stop));
 
-  int warmups_done = 0;
-  const int batch = std::max(1, warmup);
-  const auto min_warmup = std::chrono::duration<double, std::milli>(min_warmup_ms);
-  const auto warmup_start = std::chrono::steady_clock::now();
-  while (warmups_done < warmup ||
-         (std::chrono::steady_clock::now() - warmup_start) < min_warmup) {
-    for (int b = 0; b < batch; ++b) {
-      fn();
-      ++warmups_done;
+  const int nominal_sm_mhz = engine::cuda_clock_rate_khz() / 1000;
+  const int steady_floor_mhz = (nominal_sm_mhz > 0) ? (nominal_sm_mhz * 3 / 4) : 0;
+
+  auto run_warmup = [&](double target_ms, double max_wait_ms) {
+    int warmups_done = 0;
+    int batch = std::max(1, warmup);
+    const auto min_warmup = std::chrono::duration<double, std::milli>(target_ms);
+    const auto max_warmup =
+        std::chrono::duration<double, std::milli>(std::max(target_ms, max_wait_ms));
+    const auto warmup_start = std::chrono::steady_clock::now();
+    while (true) {
+      const auto batch_start = std::chrono::steady_clock::now();
+      for (int b = 0; b < batch; ++b) {
+        fn();
+        ++warmups_done;
+      }
+      CUDA_CHECK(cudaDeviceSynchronize());
+      const auto now = std::chrono::steady_clock::now();
+      const double batch_ms =
+          std::chrono::duration<double, std::milli>(now - batch_start).count();
+      if (batch_ms < 2.0 && batch < 64) {
+        batch = std::min(64, batch * 2);
+      }
+      const auto elapsed = now - warmup_start;
+      if (warmups_done >= warmup && elapsed >= min_warmup) {
+        const int cur_sm = engine::cuda_live_sm_clock_mhz();
+        if (steady_floor_mhz == 0 || cur_sm == 0 || cur_sm >= steady_floor_mhz ||
+            elapsed >= max_warmup) {
+          break;
+        }
+      }
     }
-    CUDA_CHECK(cudaDeviceSynchronize());
-  }
-
-  std::vector<double> samples;
-  std::vector<int> sm_clocks;
-  std::vector<int> mem_clocks;
-  samples.reserve(static_cast<std::size_t>(reps));
-  const int clock_stride = std::max(1, reps / 5);
-
-  for (int i = 0; i < reps; ++i) {
-    CUDA_CHECK(cudaEventRecord(start));
-    fn();
-    CUDA_CHECK(cudaEventRecord(stop));
-    if (i == 0 || (i + 1) == reps || (i % clock_stride == 0)) {
-      const int sm = engine::cuda_live_sm_clock_mhz();
-      const int mem = engine::cuda_live_mem_clock_mhz();
-      if (sm > 0) sm_clocks.push_back(sm);
-      if (mem > 0) mem_clocks.push_back(mem);
-    }
-    // Waits for `stop` to be reached, not for the whole device to drain. On an
-    // otherwise idle GPU the two are the same; the narrower wait is still the
-    // correct thing to ask for.
-    CUDA_CHECK(cudaEventSynchronize(stop));
-
-    float ms = 0.0f;
-    CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
-    samples.push_back(static_cast<double>(ms));
-  }
-
-  auto median_int = [](std::vector<int>& v) -> int {
-    if (v.empty()) return 0;
-    std::sort(v.begin(), v.end());
-    return v[v.size() / 2];
   };
-  if (out_sm_clock_mhz) *out_sm_clock_mhz = median_int(sm_clocks);
-  if (out_mem_clock_mhz) *out_mem_clock_mhz = median_int(mem_clocks);
+
+  auto run_timed_pass = [&](int& sm_min, int& sm_med, int& sm_max, int& mem_med) {
+    std::vector<double> samples;
+    std::vector<int> sm_clocks;
+    std::vector<int> mem_clocks;
+    samples.reserve(static_cast<std::size_t>(reps));
+    const int clock_stride = std::max(1, reps / 10);
+
+    for (int i = 0; i < reps; ++i) {
+      CUDA_CHECK(cudaEventRecord(start));
+      fn();
+      CUDA_CHECK(cudaEventRecord(stop));
+      if (i == 0 || (i + 1) == reps || (i % clock_stride == 0)) {
+        const int sm = engine::cuda_live_sm_clock_mhz();
+        const int mem = engine::cuda_live_mem_clock_mhz();
+        if (sm > 0) sm_clocks.push_back(sm);
+        if (mem > 0) mem_clocks.push_back(mem);
+      }
+      // Waits for `stop` to be reached, not for the whole device to drain. On an
+      // otherwise idle GPU the two are the same; the narrower wait is still the
+      // correct thing to ask for.
+      CUDA_CHECK(cudaEventSynchronize(stop));
+
+      float ms = 0.0f;
+      CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+      samples.push_back(static_cast<double>(ms));
+    }
+
+    if (!sm_clocks.empty()) {
+      std::sort(sm_clocks.begin(), sm_clocks.end());
+      sm_min = sm_clocks.front();
+      sm_med = sm_clocks[sm_clocks.size() / 2];
+      sm_max = sm_clocks.back();
+    } else {
+      sm_min = sm_med = sm_max = 0;
+    }
+    if (!mem_clocks.empty()) {
+      std::sort(mem_clocks.begin(), mem_clocks.end());
+      mem_med = mem_clocks[mem_clocks.size() / 2];
+    } else {
+      mem_med = 0;
+    }
+    return summarise(std::move(samples));
+  };
+
+  run_warmup(min_warmup_ms, 800.0);
+  int sm_min = 0, sm_med = 0, sm_max = 0, mem_med = 0;
+  Stats st = run_timed_pass(sm_min, sm_med, sm_max, mem_med);
+  // If unlocked clocks dipped mid-pass into an idle P-state, warm up again and retry once.
+  if (steady_floor_mhz > 0 && sm_min > 0 && sm_min < steady_floor_mhz) {
+    run_warmup(std::max(min_warmup_ms, 300.0), 800.0);
+    st = run_timed_pass(sm_min, sm_med, sm_max, mem_med);
+  }
+
+  if (out_sm_clock_mhz) *out_sm_clock_mhz = sm_med;
+  if (out_mem_clock_mhz) *out_mem_clock_mhz = mem_med;
+  if (out_sm_clock_min_mhz) *out_sm_clock_min_mhz = sm_min;
+  if (out_sm_clock_max_mhz) *out_sm_clock_max_mhz = sm_max;
 
   CUDA_CHECK(cudaEventDestroy(start));
   CUDA_CHECK(cudaEventDestroy(stop));
-  return summarise(std::move(samples));
+  return st;
 }
 #endif  // ENGINE_HAS_CUDA
 
@@ -310,6 +356,8 @@ struct Result {
   double flops = 0.0;
   double bytes = 0.0;
   int sm_clock_mhz = 0;
+  int sm_clock_min_mhz = 0;
+  int sm_clock_max_mhz = 0;
   int mem_clock_mhz = 0;
   bool implemented = true;
   std::string note;
@@ -370,6 +418,8 @@ struct Result {
     oss << "      \"reps\": " << stats.reps << ",\n";
     oss << "      \"spread_pct\": " << stats.spread_pct() << ",\n";
     oss << "      \"sm_clock_mhz\": " << sm_clock_mhz << ",\n";
+    oss << "      \"sm_clock_min_mhz\": " << sm_clock_min_mhz << ",\n";
+    oss << "      \"sm_clock_max_mhz\": " << sm_clock_max_mhz << ",\n";
     oss << "      \"mem_clock_mhz\": " << mem_clock_mhz << ",\n";
     oss << "      \"flops\": " << std::fixed << flops << ",\n";
     oss << "      \"bytes\": " << std::fixed << bytes << ",\n";
@@ -416,8 +466,9 @@ class Table {
     r.flops = flops;
     r.bytes = bytes;
     try {
-      r.stats = time_gpu(std::forward<F>(fn), warmup, reps, min_warmup_ms,
-                         &r.sm_clock_mhz, &r.mem_clock_mhz);
+      r.stats =
+          time_gpu(std::forward<F>(fn), warmup, reps, min_warmup_ms, &r.sm_clock_mhz,
+                   &r.mem_clock_mhz, &r.sm_clock_min_mhz, &r.sm_clock_max_mhz);
     } catch (const std::exception& e) {
       r.implemented = false;
       r.note = short_reason(e.what());
@@ -448,27 +499,51 @@ class Table {
   }
 
   void print(std::ostream& os = std::cout) const {
+    bool show_clocks = false;
+    for (const Result& r : rows_) {
+      if (r.implemented && r.sm_clock_mhz > 0) {
+        show_clocks = true;
+        break;
+      }
+    }
+
     os << "\n### " << title_ << "\n\n";
-    os << "| kernel | size | median (ms) | IQR (ms) | min (ms) | spread | GFLOP/s | "
-          "GB/s | % peak BW | AI (FLOP/B) |\n";
-    os << "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|\n";
+    os << "| kernel | size | median (ms) | IQR (ms) | min (ms) | IQR % | spread | "
+          "GFLOP/s | GB/s | % peak BW | AI (FLOP/B)";
+    if (show_clocks) os << " | SM MHz (min-max)";
+    os << " |\n";
+    os << "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:";
+    if (show_clocks) os << "|---:";
+    os << "|\n";
 
     const double peak_bw = engine::cuda_peak_bandwidth_gbs();
+    const int nominal_sm = engine::cuda_clock_rate_khz() / 1000;
+    const int clock_dip_floor = (nominal_sm > 0) ? (nominal_sm * 3 / 4) : 0;
     bool any_noisy = false;
+    bool any_clock_dip = false;
 
     for (const Result& r : rows_) {
       os << "| `" << r.name << "` | " << r.size << " | ";
       if (!r.implemented) {
-        // Eight cells of em-dash, then the reason. A visible gap in the table is a
-        // to-do list; a missing row is something you forget you were going to do.
-        os << "-- | -- | -- | -- | -- | -- | -- | -- |";
+        // Blank dashes, then the reason. A visible gap in the table is a to-do list;
+        // a missing row is something you forget you were going to do.
+        os << "-- | -- | -- | -- | -- | -- | -- | -- | -- |";
+        if (show_clocks) os << " -- |";
         os << "  <!-- " << r.note << " -->\n";
         continue;
       }
 
+      const double iqr_pct = r.stats.iqr_pct();
       const double spread = r.stats.spread_pct();
-      const bool noisy = spread > kNoisySpreadPct;
+      const bool noisy = iqr_pct > kNoisyIqrPct;
       if (noisy) any_noisy = true;
+      const int row_sm_min =
+          (r.sm_clock_min_mhz > 0) ? r.sm_clock_min_mhz : r.sm_clock_mhz;
+      const int row_sm_max =
+          (r.sm_clock_max_mhz > 0) ? r.sm_clock_max_mhz : r.sm_clock_mhz;
+      const bool clock_dipped =
+          (clock_dip_floor > 0 && row_sm_min > 0 && row_sm_min < clock_dip_floor);
+      if (clock_dipped) any_clock_dip = true;
 
       const bool is_gemm = (r.name.find("matmul") != std::string::npos &&
                             r.name.find("rmsnorm") == std::string::npos) ||
@@ -476,11 +551,11 @@ class Table {
                             r.name.find("gemv") == std::string::npos);
 
       os << num(r.stats.median_ms) << " | " << num(r.stats.iqr_ms()) << " | "
-         << num(r.stats.min_ms) << " | " << num(spread) << "%" << (noisy ? " (!)" : "")
-         << " | ";
+         << num(r.stats.min_ms) << " | " << num(iqr_pct) << "%" << (noisy ? " (!)" : "")
+         << " | " << num(spread) << "% | ";
       os << (r.flops > 0.0 ? num(r.gflops()) : std::string("--")) << " | ";
       if (is_gemm || r.bytes <= 0.0) {
-        os << "— | — | — |\n";
+        os << "— | — | —";
       } else {
         os << num(r.gbps()) << " | ";
         if (peak_bw > 0.0) {
@@ -488,8 +563,18 @@ class Table {
         } else {
           os << "-- | ";
         }
-        os << num(r.arithmetic_intensity()) << " |\n";
+        os << num(r.arithmetic_intensity());
       }
+      if (show_clocks) {
+        if (row_sm_min > 0) {
+          os << " | " << row_sm_min;
+          if (row_sm_max != row_sm_min) os << "-" << row_sm_max;
+          if (clock_dipped) os << " (!clk)";
+        } else {
+          os << " | --";
+        }
+      }
+      os << " |\n";
     }
 
     // Provenance. A benchmark table without the hardware, the build type and the
@@ -531,11 +616,15 @@ class Table {
     if (any_noisy) {
       // Said loudly, because a noisy measurement that gets copied into a report is
       // indistinguishable from a real result once it is there.
-      os << "\n**(!) marks rows where (max - min) / median exceeded "
-         << static_cast<int>(kNoisySpreadPct)
-         << "%.** Those timings are not\nreliable enough to quote. Something else was"
-            " using the machine, the clocks\nwere moving, or the kernel is too short"
-            " to measure -- find out which and\nre-run before recording the number.\n";
+      os << "\n**(!) marks rows where IQR % = (p75 - p25) / median exceeded "
+         << static_cast<int>(kNoisyIqrPct)
+         << "%.** Those timings have high interquartile jitter (something else was"
+            " using the machine, clocks were ramping, or the kernel is shorter than"
+            " the timer quantum) -- verify or exclude before quoting.\n";
+    }
+    if (any_clock_dip) {
+      os << "\n**(!clk) marks rows whose minimum sampled SM clock dipped below 75% of"
+            " nominal.** Re-run or exclude those rows before quoting throughput.\n";
     }
   }
 
@@ -596,19 +685,25 @@ class Table {
   ClockSummary summarize_clocks() const {
     ClockSummary cs;
     cs.static_sm_mhz = engine::cuda_clock_rate_khz() / 1000;
-    std::vector<int> sm_samples;
+    std::vector<int> sm_medians;
     std::vector<int> mem_samples;
+    int global_min = 0;
+    int global_max = 0;
     for (const Result& r : rows_) {
       if (!r.implemented) continue;
-      if (r.sm_clock_mhz > 0) sm_samples.push_back(r.sm_clock_mhz);
+      if (r.sm_clock_mhz > 0) sm_medians.push_back(r.sm_clock_mhz);
+      const int r_min = (r.sm_clock_min_mhz > 0) ? r.sm_clock_min_mhz : r.sm_clock_mhz;
+      const int r_max = (r.sm_clock_max_mhz > 0) ? r.sm_clock_max_mhz : r.sm_clock_mhz;
+      if (r_min > 0) global_min = (global_min == 0) ? r_min : std::min(global_min, r_min);
+      if (r_max > 0) global_max = std::max(global_max, r_max);
       if (r.mem_clock_mhz > 0) mem_samples.push_back(r.mem_clock_mhz);
     }
-    if (!sm_samples.empty()) {
-      std::sort(sm_samples.begin(), sm_samples.end());
+    if (!sm_medians.empty()) {
+      std::sort(sm_medians.begin(), sm_medians.end());
       cs.sampled_during_run = true;
-      cs.sm_min_mhz = sm_samples.front();
-      cs.sm_max_mhz = sm_samples.back();
-      cs.sm_median_mhz = sm_samples[sm_samples.size() / 2];
+      cs.sm_min_mhz = global_min > 0 ? global_min : sm_medians.front();
+      cs.sm_max_mhz = global_max > 0 ? global_max : sm_medians.back();
+      cs.sm_median_mhz = sm_medians[sm_medians.size() / 2];
     } else {
       cs.sm_median_mhz = engine::cuda_live_sm_clock_mhz();
       cs.sm_min_mhz = cs.sm_median_mhz;
@@ -623,10 +718,10 @@ class Table {
     return cs;
   }
 
-  /// Rows above this spread are flagged rather than silently printed. 10% is the
-  /// threshold from the header note: below it the measurement is usable, above it
-  /// something other than the kernel is being measured.
-  static constexpr double kNoisySpreadPct = 10.0;
+  /// Rows above this interquartile dispersion are flagged rather than silently printed.
+  /// 10% on IQR % = (p75 - p25) / median rejects genuinely noisy/ramping runs without
+  /// letting a single WDDM outlier in max - min invalidate clean distributions.
+  static constexpr double kNoisyIqrPct = 10.0;
 
   static std::string fixed(double v, int places) {
     std::ostringstream oss;
